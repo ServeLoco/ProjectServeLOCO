@@ -226,26 +226,31 @@ describe('Admin delivery zones CRUD', () => {
     expect(pool.query).not.toHaveBeenCalled();
   });
 
-  it('rejects fast charge below normal charge (coupon fast-detection guard)', async () => {
+  it('accepts fast charge below normal charge (fast is an add-on fee, not a replacement)', async () => {
+    pool.query
+      .mockResolvedValueOnce([{ insertId: 7 }]) // insert
+      .mockResolvedValueOnce([[{ ...ZONE_ROW, id: 7, normal_charge: '30.00', fast_charge: '20.00' }]]); // re-select
+
     const res = await request(app)
       .post('/api/admin/delivery-zones')
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ boundary: SQUARE_BOUNDARY, normal_charge: 30, fast_charge: 20 });
 
-    expect(res.statusCode).toEqual(400);
-    expect(res.body.message).toContain('greater than or equal');
+    expect(res.statusCode).toEqual(201);
   });
 
-  it('rejects a PATCH that would sink fast below normal via merged values', async () => {
-    pool.query.mockResolvedValueOnce([[ZONE_ROW]]); // existing (normal 10, fast 25)
+  it('accepts a PATCH that sinks fast below normal via merged values', async () => {
+    pool.query
+      .mockResolvedValueOnce([[ZONE_ROW]]) // existing (normal 10, fast 25)
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // update
+      .mockResolvedValueOnce([[{ ...ZONE_ROW, normal_charge: '30.00' }]]); // re-select
 
     const res = await request(app)
       .patch('/api/admin/delivery-zones/1')
       .set('Authorization', `Bearer ${adminToken}`)
-      .send({ normal_charge: 30 }); // fast stays 25 < 30
+      .send({ normal_charge: 30 }); // fast stays 25 < 30 — now allowed
 
-    expect(res.statusCode).toEqual(400);
-    expect(res.body.message).toContain('greater than or equal');
+    expect(res.statusCode).toEqual(200);
   });
 
   it('rejects a zone being set as its own parent', async () => {

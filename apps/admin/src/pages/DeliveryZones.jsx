@@ -58,6 +58,8 @@ const getDescendantIds = (zoneId, allZones) => {
 const MAX_ETA_MINUTES = 24 * 60 - 1;
 const MAX_NAME_LENGTH = 255;
 
+// Fast ₹ is an add-on fee (charged on top of Normal ₹ when the customer picks
+// Fast, not a replacement for it) — no ordering constraint between the two.
 // Mirrors deliveryZonesController.js's validateZoneValues so the admin sees
 // mistakes immediately instead of after a round trip to the API.
 const validateZoneFormClientSide = (form) => {
@@ -84,9 +86,6 @@ const validateZoneFormClientSide = (form) => {
     }
   }
 
-  if (fast < normal) {
-    return 'Fast delivery charge must be greater than or equal to the normal delivery charge';
-  }
   return null;
 };
 
@@ -318,7 +317,7 @@ export default function DeliveryZones() {
       </td>
       <td>
         <input type="number" step="1" min="0" className="form-input zone-input" value={form.fast_charge}
-          onChange={(e) => onChange('fast_charge', e.target.value)} placeholder="40" />
+          onChange={(e) => onChange('fast_charge', e.target.value)} placeholder="15" />
       </td>
       <td>
         <input type="number" step="5" min="1" className="form-input zone-input" value={form.normal_eta_minutes}
@@ -424,8 +423,9 @@ export default function DeliveryZones() {
         <p className="zone-card-hint">
           When a customer&apos;s pin falls inside more than one zone, the most nested zone (the one
           with a parent among the matches) wins. If zones with no parent/child relationship
-          overlap, the smaller-area one wins. Fast charge must be ≥ normal charge. Night
-          surcharge uses the global night window from Settings with this zone&apos;s amount.
+          overlap, the smaller-area one wins. Fast ₹ is an add-on fee charged on top of Normal ₹
+          when the customer picks Fast delivery. Night surcharge uses the global night window
+          from Settings with this zone&apos;s amount.
         </p>
         <div className="zone-table-wrap">
           <table className="zone-table">

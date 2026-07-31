@@ -112,12 +112,6 @@ const validateZoneValues = ({ boundary, name, normalCharge, fastCharge, normalEt
       return `${label} must be a whole number between 1 and ${MAX_ETA_MINUTES} minutes`;
     }
   }
-  // Coupon engine detects Fast via deliveryCharge > standardDeliveryCharge; a
-  // zone with fast cheaper than normal would let free-delivery coupons waive
-  // the fast fee. Enforce here instead of touching coupons.js.
-  if (fastCharge < normalCharge) {
-    return 'Fast delivery charge must be greater than or equal to the normal delivery charge';
-  }
   return null;
 };
 
