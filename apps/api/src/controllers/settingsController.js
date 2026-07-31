@@ -186,7 +186,9 @@ const updateSettings = async (req, res) => {
     'standard_delivery_minutes', 'fast_delivery_minutes',
     'minimum_version',
     'current_version',
-    // DEPRECATED (no longer used): free_delivery_above, shop_latitude, shop_longitude,
+    // Radius-zone pricing: master switch + center pin (revived for zone mode)
+    'radius_pricing_active', 'shop_latitude', 'shop_longitude',
+    // DEPRECATED (no longer used): free_delivery_above,
     // delivery_radius_km, delivery_cost_per_km
   ];
 
@@ -251,6 +253,22 @@ const updateSettings = async (req, res) => {
     }
   }
 
+  // Turning zone pricing ON requires at least one active zone — each zone is
+  // now its own self-contained polygon, so there's no shared center pin to
+  // require. This guard is load-bearing, not cosmetic: the resolver fails
+  // CLOSED once the flag is on, so enabling it with zero zones would refuse
+  // delivery to every customer instead of degrading to flat pricing.
+  if (hasValue(body.radius_pricing_active)) {
+    const wantsRadiusPricing = body.radius_pricing_active === true || body.radius_pricing_active === 'true'
+      || body.radius_pricing_active === 1 || body.radius_pricing_active === '1';
+    if (wantsRadiusPricing) {
+      const [zoneRows] = await pool.query('SELECT COUNT(*) AS count FROM delivery_zones WHERE active = 1');
+      if (Number(zoneRows[0]?.count) === 0) {
+        return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Add at least one active delivery zone before enabling radius pricing' });
+      }
+    }
+  }
+
   // App version strings — column is VARCHAR(20); reject anything that
   // wouldn't fit or isn't a plausible version (digits/dots, e.g. "1.2.3").
   for (const field of ['minimum_version', 'current_version']) {
@@ -295,15 +313,17 @@ const updateSettings = async (req, res) => {
     if (body[field] !== undefined) {
       updates.push(`${field} = ?`);
       let val = body[field];
-      if (['shop_open', 'delivery_available', 'free_delivery_offer_active', 'free_delivery_above_minimum_active', 'rain_charge_enabled'].includes(field)) {
+      if (['shop_open', 'delivery_available', 'free_delivery_offer_active', 'free_delivery_above_minimum_active', 'rain_charge_enabled', 'radius_pricing_active'].includes(field)) {
         val = (val === true || val === 'true' || val === 1 || val === '1') ? 1 : 0;
       } else if ([
         'minimum_order_amount',
         'delivery_charge',
         'night_charge',
         'rain_charge',
-        'below_threshold_delivery_charge'
-        // DEPRECATED: free_delivery_above, shop_latitude, shop_longitude,
+        'below_threshold_delivery_charge',
+        'shop_latitude',
+        'shop_longitude'
+        // DEPRECATED: free_delivery_above,
         // delivery_radius_km, delivery_cost_per_km — no longer stored
       ].includes(field)) {
         val = (val === null || val === '') ? null : Number(val);

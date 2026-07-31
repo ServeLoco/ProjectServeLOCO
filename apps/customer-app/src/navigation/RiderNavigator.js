@@ -2,6 +2,7 @@ import React from 'react';
 import { View, StyleSheet } from 'react-native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, shadows, radius } from '../theme';
 import AppIcon from '../components/AppIcon';
 import { useRiderLocationPermission } from '../hooks/useRiderLocationPermission';
@@ -26,6 +27,8 @@ function TabIcon({ name, focused, size, color }) {
 }
 
 function RiderTabs() {
+  const insets = useSafeAreaInsets();
+
   return (
     <Tab.Navigator
       screenOptions={{
@@ -36,8 +39,8 @@ function RiderTabs() {
         tabBarStyle: {
           backgroundColor: colors.navBg,
           borderTopWidth: 0,
-          height: 68,
-          paddingBottom: 10,
+          height: 68 + insets.bottom,
+          paddingBottom: 10 + insets.bottom,
           paddingTop: 8,
           ...shadows.navBar,
         },

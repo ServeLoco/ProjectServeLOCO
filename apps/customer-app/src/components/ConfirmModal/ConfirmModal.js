@@ -23,6 +23,9 @@ import { colors, typography, spacing, radius, shadows } from '../../theme';
  *   onCancel        - cancel/dismiss handler
  *   confirmVariant  - 'danger' | 'primary' (default: 'primary')
  *   confirmLoading  - disables confirm button when true
+ *   dismissible     - backdrop tap / Android back close the modal (default: true).
+ *                      Set false for modals that must be resolved via a button
+ *                      (e.g. a mandatory permission gate).
  */
 function ConfirmModal({
   visible = false,
@@ -34,9 +37,11 @@ function ConfirmModal({
   onCancel,
   confirmVariant = 'primary',
   confirmLoading = false,
+  dismissible = true,
   children,
 }) {
   const confirmBg = confirmVariant === 'danger' ? colors.error : colors.primary;
+  const requestClose = dismissible ? onCancel : () => {};
 
   return (
     <Modal
@@ -44,9 +49,9 @@ function ConfirmModal({
       transparent
       animationType="fade"
       statusBarTranslucent
-      onRequestClose={onCancel}
+      onRequestClose={requestClose}
     >
-      <TouchableWithoutFeedback onPress={onCancel}>
+      <TouchableWithoutFeedback onPress={dismissible ? onCancel : undefined}>
         <View style={styles.backdrop}>
           <TouchableWithoutFeedback>
             <View style={styles.dialog}>

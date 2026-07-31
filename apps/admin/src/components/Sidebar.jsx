@@ -8,6 +8,7 @@ const NAV_GROUPS = [
     items: [
       { path: '/', label: 'Dashboard', icon: '⚡' },
       { path: '/orders', label: 'Orders', icon: '📦' },
+      { path: '/delivery-zones', label: 'Delivery Zones', icon: '📍' },
       { path: '/riders', label: 'Riders', icon: '🛵' },
       { path: '/mobile-admins', label: 'Mobile Admins', icon: '📲' },
     ],

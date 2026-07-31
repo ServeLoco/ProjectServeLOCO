@@ -126,6 +126,7 @@ describe('Shop-owner API - /api/shop', () => {
         { id: 20, order_number: 'ORD-20', status: 'Delivered', note: null, created_at: '2026-07-10 09:00:00', delivery_type: 'standard' },
         { id: 21, order_number: 'ORD-21', status: 'Cancelled', note: null, created_at: '2026-07-09 12:00:00', delivery_type: 'fast' },
       ]])
+      .mockResolvedValueOnce([[{ total: 0 }]]) // payout SUM query (no shop_line_total set on these fixtures)
       .mockResolvedValueOnce([[
         { id: 201, order_id: 20, product_name: 'Burger', quantity: 1, variant_label: null, shop_confirmed_at: '2026-07-10 09:01:00', shop_rejected_at: null },
         { id: 211, order_id: 21, product_name: 'Fries', quantity: 2, variant_label: null, shop_confirmed_at: null, shop_rejected_at: '2026-07-09 12:01:00' },
@@ -148,10 +149,42 @@ describe('Shop-owner API - /api/shop', () => {
     expect(delivered).not.toHaveProperty('expectedMinutes');
   });
 
+  it('GET /orders/history payableTotal only counts Delivered orders, summed independently of the 100-row page', async () => {
+    pool.query
+      .mockResolvedValueOnce([SHOP_ROW]) // requireShopOwner lookup
+      .mockResolvedValueOnce([[
+        { id: 30, order_number: 'ORD-30', status: 'Delivered', note: null, created_at: '2026-07-10 09:00:00', delivery_type: 'standard' },
+        { id: 31, order_number: 'ORD-31', status: 'Preparing', note: null, created_at: '2026-07-10 10:00:00', delivery_type: 'standard' },
+      ]])
+      // Payout SUM query is independent of the (possibly truncated) page above —
+      // simulate a shop with far more than 100 Delivered orders that day.
+      .mockResolvedValueOnce([[{ total: 12345.678 }]])
+      .mockResolvedValueOnce([[
+        { id: 301, order_id: 30, product_name: 'Burger', quantity: 1, variant_label: null, shop_line_total: 58.01, shop_confirmed_at: '2026-07-10 09:01:00', shop_rejected_at: null },
+        { id: 311, order_id: 31, product_name: 'Fries', quantity: 1, variant_label: null, shop_line_total: 500, shop_confirmed_at: '2026-07-10 10:01:00', shop_rejected_at: null },
+      ]]);
+
+    const res = await request(app)
+      .get('/api/shop/orders/history')
+      .set('Authorization', `Bearer ${customerToken(7)}`);
+
+    expect(res.statusCode).toEqual(200);
+    // Reflects the SUM query result, not a fold over the 2 fetched orders
+    // (which would wrongly include the still-Preparing order's ₹500 and/or
+    // wrongly cap at what's visible on the page).
+    expect(res.body.payableTotal).toEqual(12345.68);
+    expect(res.body.payable_total).toEqual(12345.68);
+    // Per-order shopTotal is still shown (and rounded) even though it's not
+    // in the payout yet.
+    const preparing = res.body.orders.find(o => o.id === 31);
+    expect(preparing.shopTotal).toEqual(500);
+  });
+
   it('GET /orders/history returns empty array when the shop has no orders', async () => {
     pool.query
       .mockResolvedValueOnce([SHOP_ROW]) // requireShopOwner lookup
-      .mockResolvedValueOnce([[]]);       // orders query -> none
+      .mockResolvedValueOnce([[]])        // orders query -> none
+      .mockResolvedValueOnce([[{ total: 0 }]]); // payout SUM query
 
     const res = await request(app)
       .get('/api/shop/orders/history')
@@ -159,6 +192,34 @@ describe('Shop-owner API - /api/shop', () => {
 
     expect(res.statusCode).toEqual(200);
     expect(res.body.orders).toEqual([]);
+  });
+
+  it('GET /orders/history -> 400 on a malformed date instead of silently returning an empty day', async () => {
+    pool.query.mockResolvedValueOnce([SHOP_ROW]); // requireShopOwner lookup
+
+    const res = await request(app)
+      .get('/api/shop/orders/history?date=30-07-2026')
+      .set('Authorization', `Bearer ${customerToken(7)}`);
+
+    expect(res.statusCode).toEqual(400);
+    expect(res.body.code).toEqual('VALIDATION_ERROR');
+  });
+
+  it('GET /orders/history payableTotal is scoped to the same created_at day as the orders list', async () => {
+    // Payout and orders both key off created_at now, so an empty orders day
+    // must also show a zero payout — no cross-day (delivered_at) leakage.
+    pool.query
+      .mockResolvedValueOnce([SHOP_ROW]) // requireShopOwner lookup
+      .mockResolvedValueOnce([[]])        // orders query (created_at = today) -> none
+      .mockResolvedValueOnce([[{ total: 0 }]]); // payout SUM query (created_at = today)
+
+    const res = await request(app)
+      .get('/api/shop/orders/history?date=2026-07-30')
+      .set('Authorization', `Bearer ${customerToken(7)}`);
+
+    expect(res.statusCode).toEqual(200);
+    expect(res.body.orders).toEqual([]);
+    expect(res.body.payableTotal).toEqual(0);
   });
 
   it('confirmMyOrder is idempotent - second call still 200, no error', async () => {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { CustomersApi, ProductsApi, OrdersApi } from '../api';
+import DeliveryPinPicker from './DeliveryPinPicker';
 import './CreateOrderModal.css';
 
 const formatMoney = (v) => `₹${(Number(v) || 0).toFixed(0)}`;
@@ -25,6 +26,13 @@ export default function CreateOrderModal({ onClose, onCreated }) {
 
   // ── Delivery / payment ───────────────────────────────────────────────
   const [address, setAddress] = useState('');
+  // Optional pin — same latitude/longitude the customer app's checkout
+  // sends, so an admin-placed order gets the same zone-based delivery
+  // pricing and out-of-range/COD checks instead of always pricing off no
+  // location at all (calculateForCustomer/createForCustomer both accept it,
+  // see adminCalculateOrder/adminCreateOrder — they delegate straight to the
+  // customer cart/order controllers).
+  const [deliveryCoords, setDeliveryCoords] = useState(null);
   const [paymentMethod, setPaymentMethod] = useState('Cash');
   const [deliveryType, setDeliveryType] = useState('standard');
   const [couponCode, setCouponCode] = useState('');
@@ -95,6 +103,8 @@ export default function CreateOrderModal({ onClose, onCreated }) {
           customer_id: customer.id,
           delivery_type: deliveryType,
           coupon_code: couponCode.trim() || undefined,
+          latitude: deliveryCoords?.latitude,
+          longitude: deliveryCoords?.longitude,
           items: cartItems.map((it) => ({
             productId: it.productId,
             variantId: it.variantId || undefined,
@@ -111,11 +121,20 @@ export default function CreateOrderModal({ onClose, onCreated }) {
       }
     }, 400);
     return () => clearTimeout(calcTimerRef.current);
-  }, [customer, cartItems, deliveryType, couponCode]);
+  }, [customer, cartItems, deliveryType, couponCode, deliveryCoords]);
+
+  // If the zone stops allowing COD (e.g. address/items changed), fall back
+  // to UPI instead of leaving Cash selected but disabled.
+  useEffect(() => {
+    if (bill?.codAllowed === false && paymentMethod === 'Cash') {
+      setPaymentMethod('UPI');
+    }
+  }, [bill, paymentMethod]);
 
   const pickCustomer = (c) => {
     setCustomer(c);
     setAddress(c.address || '');
+    setDeliveryCoords(null);
     setCustomerQuery('');
     setCustomerResults([]);
   };
@@ -153,7 +172,13 @@ export default function CreateOrderModal({ onClose, onCreated }) {
 
   const localSubtotal = cartItems.reduce((sum, it) => sum + it.unitPrice * it.quantity, 0);
 
-  const canSubmit = customer && cartItems.length > 0 && address.trim() && !submitting && !calculating;
+  // A no-delivery exclusion zone reports outOfRange: false but still blocks
+  // the order, so both flags need checking (mirrors CheckoutScreen.js).
+  const deliveryBlocked = Boolean(bill?.outOfRange) || Boolean(bill?.excluded);
+  const codUnavailable = bill?.codAllowed === false;
+
+  const canSubmit = customer && cartItems.length > 0 && address.trim() && !submitting && !calculating
+    && !deliveryBlocked && !(paymentMethod === 'Cash' && codUnavailable);
 
   const handleSubmit = async () => {
     if (!canSubmit) return;
@@ -167,6 +192,8 @@ export default function CreateOrderModal({ onClose, onCreated }) {
         delivery_type: deliveryType,
         coupon_code: couponCode.trim() || undefined,
         note: note.trim() || undefined,
+        latitude: deliveryCoords?.latitude,
+        longitude: deliveryCoords?.longitude,
         items: cartItems.map((it) => ({
           productId: it.productId,
           variantId: it.variantId || undefined,
@@ -316,6 +343,10 @@ export default function CreateOrderModal({ onClose, onCreated }) {
               disabled={!customer}
             />
 
+            {customer && (
+              <DeliveryPinPicker value={deliveryCoords} onChange={setDeliveryCoords} />
+            )}
+
             {bill?.fastDeliveryEnabled && (
               <label className="com-checkbox-row">
                 <input
@@ -328,8 +359,13 @@ export default function CreateOrderModal({ onClose, onCreated }) {
             )}
 
             <div className="com-radio-group">
-              <label className={`com-radio-pill ${paymentMethod === 'Cash' ? 'active' : ''}`}>
-                <input type="radio" checked={paymentMethod === 'Cash'} onChange={() => setPaymentMethod('Cash')} />
+              <label className={`com-radio-pill ${paymentMethod === 'Cash' ? 'active' : ''} ${codUnavailable ? 'disabled' : ''}`}>
+                <input
+                  type="radio"
+                  checked={paymentMethod === 'Cash'}
+                  disabled={codUnavailable}
+                  onChange={() => setPaymentMethod('Cash')}
+                />
                 Cash on Delivery
               </label>
               <label className={`com-radio-pill ${paymentMethod === 'UPI' ? 'active' : ''}`}>
@@ -337,6 +373,9 @@ export default function CreateOrderModal({ onClose, onCreated }) {
                 UPI
               </label>
             </div>
+            {codUnavailable && (
+              <div className="com-error-text">Cash on Delivery is not available at this location. Use UPI.</div>
+            )}
 
             <label className="com-label">Coupon code (optional)</label>
             <input
@@ -382,6 +421,11 @@ export default function CreateOrderModal({ onClose, onCreated }) {
                   <div className="com-bill-row com-bill-discount"><span>Discount</span><span>-{formatMoney(bill.discount)}</span></div>
                 )}
                 {bill.couponError && <div className="com-error-text">{bill.couponError}</div>}
+                {deliveryBlocked && (
+                  <div className="com-error-text">
+                    {bill.exclusionMessage || bill.deliveryMessage || 'Delivery is not available at this location. Choose a closer address.'}
+                  </div>
+                )}
                 <div className="com-bill-row com-bill-total"><span>Grand Total</span><span>{formatMoney(bill.grandTotal)}</span></div>
               </div>
             ) : null}

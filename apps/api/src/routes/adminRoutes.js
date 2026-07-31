@@ -1,21 +1,28 @@
 const express = require('express');
 const multer = require('multer');
-const { login, me, revokeSessions, getAdminCustomers, getAdminCustomerById, setBlockStatus, setTrustStatus, getDashboard, getSalesReport, getTopProductsReport, getCustomersReport, getShopsReport, getAdminOrders, getAdminOrderById, updateOrderStatus, updateOrderPayment, updateOrderRemark, extendAutoAccept, adminCalculateOrder, adminCreateOrder, getAdminNotifications, createAdminNotification, getAdminNotificationById, deleteAdminNotification, getInbox, getInboxUnreadCount, markInboxRead, markAllInboxRead, dismissInbox } = require('../controllers/adminController');
+const { login, me, revokeSessions, getAdminCustomers, getAdminCustomerById, setBlockStatus, setTrustStatus, getDashboard, getSalesReport, getTopProductsReport, getCustomersReport, getShopsReport, getProfitSummary, getProfitOrders, getAdminOrders, getAdminOrderById, updateOrderStatus, updateOrderPayment, updateOrderRemark, extendAutoAccept, adminCalculateOrder, adminCreateOrder, getAdminNotifications, createAdminNotification, getAdminNotificationById, deleteAdminNotification, getInbox, getInboxUnreadCount, markInboxRead, markAllInboxRead, dismissInbox } = require('../controllers/adminController');
 const { createOrderSchema, expressValidatorChecks: orderExpressValidatorChecks, validateExpress: validateOrderExpress } = require('./orderRoutes');
 const { getSettings, updateSettings, getActiveOffer, createOffer, updateOffer, getAdminOffers, deleteOffer, getOfferProducts, addOfferProduct, removeOfferProduct, reorderOfferProducts } = require('../controllers/settingsController');
+const { listZones, createZone, updateZone, deleteZone } = require('../controllers/deliveryZonesController');
 const { createCategory, deleteCategory, getAdminCategories, updateCategory } = require('../controllers/categoryController');
 const { getAdminStoreModes, createStoreMode, updateStoreMode } = require('../controllers/storeModeController');
-const { createProduct, updateProduct, getAdminProducts, getAdminProductById, deleteProduct, updateProductAvailability, updateProductImage, bulkUpdateProducts, bulkDeleteProducts } = require('../controllers/productController');
+const { createProduct, updateProduct, getAdminProducts, getAdminProductById, deleteProduct, updateProductAvailability, updateVariantAvailability, updateProductImage, bulkUpdateProducts, bulkDeleteProducts, updateProductPricing } = require('../controllers/productController');
 const { createCombo, updateCombo, getAdminCombos, getAdminComboById, deleteCombo, updateComboAvailability } = require('../controllers/comboController');
 const {
   listShops,
   createShop,
   updateShop,
+  updateShopSchedule,
   deleteShop,
   listShopOrders,
   adminConfirmShopOrder,
   adminRejectShopOrder,
   adminReadyShopOrder,
+  listShopGroups,
+  createShopGroup,
+  updateShopGroup,
+  deleteShopGroup,
+  assignShopProductGroup,
 } = require('../controllers/shopAdminController');
 const {
   listRiders,
@@ -189,6 +196,7 @@ const productSchema = (req) => {
   const data = {
     name: normalizeField(req, 'name', 'name'),
     price: normalizeField(req, 'price', 'price'),
+    shop_price: normalizeField(req, 'shopPrice', 'shop_price'),
     category_id: normalizeField(req, 'categoryId', 'category_id'),
     unit: normalizeField(req, 'unit', 'unit'),
     description: normalizeField(req, 'description', 'description'),
@@ -210,6 +218,9 @@ const productSchema = (req) => {
       id: v.id || null,
       label: v.label,
       price: v.price,
+      // undefined (key absent) preserves the stored value on update; null
+      // clears it explicitly — see syncProductVariants's sendsShopPrice guard.
+      shop_price: v.shopPrice !== undefined ? v.shopPrice : v.shop_price,
       original_price: v.originalPrice ?? v.original_price ?? null,
       available: v.available !== undefined ? Boolean(v.available) : true,
       is_default: Boolean(v.isDefault ?? v.is_default),
@@ -240,7 +251,20 @@ const productSchema = (req) => {
       data.original_price = Number(data.original_price);
     }
   }
-  
+  // shop_price: what we owe the shop for this item. Optional, no default
+  // (NULL = "not configured yet"). Deliberately NOT compared against price —
+  // margin can be negative if the admin is temporarily eating a loss, and
+  // that's a business call, not a validation error.
+  if (data.shop_price !== undefined && data.shop_price !== null && data.shop_price !== '') {
+    if (!isNumericAmount(data.shop_price)) {
+      errors.shop_price = 'Shop price must be a valid amount';
+    } else {
+      data.shop_price = Number(data.shop_price);
+    }
+  } else if (data.shop_price === '') {
+    data.shop_price = null;
+  }
+
   if (data.available !== undefined && !isBoolean(data.available)) errors.available = 'Available must be boolean';
   if (data.is_combo !== undefined && !isBoolean(data.is_combo)) errors.is_combo = 'is_combo must be boolean';
   if (data.featured !== undefined && !isBoolean(data.featured)) errors.featured = 'featured must be boolean';
@@ -294,6 +318,15 @@ const productSchema = (req) => {
         errors.variants = `Variant ${i + 1}: valid price is required`;
       } else {
         v.price = Number(v.price);
+      }
+      if (v.shop_price !== null && v.shop_price !== undefined && v.shop_price !== '') {
+        if (!isNumericAmount(v.shop_price)) {
+          errors.variants = `Variant ${i + 1}: shop price must be a valid amount`;
+        } else {
+          v.shop_price = Number(v.shop_price);
+        }
+      } else if (v.shop_price === '') {
+        v.shop_price = null;
       }
       if (v.original_price !== null && v.original_price !== undefined && v.original_price !== '') {
         if (!isNumericAmount(v.original_price)) {
@@ -423,6 +456,19 @@ const productAvailabilitySchema = (req) => {
   if (!isBoolean(finalAvailable)) errors.available = 'Availability status must be a boolean';
 
   return { errors, data: { id: req.params.id, available: finalAvailable } };
+};
+
+const variantAvailabilitySchema = (req) => {
+  const available = normalizeField(req, 'available', 'available');
+  const isAvailable = normalizeField(req, 'isAvailable', 'is_available');
+  const finalAvailable = available !== undefined ? available : isAvailable;
+  const errors = {};
+
+  if (!isId(req.params.id)) errors.id = 'Valid Product ID is required in URL';
+  if (!isId(req.params.variantId)) errors.variantId = 'Valid Variant ID is required in URL';
+  if (!isBoolean(finalAvailable)) errors.available = 'Availability status must be a boolean';
+
+  return { errors, data: { id: req.params.id, variantId: req.params.variantId, available: finalAvailable } };
 };
 
 const comboAvailabilitySchema = (req) => {
@@ -699,12 +745,19 @@ router.patch('/store-modes/:id', requireAdmin, asyncHandler(updateStoreMode));
 router.get('/shops', requireAdmin, asyncHandler(listShops));
 router.post('/shops', requireAdmin, asyncHandler(createShop));
 router.patch('/shops/:id', requireAdmin, asyncHandler(updateShop));
+router.patch('/shops/:id/schedule', requireAdmin, asyncHandler(updateShopSchedule));
 router.delete('/shops/:id', requireAdmin, asyncHandler(deleteShop));
 // Per-shop order actions (same lifecycle as shop-owner Confirm / Ready / Cancel).
 router.get('/shops/:id/orders', requireAdmin, asyncHandler(listShopOrders));
 router.patch('/shops/:id/orders/:orderId/confirm', requireAdmin, asyncHandler(adminConfirmShopOrder));
 router.patch('/shops/:id/orders/:orderId/reject', requireAdmin, asyncHandler(adminRejectShopOrder));
 router.patch('/shops/:id/orders/:orderId/ready', requireAdmin, asyncHandler(adminReadyShopOrder));
+// Per-shop product groups (same as shop-owner's own group management).
+router.get('/shops/:id/groups', requireAdmin, asyncHandler(listShopGroups));
+router.post('/shops/:id/groups', requireAdmin, asyncHandler(createShopGroup));
+router.patch('/shops/:id/groups/:groupId', requireAdmin, asyncHandler(updateShopGroup));
+router.delete('/shops/:id/groups/:groupId', requireAdmin, asyncHandler(deleteShopGroup));
+router.patch('/shops/:id/products/:productId/group', requireAdmin, asyncHandler(assignShopProductGroup));
 
 router.get('/riders', requireAdmin, asyncHandler(listRiders));
 router.post('/riders', requireAdmin, asyncHandler(createRider));
@@ -734,11 +787,16 @@ router.post('/products', requireAdmin, validate(productSchema), asyncHandler(cre
 // matching the literal string "bulk" as a product ID parameter.
 router.patch('/products/bulk', requireAdmin, asyncHandler(bulkUpdateProducts));
 router.delete('/products/bulk', requireAdmin, asyncHandler(bulkDeleteProducts));
+// Grid-style price editing (App ₹ / Shop ₹ columns), one row per product OR
+// variant. Must be registered before '/products/:id' so 'pricing' isn't
+// swallowed as an :id param.
+router.patch('/products/pricing', requireAdmin, asyncHandler(updateProductPricing));
 
 router.get('/products/:id', requireAdmin, asyncHandler(getAdminProductById));
 router.put('/products/:id', requireAdmin, validate(productSchema), asyncHandler(updateProduct));
 router.delete('/products/:id', requireAdmin, asyncHandler(deleteProduct));
 router.patch('/products/:id/availability', requireAdmin, validate(productAvailabilitySchema), asyncHandler(updateProductAvailability));
+router.patch('/products/:id/variants/:variantId/availability', requireAdmin, validate(variantAvailabilitySchema), asyncHandler(updateVariantAvailability));
 router.patch('/products/:id/image', requireAdmin, validate(productImageSchema), asyncHandler(updateProductImage));
 // Bulk import: ?preview=true for dry-run, no query param for commit
 router.post('/products/bulk-import', requireAdmin, bulkUpload, asyncHandler(async (req, res) => {
@@ -775,6 +833,8 @@ router.get('/reports/sales', requireAdmin, asyncHandler(getSalesReport));
 router.get('/reports/customers', requireAdmin, asyncHandler(getCustomersReport));
 router.get('/reports/shops', requireAdmin, asyncHandler(getShopsReport));
 router.get('/reports/top-products', requireAdmin, asyncHandler(getTopProductsReport));
+router.get('/reports/profit/summary', requireAdmin, asyncHandler(getProfitSummary));
+router.get('/reports/profit/orders', requireAdmin, asyncHandler(getProfitOrders));
 
 router.get('/orders', requireAdmin, asyncHandler(getAdminOrders));
 router.get('/orders/:id', requireAdmin, asyncHandler(getAdminOrderById));
@@ -792,6 +852,12 @@ router.post('/orders', requireAdmin, ...orderExpressValidatorChecks, validateOrd
 // Settings
 router.get('/settings', requireAdmin, asyncHandler(getSettings));
 router.patch('/settings', requireAdmin, asyncHandler(updateSettings));
+
+// Delivery zones — radius-pricing bands around the settings shop pin.
+router.get('/delivery-zones', requireAdmin, asyncHandler(listZones));
+router.post('/delivery-zones', requireAdmin, asyncHandler(createZone));
+router.patch('/delivery-zones/:id', requireAdmin, asyncHandler(updateZone));
+router.delete('/delivery-zones/:id', requireAdmin, asyncHandler(deleteZone));
 router.get('/offers/active', requireAdmin, asyncHandler(getActiveOffer));
 router.get('/offers', requireAdmin, asyncHandler(getAdminOffers));
 router.post('/offers', requireAdmin, validate(offerSchema), asyncHandler(createOffer));

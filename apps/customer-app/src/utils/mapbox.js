@@ -12,6 +12,7 @@ const token =
     : '';
 
 export const mapboxAvailable = Boolean(token && String(token).trim());
+export const mapboxAccessToken = mapboxAvailable ? String(token).trim() : '';
 
 if (mapboxAvailable) {
   Mapbox.setAccessToken(String(token).trim());

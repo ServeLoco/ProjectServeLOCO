@@ -17,7 +17,17 @@ import {
 } from '../../utils/orderAlarmNotifications';
 import AppIcon from '../../components/AppIcon';
 import ShopToggle from '../../components/shop/ShopToggle';
+import TimePickerModal from '../../components/shop/TimePickerModal';
 import NewOrderPopup from './NewOrderPopup';
+
+function formatDisplayTime(hhmm) {
+  if (!hhmm) return '--:--';
+  const [h, m] = String(hhmm).split(':').map(Number);
+  const meridiem = h >= 12 ? 'PM' : 'AM';
+  let h12 = h % 12;
+  if (h12 === 0) h12 = 12;
+  return `${h12}:${String(m).padStart(2, '0')} ${meridiem}`;
+}
 
 function formatElapsed(startTime, nowMs) {
   const start = new Date(startTime).getTime();
@@ -46,6 +56,13 @@ export default function ShopDashboardScreen() {
   // with the pre-toggle DB value — this ref stops it from clobbering the
   // toggle while one is in flight (fixes "toggle needs a second press").
   const toggleInFlightRef = useRef(false);
+
+  // ── Auto open/close schedule ─────────────────────────────────────────
+  const [openTime, setOpenTime] = useState(shop?.openTime || null);
+  const [closeTime, setCloseTime] = useState(shop?.closeTime || null);
+  const [scheduleBusy, setScheduleBusy] = useState(false);
+  const [pickerField, setPickerField] = useState(null); // 'open' | 'close' | null
+  const scheduleEnabled = Boolean(openTime && closeTime);
 
   // ── Orders ────────────────────────────────────────────────────────────
   const [activeOrders, setActiveOrders] = useState([]); // confirmed:true
@@ -117,7 +134,11 @@ export default function ShopDashboardScreen() {
         shopApi.getMyOrders(),
       ]);
       if (!mountedRef.current) return;
-      if (shopRes?.shop && !toggleInFlightRef.current) setIsOpen(Boolean(shopRes.shop.isOpen));
+      if (shopRes?.shop && !toggleInFlightRef.current) {
+        setIsOpen(Boolean(shopRes.shop.isOpen));
+        setOpenTime(shopRes.shop.openTime || null);
+        setCloseTime(shopRes.shop.closeTime || null);
+      }
 
       const orders = ordersRes.orders || [];
       setActiveOrders(orders.filter(o => o.confirmed && !o.rejected));
@@ -364,6 +385,54 @@ export default function ShopDashboardScreen() {
     }
   }, [isOpen]);
 
+  // ── Schedule: master switch + per-boundary time pickers ─────────────
+  // Enabling seeds sensible defaults (9 AM–9 PM) so the owner has something
+  // to tweak instead of an empty state; disabling clears both columns, which
+  // is exactly what tells shopScheduleSweeper (server-side) to leave is_open
+  // alone from then on.
+  const handleScheduleToggle = useCallback(async (value) => {
+    const prevOpen = openTime;
+    const prevClose = closeTime;
+    const nextOpen = value ? (openTime || '09:00') : null;
+    const nextClose = value ? (closeTime || '21:00') : null;
+    setOpenTime(nextOpen);
+    setCloseTime(nextClose);
+    setScheduleBusy(true);
+    try {
+      await shopApi.updateSchedule(nextOpen, nextClose);
+    } catch (err) {
+      setOpenTime(prevOpen);
+      setCloseTime(prevClose);
+      Alert.alert('Could not update schedule', err?.message || 'Please try again.');
+    } finally {
+      setScheduleBusy(false);
+    }
+  }, [openTime, closeTime]);
+
+  const handleTimeConfirm = useCallback(async (hhmm) => {
+    const prevOpen = openTime;
+    const prevClose = closeTime;
+    const nextOpen = pickerField === 'open' ? hhmm : openTime;
+    const nextClose = pickerField === 'close' ? hhmm : closeTime;
+    setPickerField(null);
+    if (nextOpen === nextClose) {
+      Alert.alert('Pick different times', 'Opening and closing time cannot be the same.');
+      return;
+    }
+    setOpenTime(nextOpen);
+    setCloseTime(nextClose);
+    setScheduleBusy(true);
+    try {
+      await shopApi.updateSchedule(nextOpen, nextClose);
+    } catch (err) {
+      setOpenTime(prevOpen);
+      setCloseTime(prevClose);
+      Alert.alert('Could not update schedule', err?.message || 'Please try again.');
+    } finally {
+      setScheduleBusy(false);
+    }
+  }, [pickerField, openTime, closeTime]);
+
   const handleLogout = useCallback(() => {
     Alert.alert('Sign out', 'Sign out of the shop dashboard?', [
       { text: 'Cancel', style: 'cancel' },
@@ -387,17 +456,26 @@ export default function ShopDashboardScreen() {
           <Text style={styles.activeElapsedText}>
             {formatElapsed(item.createdAt || item.created_at, now)}
           </Text>
+          {(item.shopTotal ?? item.shop_total) > 0 ? (
+            <Text style={styles.activeShopTotal}>You'll receive ₹{item.shopTotal ?? item.shop_total}</Text>
+          ) : null}
         </View>
-        {(item.items || []).map((it, idx) => (
-          <View key={idx} style={styles.activeItemRow}>
-            <View style={styles.qtyChip}>
-              <Text style={styles.qtyChipText}>{it.quantity}x</Text>
+        {(item.items || []).map((it, idx) => {
+          const lineTotal = it.shopLineTotal ?? it.shop_line_total;
+          return (
+            <View key={idx} style={styles.activeItemRow}>
+              <View style={styles.qtyChip}>
+                <Text style={styles.qtyChipText}>{it.quantity}x</Text>
+              </View>
+              <Text style={styles.activeItemText} numberOfLines={1}>
+                {it.productName || it.product_name}
+              </Text>
+              <Text style={styles.activeItemPrice}>
+                {lineTotal != null ? `₹${lineTotal}` : ''}
+              </Text>
             </View>
-            <Text style={styles.activeItemText}>
-              {it.productName || it.product_name}
-            </Text>
-          </View>
-        ))}
+          );
+        })}
 
         {item.ready ? (
           <View style={styles.readyPill}>
@@ -437,6 +515,85 @@ export default function ShopDashboardScreen() {
       </View>
     </View>
   );
+
+  const renderListHeader = useCallback(() => (
+    <>
+      {/* Auto open/close schedule */}
+      <View style={styles.scheduleCard}>
+        <View style={styles.scheduleHeader}>
+          <View style={styles.scheduleHeaderLeft}>
+            <View style={styles.scheduleIconWrap}>
+              <AppIcon name="clock" size={18} color={colors.saffronDark} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.scheduleTitle}>Auto schedule</Text>
+              <Text style={styles.scheduleSub}>
+                {scheduleEnabled ? 'Opens and closes on its own every day' : 'Off — the toggle above stays fully manual'}
+              </Text>
+            </View>
+          </View>
+          <ShopToggle
+            value={scheduleEnabled}
+            onValueChange={handleScheduleToggle}
+            disabled={scheduleBusy}
+            size="md"
+            accessibilityLabel="Toggle auto schedule"
+          />
+        </View>
+
+        {scheduleEnabled && (
+          <View style={styles.scheduleTimesRow}>
+            <TouchableOpacity
+              style={styles.timeChip}
+              onPress={() => setPickerField('open')}
+              activeOpacity={0.8}
+              disabled={scheduleBusy}
+            >
+              <Text style={styles.timeChipLabel}>Opens</Text>
+              <Text style={styles.timeChipValue}>{formatDisplayTime(openTime)}</Text>
+            </TouchableOpacity>
+            <View style={styles.scheduleArrow}>
+              <AppIcon name="chevronRight" size={16} color={colors.textTertiary} />
+            </View>
+            <TouchableOpacity
+              style={styles.timeChip}
+              onPress={() => setPickerField('close')}
+              activeOpacity={0.8}
+              disabled={scheduleBusy}
+            >
+              <Text style={styles.timeChipLabel}>Closes</Text>
+              <Text style={styles.timeChipValue}>{formatDisplayTime(closeTime)}</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </View>
+
+      {/* Metric strip */}
+      <View style={styles.metricsRow}>
+        <View style={[styles.metricCard, { flex: 1 }]}>
+          <AppIcon name="orders" size={22} color={colors.saffron} />
+          <Text style={styles.metricValue}>{activeOrders.length}</Text>
+          <Text style={styles.metricLabel}>Active orders</Text>
+        </View>
+        <View style={[styles.metricCard, { flex: 1 }]}>
+          <AppIcon name="home" size={22} color={isOpen ? colors.success : colors.textTertiary} />
+          <Text style={[styles.metricValue, { color: isOpen ? colors.successDark : colors.textTertiary }]}>
+            {isOpen ? 'On' : 'Off'}
+          </Text>
+          <Text style={styles.metricLabel}>Shop status</Text>
+        </View>
+      </View>
+
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionTitle}>Active orders</Text>
+        {activeOrders.length > 0 && (
+          <View style={styles.countPill}>
+            <Text style={styles.countPillText}>{activeOrders.length}</Text>
+          </View>
+        )}
+      </View>
+    </>
+  ), [scheduleEnabled, handleScheduleToggle, scheduleBusy, openTime, closeTime, activeOrders.length, isOpen]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -482,38 +639,26 @@ export default function ShopDashboardScreen() {
         </View>
       </LinearGradient>
 
-      {/* Metric strip */}
-      <View style={styles.metricsRow}>
-        <View style={[styles.metricCard, { flex: 1 }]}>
-          <AppIcon name="orders" size={22} color={colors.saffron} />
-          <Text style={styles.metricValue}>{activeOrders.length}</Text>
-          <Text style={styles.metricLabel}>Active orders</Text>
-        </View>
-        <View style={[styles.metricCard, { flex: 1 }]}>
-          <AppIcon name="home" size={22} color={isOpen ? colors.success : colors.textTertiary} />
-          <Text style={[styles.metricValue, { color: isOpen ? colors.successDark : colors.textTertiary }]}>
-            {isOpen ? 'On' : 'Off'}
-          </Text>
-          <Text style={styles.metricLabel}>Shop status</Text>
-        </View>
-      </View>
-
-      <View style={styles.sectionHeader}>
-        <Text style={styles.sectionTitle}>Active orders</Text>
-        {activeOrders.length > 0 && (
-          <View style={styles.countPill}>
-            <Text style={styles.countPillText}>{activeOrders.length}</Text>
-          </View>
-        )}
-      </View>
+      <TimePickerModal
+        visible={!!pickerField}
+        title={pickerField === 'open' ? 'Opening time' : 'Closing time'}
+        initialValue={pickerField === 'open' ? openTime : closeTime}
+        onConfirm={handleTimeConfirm}
+        onClose={() => setPickerField(null)}
+      />
 
       {loading && activeOrders.length === 0 ? (
-        <ActivityIndicator style={{ marginTop: spacing.xl }} color={colors.saffron} />
+        <>
+          {renderListHeader()}
+          <ActivityIndicator style={{ marginTop: spacing.xl }} color={colors.saffron} />
+        </>
       ) : activeOrders.length === 0 ? (
         <FlatList
           data={[]}
           keyExtractor={() => 'empty'}
           renderItem={null}
+          contentContainerStyle={styles.listContent}
+          ListHeaderComponent={renderListHeader}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={colors.saffron} />}
           ListEmptyComponent={
             <View style={styles.emptyState}>
@@ -534,6 +679,7 @@ export default function ShopDashboardScreen() {
           renderItem={renderActiveOrder}
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
+          ListHeaderComponent={renderListHeader}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={colors.saffron} />}
         />
       )}
@@ -607,8 +753,33 @@ const styles = StyleSheet.create({
   },
   heroStatus: { color: colors.textInverse, fontSize: 28, fontWeight: '800', letterSpacing: -0.4 },
   heroSub: { color: 'rgba(255,255,255,0.92)', fontSize: 15, marginTop: 4, fontWeight: '500' },
+  scheduleCard: {
+    marginBottom: spacing.md, backgroundColor: colors.bgSurface,
+    borderRadius: radius.xl, borderWidth: 1, borderColor: colors.border,
+    padding: spacing.md, ...shadows.sm,
+  },
+  scheduleHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+  scheduleHeaderLeft: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, flex: 1 },
+  scheduleIconWrap: {
+    width: 36, height: 36, borderRadius: radius.circle, backgroundColor: colors.saffronLight,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  scheduleTitle: { ...typography.label, color: colors.textPrimary, fontWeight: '800' },
+  scheduleSub: { fontSize: 12, color: colors.textSecondary, marginTop: 1, fontWeight: '500' },
+  scheduleTimesRow: {
+    flexDirection: 'row', alignItems: 'center', marginTop: spacing.md,
+    paddingTop: spacing.md, borderTopWidth: 1, borderTopColor: colors.border,
+  },
+  timeChip: {
+    flex: 1, backgroundColor: colors.bgApp, borderRadius: radius.lg, borderWidth: 1,
+    borderColor: colors.border, paddingVertical: spacing.sm, paddingHorizontal: spacing.md,
+    alignItems: 'center',
+  },
+  timeChipLabel: { fontSize: 11, color: colors.textSecondary, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.4 },
+  timeChipValue: { fontSize: 16, color: colors.textPrimary, fontWeight: '800', marginTop: 2 },
+  scheduleArrow: { paddingHorizontal: spacing.xs },
   metricsRow: {
-    flexDirection: 'row', gap: spacing.md, paddingHorizontal: spacing.lg, marginBottom: spacing.lg,
+    flexDirection: 'row', gap: spacing.md, marginBottom: spacing.lg,
   },
   metricCard: {
     backgroundColor: colors.bgSurface, borderRadius: radius.xl, paddingVertical: spacing.md,
@@ -618,7 +789,7 @@ const styles = StyleSheet.create({
   metricValue: { fontSize: 28, fontWeight: '800', color: colors.textPrimary, lineHeight: 34, marginTop: spacing.xs },
   metricLabel: { fontSize: 12, color: colors.textSecondary, marginTop: 2, fontWeight: '600', letterSpacing: 0.2 },
   sectionHeader: {
-    flexDirection: 'row', alignItems: 'center', paddingHorizontal: spacing.lg, marginBottom: spacing.sm,
+    flexDirection: 'row', alignItems: 'center', marginBottom: spacing.sm,
   },
   sectionTitle: {
     ...typography.labelSmall, fontSize: 13, color: colors.textSecondary, textTransform: 'uppercase',
@@ -651,6 +822,7 @@ const styles = StyleSheet.create({
   activeBadgeText: { color: colors.successDark, fontWeight: '700', fontSize: 12 },
   activeElapsedRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: spacing.xs },
   activeElapsedText: { color: colors.textSecondary, fontSize: 12, fontWeight: '600' },
+  activeShopTotal: { color: colors.successDark, fontSize: 12, fontWeight: '800', marginLeft: 'auto' },
   activeItemRow: { flexDirection: 'row', alignItems: 'center', marginTop: spacing.xs },
   qtyChip: {
     backgroundColor: colors.saffronLight, borderRadius: radius.sm, paddingHorizontal: 8,
@@ -658,6 +830,10 @@ const styles = StyleSheet.create({
   },
   qtyChipText: { color: colors.saffronDark, fontWeight: '800', fontSize: 13 },
   activeItemText: { flex: 1, ...typography.body, color: colors.textSecondary, fontWeight: '500' },
+  activeItemPrice: {
+    ...typography.body, color: colors.textSecondary, fontWeight: '700',
+    minWidth: 56, textAlign: 'right',
+  },
   readyPill: {
     flexDirection: 'row', alignItems: 'center', gap: 5, alignSelf: 'flex-start',
     backgroundColor: colors.infoLight, borderRadius: radius.pill,

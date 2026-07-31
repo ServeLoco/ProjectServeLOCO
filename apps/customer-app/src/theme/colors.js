@@ -150,6 +150,7 @@ export const colors = {
   // Saffron / orange highlight tokens (added)
   saffron: palette.saffron500,
   saffronLight: '#FFF2EB',
+  saffron300: palette.saffron300,
   saffronDark: palette.saffron600,
 
   // --- Dashboard / Home hero header (added) ---

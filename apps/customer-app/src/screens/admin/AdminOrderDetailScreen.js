@@ -326,7 +326,7 @@ export default function AdminOrderDetailScreen() {
 
         <Section title="Delivery pricing">
           <Row label="Distance" value={formatKm(order.delivery_distance_km)} />
-          <Row label="Radius used" value={formatKm(order.delivery_radius_km_snapshot)} />
+          <Row label="Zone extent" value={formatKm(order.delivery_radius_km_snapshot)} />
           <Row
             label="Cost per km"
             value={order.delivery_cost_per_km_snapshot != null ? `₹${order.delivery_cost_per_km_snapshot}` : 'Not captured'}
@@ -408,9 +408,12 @@ export default function AdminOrderDetailScreen() {
                 const label = sc.rejected ? '✕ Cancelled' : sc.ready ? '✓ Ready' : sc.confirmed ? '✓ Confirmed' : '⏳ Waiting';
                 const bg = sc.rejected ? colors.errorLight : sc.ready ? colors.infoLight : sc.confirmed ? colors.successLight : colors.warningLight;
                 const text = sc.rejected ? colors.error : sc.ready ? colors.info : sc.confirmed ? colors.successDark : colors.warning;
+                const shopTotal = sc.shopTotal ?? sc.shop_total;
                 return (
                   <View key={sc.shopId} style={[styles.shopBadge, { backgroundColor: bg }]}>
-                    <Text style={[styles.shopBadgeText, { color: text }]}>{sc.shopName} {label}</Text>
+                    <Text style={[styles.shopBadgeText, { color: text }]}>
+                      {sc.shopName} {label}{shopTotal > 0 ? ` · ₹${shopTotal} owed` : ''}
+                    </Text>
                   </View>
                 );
               })}

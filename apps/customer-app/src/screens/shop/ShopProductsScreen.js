@@ -31,6 +31,7 @@ export default function ShopProductsScreen() {
   const [newGroupName, setNewGroupName] = useState('');
   const [creatingGroup, setCreatingGroup] = useState(false);
   const [pickerProduct, setPickerProduct] = useState(null); // product being reassigned
+  const [expandedGroups, setExpandedGroups] = useState(() => new Set()); // group.id | UNGROUPED_KEY, collapsed by default
 
   // fetchAll (focus effect, socket foreground/reconnect) can race an in-flight
   // toggle/group-move PATCH and overwrite the optimistic local state with the
@@ -38,6 +39,7 @@ export default function ShopProductsScreen() {
   // keeps the local (already-correct) copy for them instead of clobbering it.
   const productInFlightRef = useRef(new Set());
   const groupInFlightRef = useRef(new Set());
+  const variantInFlightRef = useRef(new Set());
 
   const fetchAll = useCallback(async () => {
     try {
@@ -48,11 +50,23 @@ export default function ShopProductsScreen() {
       setProducts(prev => {
         const fetched = productsRes.products || [];
         const prevById = new Map(prev.map(p => [p.id, p]));
-        return fetched.map(p => (
-          p && productInFlightRef.current.has(p.id) && prevById.has(p.id)
-            ? prevById.get(p.id)
-            : p
-        ));
+        return fetched.map(p => {
+          if (!p) return p;
+          if (productInFlightRef.current.has(p.id) && prevById.has(p.id)) {
+            return prevById.get(p.id);
+          }
+          if (variantInFlightRef.current.size === 0 || !Array.isArray(p.variants)) return p;
+          const prevProduct = prevById.get(p.id);
+          const prevVariantsById = new Map((prevProduct?.variants || []).map(v => [v.id, v]));
+          return {
+            ...p,
+            variants: p.variants.map(v => (
+              variantInFlightRef.current.has(`${p.id}:${v.id}`) && prevVariantsById.has(v.id)
+                ? prevVariantsById.get(v.id)
+                : v
+            )),
+          };
+        });
       });
       setGroups(prev => {
         const fetched = groupsRes.groups || [];
@@ -103,6 +117,29 @@ export default function ShopProductsScreen() {
       setProducts(prev => prev.map(p => (p && p.id === product.id ? { ...p, available: !safeValue } : p)));
     } finally {
       productInFlightRef.current.delete(product.id);
+    }
+  }, []);
+
+  const handleVariantToggle = useCallback(async (product, variant, value) => {
+    if (!product || product.id == null || !variant || variant.id == null) return;
+    const safeValue = Boolean(value);
+    const key = `${product.id}:${variant.id}`;
+    variantInFlightRef.current.add(key);
+    setProducts(prev => prev.map(p => (
+      p && p.id === product.id
+        ? { ...p, variants: (p.variants || []).map(v => (v.id === variant.id ? { ...v, available: safeValue } : v)) }
+        : p
+    )));
+    try {
+      await shopApi.toggleVariant(product.id, variant.id, safeValue);
+    } catch (_) {
+      setProducts(prev => prev.map(p => (
+        p && p.id === product.id
+          ? { ...p, variants: (p.variants || []).map(v => (v.id === variant.id ? { ...v, available: !safeValue } : v)) }
+          : p
+      )));
+    } finally {
+      variantInFlightRef.current.delete(key);
     }
   }, []);
 
@@ -190,7 +227,22 @@ export default function ShopProductsScreen() {
     setActiveTab(tabId);
   }, []);
 
+  const toggleGroupExpand = useCallback((key) => {
+    setExpandedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
   const isSearching = searchQuery.trim().length > 0;
+  // Searching, or filtering to a single group via the tab strip, both imply
+  // the user wants to see items — don't make them also tap to expand.
+  const isGroupExpanded = useCallback(
+    (key) => isSearching || (activeTab !== 'all' && activeTab === key) || expandedGroups.has(key),
+    [isSearching, activeTab, expandedGroups]
+  );
 
   const filteredProducts = useMemo(() => {
     if (!isSearching) return products;
@@ -228,29 +280,73 @@ export default function ShopProductsScreen() {
   const totalCount = products.length;
   const availableCount = useMemo(() => products.filter(p => p.available).length, [products]);
 
-  const renderProductRow = (item) => {
+  const renderProductRow = (item, index, arr) => {
     if (!item || item.id == null) return null;
     const isAvailable = Boolean(item.available);
+    const variants = Array.isArray(item.variants) ? item.variants : [];
+    const hasVariants = variants.length > 0;
+    const isLast = index === arr.length - 1;
+    const initial = (item.name || '?').trim().charAt(0).toUpperCase() || '?';
+    const meta = [item.price != null ? `₹${item.price}` : null, item.unit || null].filter(Boolean).join(' · ');
     return (
-      <View key={item.id} style={styles.row}>
-        <View style={[styles.rowDot, !isAvailable && styles.rowDotOff]} />
-        <View style={styles.rowNameWrap}>
-          <Text style={[styles.rowName, !isAvailable && styles.rowNameOff]} numberOfLines={1}>{item.name || 'Unnamed product'}</Text>
+      <View key={item.id}>
+        <View style={[styles.row, isLast && !hasVariants && styles.rowLast]}>
+          <View style={[styles.rowAvatar, !isAvailable && styles.rowAvatarOff]}>
+            <Text style={[styles.rowAvatarText, !isAvailable && styles.rowAvatarTextOff]}>{initial}</Text>
+          </View>
+          <View style={styles.rowNameWrap}>
+            <Text style={[styles.rowName, !isAvailable && styles.rowNameOff]} numberOfLines={1}>{item.name || 'Unnamed product'}</Text>
+            {!!(meta || hasVariants) && (
+              <Text style={styles.rowMetaText} numberOfLines={1}>
+                {[meta, hasVariants ? `${variants.length} option${variants.length === 1 ? '' : 's'}` : null]
+                  .filter(Boolean)
+                  .join('  •  ')}
+              </Text>
+            )}
+          </View>
+          <TouchableOpacity
+            style={styles.rowMoveBtn}
+            onPress={() => setPickerProduct(item)}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            accessibilityLabel="Move to group"
+          >
+            <AppIcon name="chevronRight" size={15} color={colors.saffronDark} />
+          </TouchableOpacity>
+          <ShopToggle
+            value={isAvailable}
+            onValueChange={(v) => handleProductToggle(item, v)}
+            activeColor={colors.success}
+            size="md"
+          />
         </View>
-        <TouchableOpacity
-          style={styles.rowMoveBtn}
-          onPress={() => setPickerProduct(item)}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        >
-          <AppIcon name="chevronRight" size={14} color={colors.saffronDark} />
-          <Text style={styles.rowMoveBtnText}>Move</Text>
-        </TouchableOpacity>
-        <ShopToggle
-          value={isAvailable}
-          onValueChange={(v) => handleProductToggle(item, v)}
-          activeColor={colors.success}
-          size="md"
-        />
+        {hasVariants && (
+          <View style={[styles.variantGroup, isLast && styles.rowLast]}>
+            {variants.map((v, vIdx) => (
+              <View
+                key={v.id}
+                style={[
+                  styles.variantRow,
+                  vIdx === 0 && styles.variantRowFirst,
+                  vIdx === variants.length - 1 && styles.variantRowLast,
+                ]}
+              >
+                <View style={[styles.variantDot, !v.available && styles.variantDotOff]} />
+                <Text style={[styles.variantName, !v.available && styles.rowNameOff]} numberOfLines={1}>
+                  {v.label || 'Option'}
+                </Text>
+                {v.price != null && (
+                  <Text style={[styles.variantPrice, !v.available && styles.rowNameOff]}>₹{v.price}</Text>
+                )}
+                <ShopToggle
+                  value={Boolean(v.available)}
+                  onValueChange={(val) => handleVariantToggle(item, v, val)}
+                  activeColor={colors.success}
+                  size="sm"
+                />
+              </View>
+            ))}
+          </View>
+        )}
       </View>
     );
   };
@@ -336,53 +432,73 @@ export default function ShopProductsScreen() {
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={handleRefresh} tintColor={colors.saffron} />}
           renderItem={() => (
             <>
-              {sections.groupSections.map(({ group, items }) => (
-                <View key={group.id} style={styles.groupBlock}>
-                  <View style={styles.groupHeader}>
-                    <View style={styles.groupTitleWrap}>
-                      <View style={[styles.groupIconWrap, !group.active && styles.groupIconWrapMuted]}>
-                        <AppIcon name="box" size={18} color={group.active ? colors.saffronDark : colors.textTertiary} />
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.groupName}>{group.name}</Text>
-                        <Text style={styles.groupCount}>
-                          {items.length} {items.length === 1 ? 'item' : 'items'}
-                        </Text>
-                      </View>
-                    </View>
-                    <View style={styles.groupActions}>
+              {sections.groupSections.map(({ group, items }) => {
+                const expanded = isGroupExpanded(group.id);
+                return (
+                  <View key={group.id} style={styles.groupBlock}>
+                    <View
+                      key={`header-${expanded}`}
+                      style={[styles.groupHeader, expanded && styles.groupHeaderExpanded]}
+                    >
                       <TouchableOpacity
-                        style={styles.groupDeleteBtn}
-                        onPress={() => handleDeleteGroup(group)}
-                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        style={styles.groupTitleWrap}
+                        onPress={() => toggleGroupExpand(group.id)}
+                        activeOpacity={0.7}
                       >
-                        <AppIcon name="delete" size={18} color={colors.textMuted} />
+                        <View style={[styles.groupIconWrap, !group.active && styles.groupIconWrapMuted]}>
+                          <AppIcon name="box" size={18} color={group.active ? colors.saffronDark : colors.textTertiary} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.groupName}>{group.name}</Text>
+                          <Text style={styles.groupCount}>
+                            {items.length} {items.length === 1 ? 'item' : 'items'}
+                          </Text>
+                        </View>
+                        <AppIcon name={expanded ? 'down' : 'chevronRight'} size={16} color={colors.textTertiary} />
                       </TouchableOpacity>
-                      <ShopToggle
-                        value={Boolean(group.active)}
-                        onValueChange={(v) => handleGroupToggle(group, v)}
-                        activeColor={colors.saffron}
-                        size="md"
-                      />
-                    </View>
-                  </View>
-                  <View style={styles.groupCard}>
-                    {items.length === 0 ? (
-                      <View style={styles.emptyGroupWrap}>
-                        <AppIcon name="box" size={20} color={colors.textTertiary} />
-                        <Text style={styles.emptyGroup}>No products in this group.</Text>
+                      <View style={styles.groupActions}>
+                        <TouchableOpacity
+                          style={styles.groupDeleteBtn}
+                          onPress={() => handleDeleteGroup(group)}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <AppIcon name="delete" size={18} color={colors.textMuted} />
+                        </TouchableOpacity>
+                        <ShopToggle
+                          value={Boolean(group.active)}
+                          onValueChange={(v) => handleGroupToggle(group, v)}
+                          activeColor={colors.saffron}
+                          size="md"
+                        />
                       </View>
-                    ) : (
-                      items.map(renderProductRow)
+                    </View>
+                    {expanded && (
+                      <View style={styles.groupCard}>
+                        {items.length === 0 ? (
+                          <View style={styles.emptyGroupWrap}>
+                            <AppIcon name="box" size={20} color={colors.textTertiary} />
+                            <Text style={styles.emptyGroup}>No products in this group.</Text>
+                          </View>
+                        ) : (
+                          items.map(renderProductRow)
+                        )}
+                      </View>
                     )}
                   </View>
-                </View>
-              ))}
+                );
+              })}
 
               {sections.ungrouped.length > 0 && (
                 <View style={styles.groupBlock}>
-                  <View style={styles.groupHeader}>
-                    <View style={styles.groupTitleWrap}>
+                  <View
+                    key={`header-${isGroupExpanded(UNGROUPED_KEY)}`}
+                    style={[styles.groupHeader, isGroupExpanded(UNGROUPED_KEY) && styles.groupHeaderExpanded]}
+                  >
+                    <TouchableOpacity
+                      style={styles.groupTitleWrap}
+                      onPress={() => toggleGroupExpand(UNGROUPED_KEY)}
+                      activeOpacity={0.7}
+                    >
                       <View style={[styles.groupIconWrap, styles.groupIconWrapMuted]}>
                         <AppIcon name="box" size={18} color={colors.textTertiary} />
                       </View>
@@ -392,11 +508,18 @@ export default function ShopProductsScreen() {
                           {sections.ungrouped.length} {sections.ungrouped.length === 1 ? 'item' : 'items'}
                         </Text>
                       </View>
+                      <AppIcon
+                        name={isGroupExpanded(UNGROUPED_KEY) ? 'down' : 'chevronRight'}
+                        size={16}
+                        color={colors.textTertiary}
+                      />
+                    </TouchableOpacity>
+                  </View>
+                  {isGroupExpanded(UNGROUPED_KEY) && (
+                    <View style={styles.groupCard}>
+                      {sections.ungrouped.map(renderProductRow)}
                     </View>
-                  </View>
-                  <View style={styles.groupCard}>
-                    {sections.ungrouped.map(renderProductRow)}
-                  </View>
+                  )}
                 </View>
               )}
 
@@ -532,8 +655,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10, paddingVertical: 4,
   },
   summaryPillText: { color: colors.successDark, fontWeight: '800', fontSize: 12 },
-  tabsRow: { marginBottom: spacing.md, flexGrow: 0, height: 44 },
-  tabsRowContent: { paddingHorizontal: spacing.lg, gap: spacing.sm, alignItems: 'flex-start' },
+  tabsRow: { marginBottom: spacing.md, flexGrow: 0 },
+  tabsRowContent: { paddingHorizontal: spacing.lg, gap: spacing.sm, alignItems: 'center' },
   tabChip: {
     flexDirection: 'row', alignItems: 'center', gap: 7,
     borderWidth: 1, borderColor: colors.border, backgroundColor: colors.bgSurface,
@@ -545,14 +668,19 @@ const styles = StyleSheet.create({
   tabDot: { width: 7, height: 7, borderRadius: radius.circle, backgroundColor: colors.success },
   tabDotOff: { backgroundColor: colors.textTertiary },
   listContent: { paddingHorizontal: spacing.lg, paddingBottom: spacing.xl },
-  groupBlock: { marginBottom: spacing.lg },
+  groupBlock: { marginBottom: spacing.md },
   groupHeader: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    marginBottom: spacing.xs, paddingHorizontal: spacing.xs,
+    backgroundColor: colors.saffronLight, borderWidth: 1, borderColor: colors.saffron300,
+    borderRadius: radius.xl, paddingHorizontal: spacing.md, paddingVertical: spacing.sm,
+    ...shadows.sm,
+  },
+  groupHeaderExpanded: {
+    borderBottomLeftRadius: 0, borderBottomRightRadius: 0, borderBottomWidth: 0,
   },
   groupTitleWrap: { flexDirection: 'row', alignItems: 'center', flex: 1, gap: spacing.sm },
   groupIconWrap: {
-    width: 40, height: 40, borderRadius: radius.md, backgroundColor: colors.saffronLight,
+    width: 40, height: 40, borderRadius: radius.md, backgroundColor: colors.bgSurface,
     alignItems: 'center', justifyContent: 'center',
   },
   groupIconWrapMuted: { backgroundColor: colors.surfaceMuted },
@@ -561,8 +689,9 @@ const styles = StyleSheet.create({
   groupActions: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
   groupDeleteBtn: { padding: 4 },
   groupCard: {
-    backgroundColor: colors.bgSurface, borderRadius: radius.xl, borderWidth: 1,
-    borderColor: colors.border, ...shadows.sm,
+    backgroundColor: colors.saffronLight, borderRadius: radius.xl, borderTopLeftRadius: 0, borderTopRightRadius: 0,
+    borderWidth: 1, borderTopWidth: 0, borderColor: colors.saffron300,
+    padding: 6,
   },
   emptyGroupWrap: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs,
@@ -571,21 +700,39 @@ const styles = StyleSheet.create({
   emptyGroup: { color: colors.textMuted, ...typography.bodySmall, fontWeight: '500' },
   row: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
-    paddingVertical: 12, paddingHorizontal: spacing.md, borderBottomWidth: 1, borderBottomColor: colors.border,
+    paddingVertical: 10, paddingHorizontal: spacing.sm,
+    backgroundColor: colors.bgSurface, borderRadius: radius.lg, marginBottom: 6,
   },
-  rowDot: {
-    width: 6, height: 6, borderRadius: radius.circle, backgroundColor: colors.saffronDark,
+  rowLast: { marginBottom: 0 },
+  rowAvatar: {
+    width: 34, height: 34, borderRadius: radius.md, backgroundColor: colors.saffronLight,
+    alignItems: 'center', justifyContent: 'center',
   },
-  rowDotOff: { backgroundColor: colors.textTertiary },
+  rowAvatarOff: { backgroundColor: colors.surfaceMuted },
+  rowAvatarText: { color: colors.saffronDark, fontWeight: '800', fontSize: 14 },
+  rowAvatarTextOff: { color: colors.textTertiary },
   rowNameWrap: { flex: 1 },
   rowName: { ...typography.bodyLarge, color: colors.textPrimary, fontWeight: '600' },
   rowNameOff: { color: colors.textTertiary },
-  rowMoveBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 3,
-    backgroundColor: colors.saffronLight, borderRadius: radius.pill,
-    paddingHorizontal: 10, paddingVertical: 6,
+  rowMetaText: { ...typography.bodySmall, color: colors.textSecondary, fontSize: 12, marginTop: 1, fontWeight: '500' },
+  variantGroup: {
+    backgroundColor: colors.bgApp, paddingLeft: spacing.md + 34 + spacing.sm,
+    borderRadius: radius.lg, marginBottom: 6,
   },
-  rowMoveBtnText: { color: colors.saffronDark, fontWeight: '700', fontSize: 12 },
+  variantRow: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
+    paddingVertical: 8, paddingRight: spacing.md, borderTopWidth: 1, borderTopColor: colors.border,
+  },
+  variantRowFirst: { borderTopWidth: 0 },
+  variantRowLast: { paddingBottom: 10 },
+  variantDot: { width: 5, height: 5, borderRadius: radius.circle, backgroundColor: colors.saffronDark },
+  variantDotOff: { backgroundColor: colors.textTertiary },
+  variantName: { ...typography.bodySmall, color: colors.textSecondary, fontWeight: '500', flex: 1 },
+  variantPrice: { ...typography.bodySmall, color: colors.textTertiary, fontSize: 12, fontWeight: '600' },
+  rowMoveBtn: {
+    width: 30, height: 30, borderRadius: radius.circle, backgroundColor: colors.saffronLight,
+    alignItems: 'center', justifyContent: 'center',
+  },
   emptyState: { alignItems: 'center', paddingHorizontal: spacing.xl, marginTop: spacing.xl },
   emptyIconWrap: {
     width: 72, height: 72, borderRadius: radius.circle, backgroundColor: colors.saffronLight,

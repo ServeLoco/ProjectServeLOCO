@@ -23,10 +23,11 @@ import {
   PressableScale,
 } from '../../../components';
 import { colors, typography, spacing, radius, shadows, layout, borderWidth, motionConfig, entryDistance, easing, smallMs, staggerMs, screenMs } from '../../../theme';
-import { useCartStore, useSettingsStore } from '../../../stores';
+import { useCartStore, useSettingsStore, useDeliveryZonesStore, useDeliveryLocationStore } from '../../../stores';
 import { cartApi } from '../../../api';
 import { showToast } from '../../../components/Toast';
 import { buildProgressHintText, normalizeCartCalculation, useReducedMotion } from '../../../utils';
+
 const getItemType = (item) =>
   item.type || (item.product?.isCombo || item.product?.is_combo ? 'combo' : 'product');
 // Includes variant id — two lines of the same product with different
@@ -52,6 +53,9 @@ export default function CartScreen() {
   const syncItemPricesFromServer = useCartStore(state => state.syncItemPricesFromServer);
   const removeUnavailableItems = useCartStore(state => state.removeUnavailableItems);
   const shopStatus = useSettingsStore(state => state.shopStatus);
+  // Bumped by useDeliveryZoneSync on a delivery_zones.updated push (admin
+  // saved a zone) — included below purely to retrigger the bill recompute.
+  const deliveryZonesVersion = useDeliveryZonesStore(state => state.version);
 
   const [isCalculating, setIsCalculating] = useState(false);
   const [bill, setBill] = useState(null);
@@ -63,9 +67,23 @@ export default function CartScreen() {
 
   useFocusEffect(
     useCallback(() => {
+      // Drop the previous visit's bill immediately so the skeleton shows
+      // right away instead of stale numbers lingering during the recalc
+      // this bump triggers below.
+      setBill(null);
+      setCalcError(null);
       setFocusTick((n) => n + 1);
     }, []),
   );
+
+  // Delivery location comes from the global store — live GPS in the
+  // background (useDeliveryLocationSync) or a manually-dropped pin from
+  // Home's "Change Location" flow. Permission is no longer gated by a
+  // full-screen route before the dashboard (that was LocationPermissionGate);
+  // Home now shows LocationPermissionCard inline instead, so coords can
+  // legitimately be null here — the deliveryBlocked gate below is what stops
+  // an undeliverable cart, not an upstream guarantee.
+  const customerCoords = useDeliveryLocationStore(state => state.coords);
 
   // Animations
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -198,6 +216,10 @@ export default function CartScreen() {
         // when no code is present — set once the user explicitly removes
         // their coupon, so "remove" actually zeroes out the discount.
         no_auto_apply: couponAutoApplyDisabled,
+        // Without this the API can't match a delivery zone at all and
+        // silently falls back to flat pricing — see customerCoords above.
+        latitude: customerCoords?.lat,
+        longitude: customerCoords?.lng,
       };
       const calculatedBill = normalizeCartCalculation(await cartApi.calculate(payload));
       if (seq !== billRequestSeqRef.current) return; // a newer request superseded this one
@@ -245,12 +267,14 @@ export default function CartScreen() {
   useEffect(() => {
     // Debounce bill recalculation to avoid rapid successive API calls.
     // focusTick re-runs on every Cart visit so live admin prices apply.
+    // customerCoords re-runs this once a GPS fix lands so the flat-priced
+    // first pass gets replaced by the zone-matched charge.
     const timer = setTimeout(() => {
       calculateBill();
     }, 300);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, appliedCouponCode, appliedCouponId, couponAutoApplyDisabled, focusTick]);
+  }, [items, appliedCouponCode, appliedCouponId, couponAutoApplyDisabled, focusTick, deliveryZonesVersion, customerCoords]);
 
   const handleRemove = (id, type = 'product', variantId = null) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -277,15 +301,34 @@ export default function CartScreen() {
     />
   );
 
+  // The server zeroes every charge when it refuses the location (pin outside
+  // every zone, inside a no-delivery exclusion square, or no coordinates at
+  // all while zone pricing is on). Without these the bill rendered a ₹0
+  // delivery charge as a cheerful "FREE" and left Proceed to Pay enabled, so
+  // the customer only discovered the refusal one screen later at Checkout.
+  const outOfRange = Boolean(bill?.outOfRange);
+  const excluded = Boolean(bill?.excluded);
+  const deliveryBlocked = outOfRange || excluded;
+  const deliveryBlockedMessage = excluded
+    ? (bill?.exclusionMessage || 'Delivery is not available at this location.')
+    : bill?.nearestZoneName
+    ? `Outside delivery area. Move your pin inside ${bill.nearestZoneName} to order.`
+    : 'Outside delivery area. Set a delivery location we cover to continue.';
+
   const isCheckoutDisabled =
     validItems.length === 0 ||
     isCalculating ||
     calcError ||
     shopStatus === 'closed' ||
+    deliveryBlocked ||
     !bill;
 
   const bottomBarHeight = 78 + insets.bottom;
-  const checkoutBtnText = bill ? `Proceed to Pay  •  ₹${bill.grandTotal}` : 'Checkout';
+  const checkoutBtnText = deliveryBlocked
+    ? 'Delivery not available here'
+    : bill
+    ? `Proceed to Pay  •  ₹${bill.grandTotal}`
+    : 'Checkout';
 
   const freeDeliveryProgress = bill?.freeDeliveryProgress || null;
   const nearestOfferProgress = bill?.nearestOfferProgress || null;
@@ -653,18 +696,29 @@ export default function CartScreen() {
     // Delivery reads as free either because the raw charge is ₹0 (e.g. a
     // free zone) or because a coupon (free_delivery type, or a flat/percent
     // coupon combined with "also give free delivery") waived it.
-    const deliveryFree = bill.deliveryCharge === 0 || bill.isFreeDeliveryApplied;
+    // deliveryBlocked is excluded explicitly: the server also sends ₹0 when
+    // it REFUSES the location, and rendering that as "FREE" advertised free
+    // delivery to somewhere we won't deliver at all.
+    const deliveryFree = !deliveryBlocked
+      && (bill.deliveryCharge === 0 || bill.isFreeDeliveryApplied);
     const discountToShow = bill.isFreeDeliveryApplied ? bill.itemDiscount : bill.discount;
 
     return (
       <Animated.View style={[styles.billCard, { opacity: listOpacity }]}>
         <Text style={styles.billTitle}>Bill Summary</Text>
 
+        {deliveryBlocked ? (
+          <View style={styles.deliveryBlockedRow} accessibilityLiveRegion="polite">
+            <AppIcon name="warning" size={14} color={colors.error} />
+            <Text style={styles.deliveryBlockedText}>{deliveryBlockedMessage}</Text>
+          </View>
+        ) : null}
+
         <View style={styles.billRows}>
           <BillRow label="Item Total" value={`₹${bill.subtotal}`} />
           <BillRow
             label="Delivery Charge"
-            value={deliveryFree ? 'FREE' : `₹${bill.deliveryCharge}`}
+            value={deliveryBlocked ? '—' : deliveryFree ? 'FREE' : `₹${bill.deliveryCharge}`}
             valueStyle={deliveryFree ? styles.freeDeliveryValue : null}
             strikethroughValue={bill.isFreeDeliveryApplied ? `₹${bill.deliveryCharge}` : null}
           />
@@ -1196,7 +1250,6 @@ export default function CartScreen() {
           </Animated.View>
         </View>
       )}
-
     </AppScreen>
   );
 }
@@ -1374,6 +1427,22 @@ const styles = StyleSheet.create({
   freeDeliveryValue: {
     color: colors.success,
     fontWeight: '700',
+  },
+  deliveryBlockedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.errorLight || 'rgba(220,53,69,0.08)',
+    borderRadius: radius.sm,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  deliveryBlockedText: {
+    ...typography.label,
+    flex: 1,
+    color: colors.error,
+    fontWeight: '600',
   },
   billRowValueGroup: {
     flexDirection: 'row',

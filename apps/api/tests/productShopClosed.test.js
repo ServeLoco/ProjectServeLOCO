@@ -17,7 +17,7 @@ const jwt = require('jsonwebtoken');
 
 jest.mock('../src/db/mysql', () => ({
   pool: {
-    query: jest.fn(),
+    query: jest.fn().mockResolvedValue([[]]),
     getConnection: jest.fn(),
     escape: jest.fn(value => `'${value}'`)
   }

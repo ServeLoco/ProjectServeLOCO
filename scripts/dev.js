@@ -139,7 +139,6 @@ async function main() {
   const commands = [
     apiCmd,
     { command: 'npm run dev', cwd: 'apps/admin', name: 'admin', prefixColor: 'green' },
-    { command: 'npm run dev', cwd: 'apps/web', name: 'web', prefixColor: 'cyan' },
     { command: 'npm start', cwd: 'apps/customer-app', name: 'app', prefixColor: 'yellow' },
   ];
 

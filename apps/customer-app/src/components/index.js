@@ -20,6 +20,7 @@ export { default as EmptyState } from './EmptyState';
 export { default as ErrorState } from './ErrorState';
 export { default as LoadingSkeleton, SkeletonCard, SkeletonRow } from './LoadingSkeleton';
 export { default as ConfirmModal } from './ConfirmModal';
+export { default as DayHistoryPicker } from './DayHistoryPicker';
 export { default as AnimatedFadeSlide } from './AnimatedFadeSlide';
 export { default as StaggeredList } from './StaggeredList';
 export { default as PressableScale } from './PressableScale';
@@ -38,5 +39,13 @@ export { default as ExitAppModal } from './ExitAppModal';
 export { default as ForceUpdateModal } from './ForceUpdateModal';
 export { default as VariantSheet } from './VariantSheet';
 export { default as LocationPicker } from './LocationPicker';
+export { default as ChangeLocationModal } from './ChangeLocationModal';
 export { default as RiderLiveMap } from './RiderLiveMap';
 export { default as RiderDeliveryMap } from './RiderDeliveryMap';
+// LocationPermissionGate (the old full-screen route that blocked the whole
+// app until permission was decided) is intentionally NOT exported: it was
+// replaced by LocationPermissionCard, which renders inline on Home. Its
+// directory still holds LocationSettingsGuide, which the card imports for
+// AnimatedIllustration/STEPS — LocationPermissionGate.js itself is dead and
+// safe to delete.
+export { default as LocationPermissionCard } from './LocationPermissionCard';

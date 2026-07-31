@@ -74,7 +74,7 @@ const enrichCoupon = async (coupon) => {
 // ─────────────────────────────────────────────────────────────────────────
 
 const getAdminCoupons = async (req, res) => {
-  const { status, active, auto_apply, target_audience, applies_to } = req.query;
+  const { status, active, auto_apply, target_audience, target_zones, applies_to } = req.query;
 
   let query = 'SELECT * FROM coupons WHERE deleted = 0';
   const params = [];
@@ -90,6 +90,10 @@ const getAdminCoupons = async (req, res) => {
   if (target_audience) {
     query += ' AND target_audience = ?';
     params.push(target_audience);
+  }
+  if (target_zones) {
+    query += ' AND target_zones = ?';
+    params.push(target_zones);
   }
   if (applies_to) {
     query += ' AND applies_to = ?';
@@ -129,6 +133,19 @@ const getAdminCouponById = async (req, res) => {
     coupon.targetedUsers = [];
   }
 
+  if (coupon.target_zones === 'selected') {
+    const [zoneRows] = await pool.query(
+      `SELECT cz.delivery_zone_id, dz.name
+       FROM coupon_zones cz
+       JOIN delivery_zones dz ON cz.delivery_zone_id = dz.id
+       WHERE cz.coupon_id = ? ORDER BY dz.id ASC`,
+      [id]
+    );
+    coupon.targetedZones = zoneRows;
+  } else {
+    coupon.targetedZones = [];
+  }
+
   res.status(200).json({ data: coupon });
 };
 
@@ -166,6 +183,7 @@ const createCoupon = async (req, res) => {
 
   const autoApply = b.auto_apply !== undefined ? toBool(b.auto_apply) : false;
   const targetAudience = b.target_audience === 'selected' ? 'selected' : 'all';
+  const targetZones = b.target_zones === 'selected' ? 'selected' : 'all';
   let appliesTo = 'all';
   if (b.applies_to === 'all' || isSystemModeSlug(b.applies_to)) {
     appliesTo = b.applies_to;
@@ -183,9 +201,9 @@ const createCoupon = async (req, res) => {
         min_order_amount, min_item_count, max_order_amount, applies_to,
         starts_at, ends_at, active_days_mask, active_time_start, active_time_end,
         total_usage_limit, per_user_usage_limit, first_order_only, first_n_orders,
-        target_audience, auto_apply, requires_code, priority,
+        target_audience, target_zones, auto_apply, requires_code, priority,
         active, created_by_admin_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
       [
         code,
         b.title.trim(),
@@ -208,6 +226,7 @@ const createCoupon = async (req, res) => {
         toBool(b.first_order_only) ? 1 : 0,
         toIntOrNull(b.first_n_orders),
         targetAudience,
+        targetZones,
         autoApply ? 1 : 0,
         requiresCode ? 1 : 0,
         Number(b.priority) || 0,
@@ -226,6 +245,11 @@ const createCoupon = async (req, res) => {
   if (targetAudience === 'selected' && Array.isArray(b.targeted_user_ids) && b.targeted_user_ids.length > 0) {
     const values = b.targeted_user_ids.map(uid => [couponId, Number(uid)]);
     await pool.query('INSERT IGNORE INTO coupon_users (coupon_id, user_id) VALUES ?', [values]);
+  }
+
+  if (targetZones === 'selected' && Array.isArray(b.targeted_zone_ids) && b.targeted_zone_ids.length > 0) {
+    const values = b.targeted_zone_ids.map(zid => [couponId, Number(zid)]);
+    await pool.query('INSERT IGNORE INTO coupon_zones (coupon_id, delivery_zone_id) VALUES ?', [values]);
   }
 
   res.status(201).json({ message: 'Coupon created', id: couponId });
@@ -309,12 +333,16 @@ const updateCoupon = async (req, res) => {
     updates.push('target_audience = ?');
     params.push(b.target_audience === 'selected' ? 'selected' : 'all');
   }
+  if (b.target_zones !== undefined) {
+    updates.push('target_zones = ?');
+    params.push(b.target_zones === 'selected' ? 'selected' : 'all');
+  }
   if (b.auto_apply !== undefined) { updates.push('auto_apply = ?'); params.push(toBool(b.auto_apply) ? 1 : 0); }
   if (b.requires_code !== undefined) { updates.push('requires_code = ?'); params.push(toBool(b.requires_code) ? 1 : 0); }
   if (b.priority !== undefined) { updates.push('priority = ?'); params.push(Number(b.priority) || 0); }
   if (b.active !== undefined) { updates.push('active = ?'); params.push(toBool(b.active) ? 1 : 0); }
 
-  if (updates.length === 0 && b.targeted_user_ids === undefined) {
+  if (updates.length === 0 && b.targeted_user_ids === undefined && b.targeted_zone_ids === undefined) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'No valid fields provided' });
   }
 
@@ -336,6 +364,15 @@ const updateCoupon = async (req, res) => {
     if (targetAudience === 'selected' && Array.isArray(b.targeted_user_ids) && b.targeted_user_ids.length > 0) {
       const values = b.targeted_user_ids.map(uid => [Number(id), Number(uid)]);
       await pool.query('INSERT IGNORE INTO coupon_users (coupon_id, user_id) VALUES ?', [values]);
+    }
+  }
+
+  if (b.targeted_zone_ids !== undefined) {
+    await pool.query('DELETE FROM coupon_zones WHERE coupon_id = ?', [id]);
+    const targetZones = b.target_zones ? (b.target_zones === 'selected' ? 'selected' : 'all') : existing.target_zones;
+    if (targetZones === 'selected' && Array.isArray(b.targeted_zone_ids) && b.targeted_zone_ids.length > 0) {
+      const values = b.targeted_zone_ids.map(zid => [Number(id), Number(zid)]);
+      await pool.query('INSERT IGNORE INTO coupon_zones (coupon_id, delivery_zone_id) VALUES ?', [values]);
     }
   }
 
@@ -369,9 +406,9 @@ const duplicateCoupon = async (req, res) => {
         min_order_amount, min_item_count, max_order_amount, applies_to,
         starts_at, ends_at, active_days_mask, active_time_start, active_time_end,
         total_usage_limit, per_user_usage_limit, first_order_only, first_n_orders,
-        target_audience, auto_apply, requires_code, priority,
+        target_audience, target_zones, auto_apply, requires_code, priority,
         active, created_by_admin_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
       [
         c.code ? `${c.code}-COPY` : null,
         `${c.title} (Copy)`,
@@ -394,6 +431,7 @@ const duplicateCoupon = async (req, res) => {
         c.first_order_only,
         c.first_n_orders,
         c.target_audience,
+        c.target_zones,
         c.auto_apply,
         c.requires_code,
         c.priority,
@@ -410,6 +448,13 @@ const duplicateCoupon = async (req, res) => {
   if (c.target_audience === 'selected') {
     await pool.query(
       'INSERT INTO coupon_users (coupon_id, user_id) SELECT ?, user_id FROM coupon_users WHERE coupon_id = ?',
+      [result.insertId, id]
+    );
+  }
+
+  if (c.target_zones === 'selected') {
+    await pool.query(
+      'INSERT INTO coupon_zones (coupon_id, delivery_zone_id) SELECT ?, delivery_zone_id FROM coupon_zones WHERE coupon_id = ?',
       [result.insertId, id]
     );
   }

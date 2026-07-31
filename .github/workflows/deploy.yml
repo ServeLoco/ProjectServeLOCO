@@ -71,22 +71,6 @@ jobs:
       - run: npm run lint
       - run: npm run build
 
-  ci-web:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./apps/web
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: './apps/web/package-lock.json'
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run build
-
   ci-customer-app:
     runs-on: ubuntu-latest
     defaults:
@@ -106,7 +90,7 @@ jobs:
   # ── Deploy ONLY after ALL CI jobs pass ───────────────────────────────────────
   deploy:
     runs-on: ubuntu-latest
-    needs: [ci-api, ci-admin, ci-web, ci-customer-app]
+    needs: [ci-api, ci-admin, ci-customer-app]
     steps:
       - name: Deploy via SSH to AWS Lightsail
         uses: appleboy/ssh-action@v1.0.3
@@ -129,7 +113,6 @@ jobs:
             docker compose -f docker-compose.prod.yml down --remove-orphans || true
             docker rm -f \
               projectserveloco-api-1 \
-              projectserveloco-web-1 \
               projectserveloco-admin-1 \
               projectserveloco-landing-1 \
               2>/dev/null || true

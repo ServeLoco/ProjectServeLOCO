@@ -1,14 +1,12 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback, memo } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { Image as ExpoImage } from 'expo-image';
 import {
   View,
   Text,
-  TextInput,
   StyleSheet,
   ScrollView,
   Animated,
   TouchableOpacity,
-  Pressable,
   ActivityIndicator,
   Alert,
   LayoutAnimation,
@@ -32,7 +30,7 @@ import {
   LocationPicker,
 } from '../../../components';
 import { colors, typography, spacing, radius, shadows, smallMs, easing } from '../../../theme';
-import { useCartStore, useSettingsStore, useAuthStore } from '../../../stores';
+import { useCartStore, useSettingsStore, useAuthStore, useDeliveryLocationStore, useDeliveryZonesStore } from '../../../stores';
 import { cartApi, ordersApi, imagesApi, settingsApi } from '../../../api';
 import { trackEvent } from '../../../api/analyticsClient';
 import { asArray, buildProgressHintText, imageRecordToUrl, normalizeCartCalculation, normalizeOrder, normalizeSettings } from '../../../utils';
@@ -43,11 +41,22 @@ import {
   requestPreciseLocationPermission,
   openAppLocationSettings,
 } from '../../../hooks/usePreciseLocationPermissionOnStart';
+import { mapboxAvailable } from '../../../utils/mapbox';
 
 const isCodNightBlockError = (message = '') => {
   const lower = String(message).toLowerCase();
   return lower.includes('cash on delivery') && (lower.includes('night') || lower.includes('upi'));
 };
+
+// Radius-zone rejections from order creation. Prefer the machine code the API
+// sends (ApiError.code); fall back to message matching for older servers.
+const isOutOfRangeOrderError = (error) =>
+  error?.code === 'OUT_OF_DELIVERY_RANGE'
+  || String(error?.message || '').toLowerCase().includes('not available at this location');
+const isCodZoneBlockError = (error) =>
+  error?.code === 'COD_NOT_AVAILABLE'
+  || (String(error?.message || '').toLowerCase().includes('cash on delivery')
+    && String(error?.message || '').toLowerCase().includes('your location'));
 
 const GPS_ERROR_TIMEOUT = 'GPS_TIMEOUT';
 const GPS_ERROR_DENIED = 'GPS_DENIED';
@@ -140,191 +149,6 @@ const getGpsErrorCopy = (code) => {
   }
 };
 
-const manualAddressStyles = StyleSheet.create({
-  wrap: {
-    marginTop: spacing.sm,
-  },
-  labelRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    marginBottom: spacing.xs,
-  },
-  labelIcon: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: colors.saffronLight,
-    borderWidth: 1,
-    borderColor: colors.saffron + '35',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  label: {
-    ...typography.labelSmall,
-    color: colors.textPrimary,
-    fontWeight: '700',
-    letterSpacing: 0.2,
-  },
-  fieldWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    minHeight: 52,
-    paddingHorizontal: spacing.md,
-    gap: spacing.sm,
-    backgroundColor: colors.bgInput,
-    borderRadius: radius.input,
-    borderWidth: 1,
-    borderColor: colors.textPrimary,
-  },
-  fieldWrapFocused: {
-    backgroundColor: colors.bgSurface,
-    borderWidth: 1.5,
-    borderColor: colors.saffron,
-    shadowColor: colors.saffron,
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.14,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  fieldWrapFilled: {
-    backgroundColor: colors.bgSurface,
-    borderColor: colors.textPrimary,
-  },
-  leadingIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: colors.bgSurface,
-    borderWidth: 1,
-    borderColor: colors.border,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  leadingIconActive: {
-    backgroundColor: colors.saffronLight,
-    borderColor: colors.saffron + '55',
-  },
-  input: {
-    flex: 1,
-    fontSize: 14,
-    lineHeight: 20,
-    color: colors.textPrimary,
-    fontWeight: '500',
-    paddingVertical: Platform.OS === 'android' ? 12 : 14,
-    margin: 0,
-    includeFontPadding: false,
-    textAlignVertical: 'center',
-  },
-  clearBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: colors.bgSurface,
-    alignItems: 'center',
-    justifyContent: 'center',
-    ...shadows.xs,
-  },
-  clearBtnHidden: {
-    opacity: 0,
-    pointerEvents: 'none',
-  },
-});
-
-const ManualAddressField = memo(function ManualAddressField({
-  visible,
-  value,
-  onChangeText,
-  onClear,
-  onTouch,
-}) {
-  const [focused, setFocused] = useState(false);
-  const inputRef = useRef(null);
-  const hasText = value.trim().length > 0;
-  const iconActive = focused || hasText;
-
-  const focusInput = useCallback(() => {
-    onTouch?.();
-    setTimeout(() => {
-      if (inputRef.current?.isFocused?.()) {
-        inputRef.current?.blur();
-        setTimeout(() => {
-          inputRef.current?.focus();
-        }, 40);
-      } else {
-        inputRef.current?.focus();
-      }
-    }, 30);
-  }, [onTouch]);
-
-  if (!visible) {
-    return null;
-  }
-
-  return (
-    <View style={manualAddressStyles.wrap} collapsable={false}>
-      <View style={manualAddressStyles.labelRow} pointerEvents="none">
-        <View style={manualAddressStyles.labelIcon}>
-          <AppIcon name="location" size={13} color={colors.textPrimary} />
-        </View>
-        <Text style={manualAddressStyles.label}>Complete Address</Text>
-      </View>
-
-      <Pressable
-        style={[
-          manualAddressStyles.fieldWrap,
-          focused && manualAddressStyles.fieldWrapFocused,
-          !focused && hasText && manualAddressStyles.fieldWrapFilled,
-        ]}
-        onPressIn={focusInput}
-        android_disableSound
-        accessibilityLabel="Complete address"
-      >
-        <View
-          style={[manualAddressStyles.leadingIcon, iconActive && manualAddressStyles.leadingIconActive]}
-          pointerEvents="none"
-        >
-          <AppIcon
-            name="home"
-            size={16}
-            color={iconActive ? colors.textPrimary : colors.textSecondary}
-          />
-        </View>
-        <TextInput
-          ref={inputRef}
-          value={value}
-          onChangeText={onChangeText}
-          placeholder="House No, Building, Street, Area"
-          placeholderTextColor={colors.textHint}
-          onFocus={() => {
-            onTouch?.();
-            setFocused(true);
-          }}
-          onBlur={() => setFocused(false)}
-          style={manualAddressStyles.input}
-          autoCapitalize="sentences"
-          autoCorrect={false}
-          returnKeyType="done"
-          blurOnSubmit={false}
-          underlineColorAndroid="transparent"
-          showSoftInputOnFocus
-        />
-        {hasText ? (
-          <TouchableOpacity
-            style={manualAddressStyles.clearBtn}
-            onPress={onClear}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            accessibilityRole="button"
-            accessibilityLabel="Clear address"
-          >
-            <AppIcon name="close" size={14} color={colors.textSecondary} />
-          </TouchableOpacity>
-        ) : null}
-      </Pressable>
-    </View>
-  );
-});
-
 export default function CheckoutScreen() {
   const navigation = useNavigation();
   const insets = useSafeAreaInsets();
@@ -339,6 +163,9 @@ export default function CheckoutScreen() {
   const syncItemPricesFromServer = useCartStore(state => state.syncItemPricesFromServer);
   const removeUnavailableItems = useCartStore(state => state.removeUnavailableItems);
   const shopStatus = useSettingsStore(state => state.shopStatus);
+  // Bumped by useDeliveryZoneSync on a delivery_zones.updated push (admin
+  // saved a zone) — included below purely to retrigger the bill recompute.
+  const deliveryZonesVersion = useDeliveryZonesStore(state => state.version);
   const deliveryAvailable = useSettingsStore(state => state.deliveryAvailable);
   const upiQrImageId = useSettingsStore(state => state.upiQrImageId);
   const upiQrImageUrl = useSettingsStore(state => state.upiQrImageUrl);
@@ -347,6 +174,11 @@ export default function CheckoutScreen() {
   const nightCharge = useSettingsStore(state => state.nightCharge);
   const setSettings = useSettingsStore(state => state.setSettings);
   const userProfile = useAuthStore(state => state.profile);
+  // This is populated by the app-start sync and updated when Home's Change
+  // Location flow saves a manual pin. Checkout must use this shared value,
+  // never fetch a new live location on entry.
+  const savedDeliveryLocation = useDeliveryLocationStore(state => state.coords);
+  const savedDeliveryLocationSource = useDeliveryLocationStore(state => state.source);
 
   const [now, setNow] = React.useState(() => new Date());
   useEffect(() => {
@@ -369,6 +201,47 @@ export default function CheckoutScreen() {
   const [address, setAddress] = useState(userProfile?.address || '');
   const [coordinates, setCoordinates] = useState(null);
   const coordinatesRef = useRef(null);
+  // Live pin position before Confirm — lets the bill (and its delivery charge)
+  // preview whichever zone the pin currently sits over as the user drags.
+  const [previewCoordinates, setPreviewCoordinates] = useState(null);
+  const handleLiveCenterChange = useCallback((lat, lng) => {
+    setPreviewCoordinates({ lat, lng });
+  }, []);
+  // Tracks the manual saved-location the checkout-local pin was last synced
+  // against. Initialized from the current value so mount never fires a reset.
+  const lastManualLocationKeyRef = useRef(
+    savedDeliveryLocationSource === 'manual' && savedDeliveryLocation
+      ? `${savedDeliveryLocation.lat},${savedDeliveryLocation.lng}`
+      : null,
+  );
+  // Once the user confirms a pin inside Checkout's own map, that local
+  // `coordinates` wins over `savedDeliveryLocation` in calculationPayload
+  // (see below) — otherwise dragging the map wouldn't preview live. But if
+  // Home's "Change Location" flow saves a NEW manual pin while Checkout is
+  // still mounted, that local override is now stale and would silently keep
+  // pricing/coupons off the old spot. Drop it so the fresh saved location
+  // (and a full bill/coupon recalculation) takes over immediately — the same
+  // reset handlePinMoved does when the user drags the in-screen map.
+  useEffect(() => {
+    if (savedDeliveryLocationSource !== 'manual' || !savedDeliveryLocation) return;
+    const nextKey = `${savedDeliveryLocation.lat},${savedDeliveryLocation.lng}`;
+    if (nextKey === lastManualLocationKeyRef.current) return;
+    lastManualLocationKeyRef.current = nextKey;
+    coordinatesRef.current = null;
+    setCoordinates(null);
+    setPreviewCoordinates(null);
+    // Drop the old bill immediately rather than leaving it on screen while the
+    // recalculation round-trips — on a slow connection that request can take
+    // seconds, and a stale total (priced for the old zone, discounting a
+    // coupon that may no longer apply) sitting there with only the disabled
+    // Place Order button as protection is easy to miss. isCalculating (set by
+    // the fetch effect below once it actually fires) drives the loading UI;
+    // clearing bill here means there's nothing stale to render meanwhile.
+    setBill(null);
+    setCalcError(null);
+    setFreeDeliveryProgress(null);
+    setFreeDeliveryUnlocked(false);
+  }, [savedDeliveryLocation, savedDeliveryLocationSource, setFreeDeliveryProgress, setFreeDeliveryUnlocked]);
   // idle | loading | success (delivery pin confirmed) | error
   const [gpsStatus, setGpsStatus] = useState('idle');
   const [gpsError, setGpsError] = useState(null);
@@ -376,9 +249,10 @@ export default function CheckoutScreen() {
   const [mapToast, setMapToast] = useState(null); // null | 'locating' | 'live' | 'pinned'
   const mapToastTimerRef = useRef(null);
   const reverseGeoTimerRef = useRef(null);
-  // How the user is providing their delivery address: GPS or manual entry.
-  // Page starts immersed in the map — no picker cards to tap first.
-  const [locationMode, setLocationMode] = useState('gps');
+  // Manual address entry has been removed — GPS pin is now the only way to
+  // set delivery location. Kept as a constant (rather than inlining `true`
+  // everywhere) so mapMode below reads the same as before.
+  const locationMode = 'gps';
   // Sheet scroll only — map is a sibling behind the sheet (no scroll conflict).
   const scrollRef = useRef(null);
   const locationPickerRef = useRef(null);
@@ -422,6 +296,20 @@ export default function CheckoutScreen() {
   };
   const [isCalculating, setIsCalculating] = useState(false);
   const [bill, setBill] = useState(null);
+  // Radius-zone gating from the server-priced bill: pin beyond the largest
+  // zone blocks the order; a COD-off zone forces UPI (mirrors the night rule).
+  const outOfRange = Boolean(bill?.outOfRange);
+  // A no-delivery exclusion square reports outOfRange: false but still blocks
+  // the order outright, so gating on outOfRange alone left Place Order
+  // enabled and the server rejected it with DELIVERY_EXCLUDED at submit.
+  // deliveryBlocked is what every gate below uses; the two stay separate only
+  // where the wording differs (an exclusion has its own admin-set message and
+  // no "move the pin closer" advice to give).
+  const excluded = Boolean(bill?.excluded);
+  const exclusionMessage = bill?.exclusionMessage || null;
+  const deliveryBlocked = outOfRange || excluded;
+  const codBlockedByZone = bill?.codAllowed === false;
+  const codUnavailable = codBlockedByNight || codBlockedByZone;
   const [calcError, setCalcError] = useState(null);
   const checkoutItems = useMemo(() => items.map(item => {
     const type = item.type || (item.product?.isCombo || item.product?.is_combo ? 'combo' : 'product');
@@ -435,13 +323,16 @@ export default function CheckoutScreen() {
   }), [items]);
   const calculationPayload = useMemo(() => ({
     items: checkoutItems,
-    latitude: coordinates?.lat,
-    longitude: coordinates?.lng,
+    // Confirmed coords win once set; until then, preview the moved pin so the
+    // delivery charge updates live. Before either, price the app's saved
+    // delivery location from startup/Home rather than device GPS.
+    latitude: coordinates?.lat ?? previewCoordinates?.lat ?? savedDeliveryLocation?.lat,
+    longitude: coordinates?.lng ?? previewCoordinates?.lng ?? savedDeliveryLocation?.lng,
     delivery_type: deliveryType || 'standard',
     coupon_code: appliedCouponCode || undefined,
     coupon_id: !appliedCouponCode && appliedCouponId ? appliedCouponId : undefined,
     no_auto_apply: couponAutoApplyDisabled,
-  }), [checkoutItems, coordinates, deliveryType, appliedCouponCode, appliedCouponId, couponAutoApplyDisabled]);
+  }), [checkoutItems, coordinates, previewCoordinates, savedDeliveryLocation, deliveryType, appliedCouponCode, appliedCouponId, couponAutoApplyDisabled, deliveryZonesVersion]);
 
   // Animations
   const deliverySlide = useRef(new Animated.Value(24)).current;
@@ -455,16 +346,10 @@ export default function CheckoutScreen() {
   const btnScale = useRef(new Animated.Value(1)).current;
   const arrowAnim = useRef(new Animated.Value(0)).current;
   const locationWarnPulse = useRef(new Animated.Value(0)).current;
-  const gpsIconScale = useRef(new Animated.Value(1)).current;
-  const manualIconScale = useRef(new Animated.Value(1)).current;
   // Fast Delivery energetic pulse: a small glowing ⚡ bolt bounce.
   // Single native-driver value (opacity/transform only) — minimal by design.
   const fastEnergy = useRef(new Animated.Value(0)).current;
   const addressTouchedRef = useRef(false);
-  // 0 -> 1 selected-state progress per delivery-mode row, driving the badge
-  // fill, row border/background, and radio-dot animations together.
-  const gpsRowProgress = useRef(new Animated.Value(0)).current;
-  const manualRowProgress = useRef(new Animated.Value(0)).current;
 
   const animateSectionChoice = useCallback(() => {
     // Paper (old arch) Android needs this flag once so LayoutAnimation runs.
@@ -613,13 +498,13 @@ export default function CheckoutScreen() {
     }
   }, [bill, deliveryType]);
 
-  // If the current time is inside the night delivery window, COD is unavailable
-  // and we force the user to UPI.
+  // If the current time is inside the night delivery window, or the pinned
+  // location's zone disallows Cash, COD is unavailable — force the user to UPI.
   useEffect(() => {
-    if (codBlockedByNight && paymentMethod === 'Cash') {
+    if (codUnavailable && paymentMethod === 'Cash') {
       setPaymentMethod('UPI');
     }
-  }, [codBlockedByNight, paymentMethod]);
+  }, [codUnavailable, paymentMethod]);
 
   // Always refresh payment settings on checkout — the home screen caches them
   // for up to 5 minutes, so a newly uploaded UPI QR would otherwise stay hidden.
@@ -724,11 +609,20 @@ export default function CheckoutScreen() {
       return undefined;
     }
 
+    // Flips the instant the payload changes (new pin, coupon, etc) — not
+    // after the debounce below. On a slow connection there's otherwise a gap
+    // between the pin settling on a new (possibly out-of-zone) spot and the
+    // debounce timer firing, where isCalculating is still false and the old
+    // bill/deliveryBlocked (priced for the PREVIOUS pin) is what Confirm
+    // reads — enabling it against a location that was never actually priced.
+    setIsCalculating(true);
+
     // Debounce so rapid toggles (delivery type, coordinates updates) don't fire
-    // a burst of parallel cart/calculate requests.
-    const debounceMs = 250;
+    // a burst of parallel cart/calculate requests. Kept short so the delivery
+    // charge preview tracks the pin in near real-time while it's being dragged
+    // — map idle events (not raw drag frames) are what actually pace this.
+    const debounceMs = 80;
     const timer = setTimeout(() => {
-      setIsCalculating(true);
       setCalcError(null);
 
       cartApi.calculate(calculationPayload)
@@ -949,17 +843,11 @@ export default function CheckoutScreen() {
     },
   }), [sheetHeightAnim, snapSheet, getCollapsedHeight]);
 
-  // Warm permission prompt when Checkout opens (does not fetch GPS).
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      await requestPreciseLocationPermission();
-      if (cancelled) return;
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // Location is mandatory for checkout — if it's not granted, block with a
+  // modal (Give Permission / Back to cart) instead of letting the user
+  // proceed pin-less. No auto OS-dialog on mount — only the modal's own
+  // "Give Permission" button (handleEnableLocationPress) triggers the prompt.
+  const [showLocationRequiredModal, setShowLocationRequiredModal] = useState(false);
 
   // After Settings: clear blocked state only. Live GPS still requires recenter tap.
   useEffect(() => {
@@ -986,7 +874,10 @@ export default function CheckoutScreen() {
     const checkPermission = async () => {
       try {
         const existing = await Location.getForegroundPermissionsAsync();
-        if (isActive) setHasLocationPermission(Boolean(existing?.granted));
+        if (!isActive) return;
+        const granted = Boolean(existing?.granted);
+        setHasLocationPermission(granted);
+        setShowLocationRequiredModal(!granted);
       } catch (_) { /* ignore */ }
     };
     checkPermission();
@@ -1031,6 +922,11 @@ export default function CheckoutScreen() {
 
   // Lock map-center pin as delivery location, then open payment methods.
   const [confirmingContinue, setConfirmingContinue] = useState(false);
+  // Confirm reads whatever's under the pin — on slow internet the tiles (and
+  // the pin's real position) aren't in yet, so this stays true (blocking
+  // Confirm) until LocationPicker's onMapReady fires. Starts pre-satisfied
+  // when Mapbox itself isn't configured, since onMapReady would never fire.
+  const [mapStyleLoaded, setMapStyleLoaded] = useState(!mapboxAvailable);
   const handleConfirmLocationContinue = useCallback(async () => {
     if (confirmingContinue) return;
     setConfirmingContinue(true);
@@ -1047,41 +943,6 @@ export default function CheckoutScreen() {
     }
   }, [confirmingContinue, snapSheet]);
 
-  const selectMode = (mode) => {
-    if (mode === locationMode) return;
-
-    setLocationMode(mode);
-    setSubmitError(null);
-    if (mode === 'manual') {
-      // Manual form + payment methods — expand sheet.
-      snapSheet(true);
-    }
-
-    const iconScale = mode === 'gps' ? gpsIconScale : manualIconScale;
-    iconScale.setValue(1);
-    Animated.sequence([
-      Animated.spring(iconScale, { toValue: 1.18, useNativeDriver: true, speed: 24, bounciness: 10 }),
-      Animated.spring(iconScale, { toValue: 1, useNativeDriver: true, speed: 24, bounciness: 6 }),
-    ]).start();
-
-    Animated.timing(gpsRowProgress, {
-      toValue: mode === 'gps' ? 1 : 0,
-      duration: 220,
-      useNativeDriver: true,
-    }).start();
-    Animated.timing(manualRowProgress, {
-      toValue: mode === 'manual' ? 1 : 0,
-      duration: 220,
-      useNativeDriver: true,
-    }).start();
-
-    if (mode === 'gps') {
-      coordinatesRef.current = null;
-      setCoordinates(null);
-      setGpsStatus('idle');
-      snapSheet(false);
-    }
-  };
 
   const createOrder = async (currentBill) => {
     isSubmittingRef.current = true;
@@ -1089,7 +950,15 @@ export default function CheckoutScreen() {
     Animated.spring(btnScale, { toValue: 0.95, useNativeDriver: true }).start();
 
     try {
-      const pin = coordinatesRef.current || coordinates;
+      // savedDeliveryLocation is the same fallback the bill above prices with
+      // (calculationPayload). Without it here, a customer who arrived with a
+      // saved location and never re-confirmed a pin on this screen got a bill
+      // priced from that location but an order posted with NO coordinates —
+      // which the server now refuses as out of range. Priced one way,
+      // submitted another: the order failed at the very last tap.
+      // previewCoordinates is deliberately NOT in this chain: it tracks the
+      // live map centre as it drifts and is preview-only, never a commitment.
+      const pin = coordinatesRef.current || coordinates || savedDeliveryLocation;
       const pinLat = pin?.lat != null ? Number(pin.lat) : null;
       const pinLng = pin?.lng != null ? Number(pin.lng) : null;
       const hasPin = Number.isFinite(pinLat) && Number.isFinite(pinLng);
@@ -1182,7 +1051,12 @@ export default function CheckoutScreen() {
       idempotencyKeyRef.current = null;
     } catch (error) {
       const message = error.message || 'Unable to place order. Please try again.';
-      if (isCodNightBlockError(message)) {
+      if (isOutOfRangeOrderError(error)) {
+        setSubmitError('Sorry, we do not deliver to this location yet. Try a closer address.');
+        snapSheet(false);
+      } else if (isCodZoneBlockError(error)) {
+        focusSectionError('payment', 'Cash on Delivery is not available at your location. Please pay via UPI.');
+      } else if (isCodNightBlockError(message)) {
         showCodNightWarning();
       } else {
         setSubmitError(message);
@@ -1236,13 +1110,30 @@ export default function CheckoutScreen() {
       showCodNightWarning();
       return;
     }
+    if (codBlockedByZone && paymentMethod === 'Cash') {
+      focusSectionError('payment', 'Cash on Delivery is not available at your location. Please pay via UPI.');
+      return;
+    }
     // Location is now optional - removed coordinate requirement
     if (isCalculating || calcError || !bill) {
       setSubmitError('Please wait while we verify the order total.');
       return;
     }
+    // Zone pricing: pin beyond the largest delivery zone — hard block (the
+    // server would reject with OUT_OF_DELIVERY_RANGE anyway).
+    if (outOfRange) {
+      setSubmitError('Sorry, we do not deliver to this location yet. Try a closer address.');
+      snapSheet(false);
+      return;
+    }
+    // Exclusion square — same hard block, but the admin's own message says
+    // why (server rejects with DELIVERY_EXCLUDED).
+    if (excluded) {
+      setSubmitError(exclusionMessage || 'Delivery is not available at this location.');
+      snapSheet(false);
+      return;
+    }
     // Removed requiresLocation check - location is optional
-    // Removed deliveryWithinRange check - will be validated by backend
 
     isSubmittingRef.current = true;
     setSubmitError(null);
@@ -1265,6 +1156,36 @@ export default function CheckoutScreen() {
       syncItemPricesFromServer(verifiedBill.items);
       if (verifiedBill.unavailableItems?.length) {
         removeUnavailableItems(verifiedBill.unavailableItems);
+      }
+
+      // Re-check zone gating against the FRESH bill, not the stale one the
+      // earlier guard (line ~1105) ran against. A pin dragged out of zone
+      // right before tapping Place Order still passes that stale check on a
+      // slow connection — the debounced recalculation hasn't landed yet —
+      // so without this, only the total-mismatch check below would catch it,
+      // and it doesn't look at zone/exclusion/COD flags at all.
+      if (verifiedBill.outOfRange) {
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+        Animated.spring(btnScale, { toValue: 1, useNativeDriver: true }).start();
+        setSubmitError('Sorry, we do not deliver to this location yet. Try a closer address.');
+        snapSheet(false);
+        return;
+      }
+      if (verifiedBill.excluded) {
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+        Animated.spring(btnScale, { toValue: 1, useNativeDriver: true }).start();
+        setSubmitError(verifiedBill.exclusionMessage || 'Delivery is not available at this location.');
+        snapSheet(false);
+        return;
+      }
+      if (verifiedBill.codAllowed === false && paymentMethod === 'Cash') {
+        isSubmittingRef.current = false;
+        setIsSubmitting(false);
+        Animated.spring(btnScale, { toValue: 1, useNativeDriver: true }).start();
+        focusSectionError('payment', 'Cash on Delivery is not available at your location. Please pay via UPI.');
+        return;
       }
 
       const oldGrandTotal = bill?.grandTotal;
@@ -1300,7 +1221,12 @@ export default function CheckoutScreen() {
       await createOrder(verifiedBill);
     } catch (error) {
       const message = error.message || 'Unable to place order. Please try again.';
-      if (isCodNightBlockError(message)) {
+      if (isOutOfRangeOrderError(error)) {
+        setSubmitError('Sorry, we do not deliver to this location yet. Try a closer address.');
+        snapSheet(false);
+      } else if (isCodZoneBlockError(error)) {
+        focusSectionError('payment', 'Cash on Delivery is not available at your location. Please pay via UPI.');
+      } else if (isCodNightBlockError(message)) {
         showCodNightWarning();
       } else {
         setSubmitError(message);
@@ -1313,33 +1239,25 @@ export default function CheckoutScreen() {
 
   const freeDeliveryProgress = bill?.freeDeliveryProgress || null;
   const totalQuantity = items.reduce((total, item) => total + (Number(item.quantity) || 0), 0);
-  // Location is now optional - removed delivery validation checks
-  const handleAddressTouch = useCallback(() => {
-    addressTouchedRef.current = true;
-  }, []);
-
-  const handleAddressChange = useCallback((text) => {
-    addressTouchedRef.current = true;
-    setAddress(text);
-    setSubmitError(prev => (prev ? null : prev));
-  }, []);
-
-  const handleAddressClear = useCallback(() => {
-    addressTouchedRef.current = true;
-    setAddress('');
-    setSubmitError(prev => (prev ? null : prev));
-  }, []);
-
   const isModeSelectDisabled = isSubmitting || items.length === 0 || gpsStatus === 'loading';
   const gpsErrorCopy = gpsStatus === 'error' ? getGpsErrorCopy(gpsError) : null;
-  const isPlaceOrderDisabled = isSubmitting || isCalculating || items.length === 0 || !bill || Boolean(calcError);
+  const isPlaceOrderDisabled = isSubmitting || isCalculating || items.length === 0 || !bill || Boolean(calcError) || deliveryBlocked;
   const placeOrderLabel = isSubmitting
     ? 'Processing...'
     : isCalculating
     ? 'Calculating total...'
+    : deliveryBlocked
+    ? 'Delivery not available here'
     : bill
     ? `Place Order • ₹${bill.grandTotal}`
     : 'Place Order';
+  // An exclusion square can sit well inside a delivery zone, so "move the pin
+  // to a covered location" is wrong advice there — show the admin's reason.
+  const deliveryBlockedMessage = excluded
+    ? (exclusionMessage || 'Delivery is not available at this location.')
+    : bill?.nearestZoneName
+    ? `Outside delivery area. Move pin inside ${bill.nearestZoneName} to order.`
+    : 'Outside delivery area. Move the pin to a covered location.';
   const mapMode = locationMode !== 'manual';
 
   return (
@@ -1358,15 +1276,22 @@ export default function CheckoutScreen() {
             immersive
             hideActions
             fullBleed
-            // On open: ask for location if needed, then fly pin to live GPS.
-            // Does NOT save delivery — user must still tap Confirm location.
-            autoLocateOnMount
+            // Start from the shared app/Home delivery location. Live GPS is
+            // only available through the explicit recenter action.
+            autoLocateOnMount={false}
+            initialCenter={savedDeliveryLocation
+              ? { latitude: savedDeliveryLocation.lat, longitude: savedDeliveryLocation.lng }
+              : undefined}
+            initialZoom={14.5}
             sheetReserve={sheetReserve}
-            // Do not pass confirmed coords as initialCenter — that can re-seed
-            // the camera after Confirm. Camera stays where the user left it.
             onConfirm={applyPickedLocation}
             onLocateStatus={handleLocateStatus}
             onPinMoved={handlePinMoved}
+            onLiveCenterChange={handleLiveCenterChange}
+            onMapReady={() => setMapStyleLoaded(true)}
+            // Only shade zones while the pin needs guidance — once it's
+            // already inside a valid zone, the overlay is just clutter.
+            showZoneOverlay={outOfRange}
           />
           {!hasLocationPermission ? (
             <View
@@ -1518,20 +1443,46 @@ export default function CheckoutScreen() {
             >
               {mapMode && !sheetExpanded ? (
                 <View style={styles.sheetActions}>
+                  {/* isCalculating/mapStyleLoaded checked FIRST — deliveryBlocked and
+                      bill are both leftovers from the pin's old position, and would
+                      otherwise flash a stale blocked-warning or stale charge while
+                      the new position is still being priced (e.g. slow connection). */}
+                  {(isCalculating || !mapStyleLoaded) ? (
+                    <View style={styles.deliveryChargePreviewRow} accessibilityRole="text">
+                      <ActivityIndicator size="small" color={colors.textSecondary} />
+                      <Text style={styles.deliveryChargePreviewText}>Please wait, checking delivery…</Text>
+                    </View>
+                  ) : deliveryBlocked ? (
+                    // marginTop override: sectionErrorRow's negative marginTop
+                    // assumes it follows other content (its other use sites) —
+                    // here it's the first child under the sheet header, so the
+                    // negative margin pulled it up into the drag-handle area
+                    // and clipped the icon/text.
+                    <View style={[styles.sectionErrorRow, { marginTop: 0 }]} accessibilityLiveRegion="polite">
+                      <AppIcon name="warning" size={14} color={colors.error} />
+                      <Text style={styles.sectionErrorText}>{deliveryBlockedMessage}</Text>
+                    </View>
+                  ) : calcError ? (
+                    <View style={[styles.sectionErrorRow, { marginTop: 0 }]} accessibilityLiveRegion="polite">
+                      <AppIcon name="warning" size={14} color={colors.error} />
+                      <Text style={styles.sectionErrorText}>{calcError}</Text>
+                    </View>
+                  ) : bill ? (
+                    <View style={styles.deliveryChargePreviewRow} accessibilityRole="text">
+                      <Text style={styles.deliveryChargePreviewText}>
+                        {Boolean(bill.isFreeDeliveryApplied) || !Number(bill.deliveryCharge)
+                          ? 'Delivery charge: FREE'
+                          : `Delivery charge: ₹${bill.deliveryCharge}`}
+                      </Text>
+                    </View>
+                  ) : null}
                   <SheetActionBtn
                     label={confirmingContinue ? 'Saving…' : 'Confirm location'}
                     icon="check"
                     variant="saffron"
                     busy={confirmingContinue}
-                    disabled={isModeSelectDisabled || confirmingContinue}
+                    disabled={isModeSelectDisabled || confirmingContinue || deliveryBlocked || isCalculating || !mapStyleLoaded || !bill || Boolean(calcError)}
                     onPress={handleConfirmLocationContinue}
-                  />
-                  <SheetActionBtn
-                    label="Enter manually"
-                    icon="edit"
-                    variant="ghost"
-                    disabled={isModeSelectDisabled}
-                    onPress={() => selectMode('manual')}
                   />
                 </View>
               ) : null}
@@ -1577,27 +1528,18 @@ export default function CheckoutScreen() {
               </View>
             ) : null}
 
-            {locationMode === 'manual' && (
-              <View style={styles.manualWrap}>
-                <ManualAddressField
-                  visible
-                  value={address}
-                  onTouch={handleAddressTouch}
-                  onChangeText={handleAddressChange}
-                  onClear={handleAddressClear}
-                />
-                <TouchableOpacity
-                  onPress={() => selectMode('gps')}
-                  disabled={isModeSelectDisabled}
-                  style={styles.useMapInsteadBtn}
-                  accessibilityRole="button"
-                  accessibilityLabel="Use map instead"
-                >
-                  <AppIcon name="navigation" size={14} color={colors.saffronDark} />
-                  <Text style={styles.useMapInsteadText}>Use map instead</Text>
-                </TouchableOpacity>
-              </View>
-            )}
+        {/* Zone pricing: pin is beyond the largest delivery zone, or sits in a
+            no-delivery exclusion square — hard block either way.
+            Skipped while the map pin-picking view is showing (mapMode &&
+            !sheetExpanded) — that view already renders its own copy above
+            the Confirm location button; showing both overlapped the sheet's
+            drag handle. */}
+        {deliveryBlocked && !(mapMode && !sheetExpanded) ? (
+          <View style={styles.sectionErrorRow} accessibilityLiveRegion="polite">
+            <AppIcon name="warning" size={14} color={colors.error} />
+            <Text style={styles.sectionErrorText}>{deliveryBlockedMessage}</Text>
+          </View>
+        ) : null}
 
         {/* Full form only when sheet is pulled up (or manual mode fills the screen). */}
         {(sheetExpanded || !mapMode) ? (
@@ -1734,6 +1676,11 @@ export default function CheckoutScreen() {
                 )}
               </PressableScale>
             )}
+            {bill.fastDeliveryEnabled && (
+              <Text style={styles.fastDeliveryHint}>
+                Add Fast Delivery if your order has hot, fresh, or fast-food items — this keeps them hot on arrival.
+              </Text>
+            )}
           </Animated.View>
         )}
 
@@ -1788,6 +1735,15 @@ export default function CheckoutScreen() {
                 <AppIcon name="clock" size={14} color={colors.saffronDark} />
                 <Text style={styles.paymentNightBarText}>
                   COD unavailable {nightChargeStart || '—'}–{nightChargeEnd || '—'}. Use UPI.
+                </Text>
+              </View>
+            )}
+
+            {codBlockedByZone && !codBlockedByNight && (
+              <View style={styles.paymentNightBar}>
+                <AppIcon name="navigation" size={14} color={colors.saffronDark} />
+                <Text style={styles.paymentNightBarText}>
+                  COD unavailable at your delivery location. Use UPI.
                 </Text>
               </View>
             )}
@@ -1855,15 +1811,15 @@ export default function CheckoutScreen() {
                 <PressableScale
                   style={styles.paymentChipPressable}
                   onPress={() => {
-                    if (!codBlockedByNight) pickPaymentMethod('Cash');
+                    if (!codUnavailable) pickPaymentMethod('Cash');
                   }}
-                  disabled={codBlockedByNight}
-                  scaleTo={codBlockedByNight ? 1 : 0.96}
+                  disabled={codUnavailable}
+                  scaleTo={codUnavailable ? 1 : 0.96}
                   accessibilityRole="button"
                   accessibilityLabel="Cash on Delivery"
-                  accessibilityState={{ disabled: codBlockedByNight, selected: paymentMethod === 'Cash' && !codBlockedByNight }}
+                  accessibilityState={{ disabled: codUnavailable, selected: paymentMethod === 'Cash' && !codUnavailable }}
                 >
-                  {paymentMethod === 'Cash' && !codBlockedByNight ? (
+                  {paymentMethod === 'Cash' && !codUnavailable ? (
                     <LinearGradient
                       colors={[colors.btnHighlightStart, colors.btnHighlightEnd]}
                       start={{ x: 0, y: 0 }}
@@ -1888,7 +1844,7 @@ export default function CheckoutScreen() {
                       styles.paymentChip,
                       styles.chip3dIdle,
                       paymentError && styles.chip3dIdleError,
-                      codBlockedByNight && styles.optionCardDisabled,
+                      codUnavailable && styles.optionCardDisabled,
                     ]}>
                       <View style={styles.paymentChipTopRow}>
                         <View style={styles.paymentChipTopSpacer} />
@@ -1898,20 +1854,22 @@ export default function CheckoutScreen() {
                           <AppIcon
                             name="rupee"
                             size={20}
-                            color={codBlockedByNight ? colors.textDisabled : colors.textPrimary}
+                            color={codUnavailable ? colors.textDisabled : colors.textPrimary}
                           />
                         </View>
                         <Text
                           numberOfLines={2}
                           style={[
                             styles.paymentChipTitle,
-                            codBlockedByNight && styles.paymentCardTitleDisabled,
+                            codUnavailable && styles.paymentCardTitleDisabled,
                           ]}
                         >
                           Cash on Delivery
                         </Text>
                         {codBlockedByNight ? (
                           <Text style={styles.paymentCardHint}>Unavailable at night</Text>
+                        ) : codBlockedByZone ? (
+                          <Text style={styles.paymentCardHint}>Unavailable at your location</Text>
                         ) : null}
                       </View>
                     </View>
@@ -2173,7 +2131,7 @@ export default function CheckoutScreen() {
 
             {/* Sheet footer — Place Order / Back to Cart, only once the full
                 form is showing (address confirmed). The map-pick step shows
-                just Confirm location / Enter manually instead. */}
+                just Confirm location instead. */}
             {(!mapMode || sheetExpanded) && (
               <View
                 style={[
@@ -2223,6 +2181,19 @@ export default function CheckoutScreen() {
         confirmVariant="primary"
         onCancel={() => setShowCodNightModal(false)}
         onConfirm={handleSwitchToUpi}
+      />
+
+      {/* Location is required to check out — no dismiss, just the two ways
+          out: grant it via Settings, or leave checkout back to the cart. */}
+      <ConfirmModal
+        visible={showLocationRequiredModal}
+        title="Location access needed"
+        message="We need your location to pin your delivery address and calculate delivery charges. Enable location access to continue checkout."
+        confirmLabel="Open Settings"
+        cancelLabel="Back to Cart"
+        confirmVariant="primary"
+        onConfirm={() => openAppLocationSettings()}
+        onCancel={() => navigation.goBack()}
       />
     </View>
   );
@@ -2320,6 +2291,18 @@ const styles = StyleSheet.create({
   sheetActions: {
     gap: spacing.sm,
     marginBottom: spacing.xs,
+  },
+  deliveryChargePreviewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+    paddingVertical: spacing.xs,
+  },
+  deliveryChargePreviewText: {
+    color: colors.textSecondary,
+    fontWeight: '700',
+    fontSize: 13,
   },
   sheetPrimaryBtn: {
     minHeight: 50,
@@ -2432,22 +2415,6 @@ const styles = StyleSheet.create({
   },
   mapStatusChipTextSuccess: {
     color: colors.successDark,
-  },
-  manualWrap: {
-    marginTop: spacing.xs,
-    marginBottom: spacing.sm,
-  },
-  useMapInsteadBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.xs,
-    paddingVertical: spacing.md,
-  },
-  useMapInsteadText: {
-    ...typography.label,
-    color: colors.saffronDark,
-    fontWeight: '700',
   },
   section: {
     marginBottom: spacing.lg,
@@ -2937,6 +2904,12 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     justifyContent: 'center',
     gap: 2,
+  },
+  fastDeliveryHint: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    marginTop: spacing.xs,
+    paddingHorizontal: spacing.xs,
   },
   fastToggleCheck: {
     width: 22,

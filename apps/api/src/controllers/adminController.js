@@ -2,6 +2,8 @@ const config = require('../config/env');
 const { signAdminToken } = require('../utils/auth');
 const { pool } = require('../db/mysql');
 const { validatePagination } = require('../validators');
+const { roundMoney, toMoney } = require('../utils/money');
+const { resolvePeriod, ReportPeriodError } = require('../utils/reportPeriods');
 const notificationService = require('../utils/notificationService');
 const {
   notifyShopsForOrder,
@@ -468,6 +470,305 @@ const getShopsReport = async (req, res) => {
   res.status(200).json({ data });
 };
 
+// Business-day date filter shared by the profit/payout report endpoints.
+// key='all' skips the filter; every other key was already resolved to a
+// concrete [from, to] business-day range by resolvePeriod().
+const buildPeriodDateFilter = (resolved, column = 'o.created_at') => {
+  if (resolved.key === 'all') return { clause: '1=1', params: [] };
+  return {
+    clause: `DATE(CONVERT_TZ(${column}, '+00:00', ?)) BETWEEN ? AND ?`,
+    params: [resolved.timezone, resolved.from, resolved.to],
+  };
+};
+
+// Profit & payout report — the daily business ledger. Basis is Delivered
+// orders only (see plans/profit-report.md): in-flight orders are surfaced
+// separately as "pipeline" so they're visible without polluting profit, and
+// cancelled orders never count anywhere. Shop cost comes from the
+// order_items.shop_line_total snapshot (never the live catalog), excluding
+// items the shop rejected and items that were never priced (NULL — counted
+// as zero cost but flagged via warnings.unpricedItemsCount so margin doesn't
+// silently read optimistic).
+const getProfitSummary = async (req, res) => {
+  let resolved;
+  try {
+    resolved = resolvePeriod({ period: req.query.period, from: req.query.from, to: req.query.to });
+  } catch (err) {
+    if (err instanceof ReportPeriodError) {
+      return res.status(400).json({ code: 'VALIDATION_ERROR', message: err.message });
+    }
+    throw err;
+  }
+
+  const { clause: dateFilter, params: dateParams } = buildPeriodDateFilter(resolved);
+
+  const [[deliveredRow]] = await pool.query(`
+    SELECT
+      COUNT(*) AS delivered_orders,
+      COALESCE(SUM(subtotal), 0) AS app_sales,
+      COALESCE(SUM(delivery_charge), 0) AS delivery_charge,
+      COALESCE(SUM(night_charge), 0) AS night_charge,
+      COALESCE(SUM(rain_charge), 0) AS rain_charge,
+      COALESCE(SUM(fast_delivery_charge), 0) AS fast_delivery_charge,
+      COALESCE(SUM(discount_amount), 0) AS discount,
+      COALESCE(SUM(free_delivery_waiver_amount), 0) AS free_delivery_waiver,
+      COALESCE(SUM(total), 0) AS customer_paid,
+      COUNT(CASE WHEN payment_method = 'Cash' THEN 1 END) AS cash_orders,
+      COALESCE(SUM(CASE WHEN payment_method = 'Cash' THEN total ELSE 0 END), 0) AS cash_amount,
+      COUNT(CASE WHEN payment_method = 'UPI' THEN 1 END) AS upi_orders,
+      COALESCE(SUM(CASE WHEN payment_method = 'UPI' THEN total ELSE 0 END), 0) AS upi_amount
+    FROM orders o
+    WHERE o.status = 'Delivered' AND ${dateFilter}
+  `, dateParams);
+
+  const [[shopCostRow]] = await pool.query(`
+    SELECT COALESCE(SUM(oi.shop_line_total), 0) AS shop_cost
+    FROM order_items oi
+    JOIN orders o ON oi.order_id = o.id
+    WHERE o.status = 'Delivered' AND ${dateFilter}
+      AND oi.shop_rejected_at IS NULL AND oi.shop_line_total IS NOT NULL
+  `, dateParams);
+
+  // unpriced = a real shop item (shop_id set) missing shop_price at purchase time.
+  // House items and combos always have shop_id NULL by design and are not "unpriced".
+  const [[warningsRow]] = await pool.query(`
+    SELECT
+      COUNT(CASE WHEN oi.shop_id IS NOT NULL AND oi.shop_rejected_at IS NULL AND oi.shop_line_total IS NULL THEN 1 END) AS unpriced_items_count,
+      COALESCE(SUM(CASE WHEN oi.shop_id IS NOT NULL AND oi.shop_rejected_at IS NULL AND oi.shop_line_total IS NULL THEN oi.line_total ELSE 0 END), 0) AS unpriced_items_app_total,
+      COUNT(CASE WHEN oi.shop_rejected_at IS NOT NULL THEN 1 END) AS rejected_items_count
+    FROM order_items oi
+    JOIN orders o ON oi.order_id = o.id
+    WHERE o.status = 'Delivered' AND ${dateFilter}
+  `, dateParams);
+
+  const [shopRows] = await pool.query(`
+    SELECT oi.shop_id, s.name AS shop_name,
+      COUNT(DISTINCT oi.order_id) AS delivered_orders,
+      COALESCE(SUM(oi.quantity), 0) AS items_sold,
+      COALESCE(SUM(oi.line_total), 0) AS app_sales,
+      COALESCE(SUM(CASE WHEN oi.shop_rejected_at IS NULL THEN oi.shop_line_total ELSE 0 END), 0) AS shop_cost,
+      COUNT(CASE WHEN oi.shop_id IS NOT NULL AND oi.shop_rejected_at IS NULL AND oi.shop_line_total IS NULL THEN 1 END) AS unpriced_items
+    FROM order_items oi
+    JOIN orders o ON oi.order_id = o.id
+    LEFT JOIN shops s ON s.id = oi.shop_id
+    WHERE o.status = 'Delivered' AND ${dateFilter}
+    GROUP BY oi.shop_id, s.name
+    ORDER BY shop_cost DESC
+  `, dateParams);
+
+  const [[pipelineRow]] = await pool.query(`
+    SELECT COUNT(*) AS orders, COALESCE(SUM(total), 0) AS value
+    FROM orders o
+    WHERE o.status NOT IN ('Delivered', 'Cancelled') AND ${dateFilter}
+  `, dateParams);
+
+  const [[cancelledRow]] = await pool.query(`
+    SELECT COUNT(*) AS orders, COALESCE(SUM(total), 0) AS value
+    FROM orders o
+    WHERE o.status = 'Cancelled' AND ${dateFilter}
+  `, dateParams);
+
+  const appSales = toMoney(deliveredRow.app_sales);
+  const shopCost = toMoney(shopCostRow.shop_cost);
+  const productMargin = roundMoney(appSales - shopCost);
+  const deliveryCharge = toMoney(deliveredRow.delivery_charge);
+  const nightCharge = toMoney(deliveredRow.night_charge);
+  const rainCharge = toMoney(deliveredRow.rain_charge);
+  const fastDeliveryCharge = toMoney(deliveredRow.fast_delivery_charge);
+  const chargesIncome = roundMoney(deliveryCharge + nightCharge + rainCharge + fastDeliveryCharge);
+  const discount = toMoney(deliveredRow.discount);
+  const freeDeliveryWaiver = toMoney(deliveredRow.free_delivery_waiver);
+  const customerPaid = toMoney(deliveredRow.customer_paid);
+  const netProfit = roundMoney(customerPaid - shopCost);
+  const deliveredOrders = Number(deliveredRow.delivered_orders) || 0;
+  const avgOrderValue = deliveredOrders > 0 ? roundMoney(customerPaid / deliveredOrders) : 0;
+  const avgProfitPerOrder = deliveredOrders > 0 ? roundMoney(netProfit / deliveredOrders) : 0;
+  const marginPercent = customerPaid > 0 ? roundMoney((netProfit / customerPaid) * 100) : 0;
+
+  const totals = {
+    deliveredOrders, delivered_orders: deliveredOrders,
+    appSales, app_sales: appSales,
+    shopCost, shop_cost: shopCost,
+    productMargin, product_margin: productMargin,
+    deliveryCharge, delivery_charge: deliveryCharge,
+    nightCharge, night_charge: nightCharge,
+    rainCharge, rain_charge: rainCharge,
+    fastDeliveryCharge, fast_delivery_charge: fastDeliveryCharge,
+    chargesIncome, charges_income: chargesIncome,
+    discount, discount_amount: discount,
+    freeDeliveryWaiver, free_delivery_waiver: freeDeliveryWaiver,
+    customerPaid, customer_paid: customerPaid,
+    netProfit, net_profit: netProfit,
+    avgOrderValue, avg_order_value: avgOrderValue,
+    avgProfitPerOrder, avg_profit_per_order: avgProfitPerOrder,
+    marginPercent, margin_percent: marginPercent,
+  };
+
+  const shops = shopRows.map((row) => {
+    const rowAppSales = toMoney(row.app_sales);
+    const rowShopCost = toMoney(row.shop_cost);
+    const rowMargin = roundMoney(rowAppSales - rowShopCost);
+    const shopName = row.shop_id ? (row.shop_name || 'Deleted Shop') : 'House (No Shop)';
+    const deliveredOrdersForShop = Number(row.delivered_orders) || 0;
+    const itemsSold = Number(row.items_sold) || 0;
+    const unpricedItems = Number(row.unpriced_items) || 0;
+    return {
+      shopId: row.shop_id, shop_id: row.shop_id,
+      shopName, shop_name: shopName,
+      deliveredOrders: deliveredOrdersForShop, delivered_orders: deliveredOrdersForShop,
+      itemsSold, items_sold: itemsSold,
+      appSales: rowAppSales, app_sales: rowAppSales,
+      shopCost: rowShopCost, shop_cost: rowShopCost,
+      margin: rowMargin,
+      unpricedItems, unpriced_items: unpricedItems,
+    };
+  });
+
+  const paymentSplit = {
+    cash: { orders: Number(deliveredRow.cash_orders) || 0, amount: toMoney(deliveredRow.cash_amount) },
+    upi: { orders: Number(deliveredRow.upi_orders) || 0, amount: toMoney(deliveredRow.upi_amount) },
+  };
+
+  res.status(200).json({
+    period: resolved,
+    totals,
+    pipeline: { orders: Number(pipelineRow.orders) || 0, value: toMoney(pipelineRow.value) },
+    cancelled: { orders: Number(cancelledRow.orders) || 0, value: toMoney(cancelledRow.value) },
+    paymentSplit, payment_split: paymentSplit,
+    shops,
+    warnings: {
+      unpricedItemsCount: Number(warningsRow.unpriced_items_count) || 0,
+      unpriced_items_count: Number(warningsRow.unpriced_items_count) || 0,
+      unpricedItemsAppTotal: toMoney(warningsRow.unpriced_items_app_total),
+      unpriced_items_app_total: toMoney(warningsRow.unpriced_items_app_total),
+      rejectedItemsCount: Number(warningsRow.rejected_items_count) || 0,
+      rejected_items_count: Number(warningsRow.rejected_items_count) || 0,
+    },
+  });
+};
+
+const PROFIT_ORDERS_SORTS = {
+  time: 'o.created_at DESC, o.id DESC',
+  profit: 'net_profit DESC',
+  value: 'o.total DESC',
+};
+
+const getProfitOrders = async (req, res) => {
+  let resolved;
+  try {
+    resolved = resolvePeriod({ period: req.query.period, from: req.query.from, to: req.query.to });
+  } catch (err) {
+    if (err instanceof ReportPeriodError) {
+      return res.status(400).json({ code: 'VALIDATION_ERROR', message: err.message });
+    }
+    throw err;
+  }
+
+  const { shopId, sort } = req.query;
+  const sortClause = PROFIT_ORDERS_SORTS[sort] || PROFIT_ORDERS_SORTS.time;
+  const pagination = validatePagination(req.query.page, req.query.limit);
+  const { clause: dateFilter, params: dateParams } = buildPeriodDateFilter(resolved);
+
+  let shopFilterClause = '';
+  const shopFilterParams = [];
+  if (shopId !== undefined) {
+    const shopIdNum = Number(shopId);
+    if (!Number.isInteger(shopIdNum) || shopIdNum <= 0) {
+      return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Invalid shopId parameter' });
+    }
+    shopFilterClause = ' AND EXISTS (SELECT 1 FROM order_items soi WHERE soi.order_id = o.id AND soi.shop_id = ? AND soi.shop_rejected_at IS NULL)';
+    shopFilterParams.push(shopIdNum);
+  }
+
+  const baseWhere = `o.status = 'Delivered' AND ${dateFilter}${shopFilterClause}`;
+  const baseParams = [...dateParams, ...shopFilterParams];
+
+  const [[countRow]] = await pool.query(`SELECT COUNT(*) AS total FROM orders o WHERE ${baseWhere}`, baseParams);
+  const total = Number(countRow.total) || 0;
+  const offset = (pagination.page - 1) * pagination.limit;
+
+  const [rows] = await pool.query(`
+    SELECT o.id, o.order_number, o.created_at, o.delivered_at, o.customer_name, o.payment_method, o.status,
+      o.subtotal AS app_items_total, o.delivery_charge, o.night_charge, o.rain_charge, o.fast_delivery_charge,
+      o.discount_amount, o.total AS customer_paid,
+      COALESCE((SELECT SUM(oi.shop_line_total) FROM order_items oi
+                WHERE oi.order_id = o.id AND oi.shop_rejected_at IS NULL AND oi.shop_line_total IS NOT NULL), 0) AS shop_cost,
+      EXISTS (SELECT 1 FROM order_items oi2 WHERE oi2.order_id = o.id AND oi2.shop_id IS NOT NULL
+              AND oi2.shop_rejected_at IS NULL AND oi2.shop_line_total IS NULL) AS has_unpriced_items,
+      (o.total - COALESCE((SELECT SUM(oi3.shop_line_total) FROM order_items oi3
+                WHERE oi3.order_id = o.id AND oi3.shop_rejected_at IS NULL AND oi3.shop_line_total IS NOT NULL), 0)) AS net_profit
+    FROM orders o
+    WHERE ${baseWhere}
+    ORDER BY ${sortClause}
+    LIMIT ? OFFSET ?
+  `, [...baseParams, pagination.limit, offset]);
+
+  const orderIds = rows.map((r) => r.id);
+  const shopsByOrder = new Map();
+  if (orderIds.length > 0) {
+    const [shopLineRows] = await pool.query(`
+      SELECT oi.order_id, oi.shop_id, s.name AS shop_name,
+        SUM(CASE WHEN oi.shop_rejected_at IS NULL THEN oi.shop_line_total ELSE 0 END) AS shop_cost
+      FROM order_items oi
+      LEFT JOIN shops s ON s.id = oi.shop_id
+      WHERE oi.order_id IN (?) AND oi.shop_id IS NOT NULL
+      GROUP BY oi.order_id, oi.shop_id, s.name
+    `, [orderIds]);
+    for (const row of shopLineRows) {
+      if (!shopsByOrder.has(row.order_id)) shopsByOrder.set(row.order_id, []);
+      const rowShopCost = toMoney(row.shop_cost);
+      shopsByOrder.get(row.order_id).push({
+        shopId: row.shop_id, shop_id: row.shop_id,
+        shopName: row.shop_name || 'Deleted Shop', shop_name: row.shop_name || 'Deleted Shop',
+        shopCost: rowShopCost, shop_cost: rowShopCost,
+      });
+    }
+  }
+
+  const data = rows.map((row) => {
+    const appItemsTotal = toMoney(row.app_items_total);
+    const shopCost = toMoney(row.shop_cost);
+    const productMargin = roundMoney(appItemsTotal - shopCost);
+    const chargesIncome = roundMoney(
+      toMoney(row.delivery_charge) + toMoney(row.night_charge) + toMoney(row.rain_charge) + toMoney(row.fast_delivery_charge)
+    );
+    const discount = toMoney(row.discount_amount);
+    const customerPaid = toMoney(row.customer_paid);
+    const netProfit = roundMoney(customerPaid - shopCost);
+    return {
+      id: row.id,
+      orderNumber: row.order_number, order_number: row.order_number,
+      createdAt: row.created_at, created_at: row.created_at,
+      deliveredAt: row.delivered_at, delivered_at: row.delivered_at,
+      customerName: row.customer_name, customer_name: row.customer_name,
+      paymentMethod: row.payment_method, payment_method: row.payment_method,
+      status: row.status,
+      appItemsTotal, app_items_total: appItemsTotal,
+      shopCost, shop_cost: shopCost,
+      productMargin, product_margin: productMargin,
+      chargesIncome, charges_income: chargesIncome,
+      discount, discount_amount: discount,
+      customerPaid, customer_paid: customerPaid,
+      netProfit, net_profit: netProfit,
+      shops: shopsByOrder.get(row.id) || [],
+      hasUnpricedItems: !!row.has_unpriced_items, has_unpriced_items: !!row.has_unpriced_items,
+    };
+  });
+
+  res.status(200).json({
+    data,
+    pagination: {
+      page: pagination.page,
+      limit: pagination.limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / pagination.limit)),
+    },
+  });
+};
+
+// Same fixed offset riders.js/shopOwnerController.js use for "today".
+const ADMIN_ORDERS_TZ = config.RIDER_TODAY_TZ || '+05:30';
+
 const getAdminOrders = async (req, res) => {
   const { status, paymentStatus, payment_status, paymentMethod, payment_method, search, dateFrom, from, dateTo, to, page, limit } = req.query;
   const pagination = validatePagination(page, limit);
@@ -511,14 +812,17 @@ const getAdminOrders = async (req, res) => {
     params.push(searchWildcard, searchWildcard, searchWildcard);
   }
 
+  // Admin's default "today" filter sends browser-local (IST) dates, but the
+  // DB session time_zone isn't guaranteed to be IST — a plain DATE(created_at)
+  // comparison can put late-night/early-morning orders on the wrong day.
   if (finalDateFrom) {
-    query += ' AND DATE(o.created_at) >= ?';
-    params.push(finalDateFrom);
+    query += " AND DATE(CONVERT_TZ(o.created_at, '+00:00', ?)) >= ?";
+    params.push(ADMIN_ORDERS_TZ, finalDateFrom);
   }
 
   if (finalDateTo) {
-    query += ' AND DATE(o.created_at) <= ?';
-    params.push(finalDateTo);
+    query += " AND DATE(CONVERT_TZ(o.created_at, '+00:00', ?)) <= ?";
+    params.push(ADMIN_ORDERS_TZ, finalDateTo);
   }
 
   // Count total for pagination
@@ -600,12 +904,14 @@ const getAdminOrderById = async (req, res) => {
   order.riderAssignmentStatus = order.rider_assignment_status;
   order.deliveryType = order.delivery_type;
   order.adminRemark = order.admin_remark;
+  order.couponId = order.coupon_id;
   order.couponCode = order.coupon_code;
   order.couponTitle = order.coupon_title;
   order.discountAmount = order.discount_amount;
   order.freeDeliveryWaiverAmount = order.free_delivery_waiver_amount;
   order.customer_trusted = Boolean(order.customer_trusted);
   order.customerTrusted = order.customer_trusted;
+  order.couponApplied = Boolean(order.coupon_id || order.coupon_code);
   const [itemsRows] = await pool.query('SELECT oi.*, s.name AS shop_name FROM order_items oi LEFT JOIN shops s ON s.id = oi.shop_id WHERE oi.order_id = ?', [id]);
 
   order.items = itemsRows;
@@ -643,6 +949,13 @@ const getAdminOrderById = async (req, res) => {
     const rejectedAt = rejectedTimestamps.length > 0
       ? rejectedTimestamps.reduce((latest, ts) => (new Date(ts) > new Date(latest) ? ts : latest))
       : null;
+    // What VillKro owes this shop for this order — same rule as the
+    // shop-owner app: a cancelled order or a line the shop itself rejected
+    // never counts (never fulfilled either way). Lines without a configured
+    // shop_line_total (NULL) are silently excluded, not treated as free.
+    const shopTotal = orderCancelled ? 0 : e.items
+      .filter(it => it.shop_rejected_at === null && it.shop_line_total !== null && it.shop_line_total !== undefined)
+      .reduce((sum, it) => sum + Number(it.shop_line_total), 0);
     return {
       shopId: e.shopId,
       shop_id: e.shopId,
@@ -659,6 +972,8 @@ const getAdminOrderById = async (req, res) => {
       rejected_at: rejectedAt,
       orderCancelled,
       order_cancelled: orderCancelled,
+      shopTotal,
+      shop_total: shopTotal,
     };
   });
 
@@ -1287,6 +1602,8 @@ module.exports = {
   getTopProductsReport,
   getCustomersReport,
   getShopsReport,
+  getProfitSummary,
+  getProfitOrders,
   getAdminNotifications,
   createAdminNotification,
   getAdminNotificationById,

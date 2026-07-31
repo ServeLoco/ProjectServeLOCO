@@ -5,11 +5,20 @@ const realtimeEvents = require('../realtime/orderEvents');
 const adminInbox = require('../utils/adminNotifications');
 const orderAutoAccept = require('../realtime/orderAutoAccept');
 const { roundMoney, toMoney } = require('../utils/money');
-const { calculateNightCharge, isCodBlockedDuringNight } = require('../utils/nightDelivery');
+const { isCodBlockedDuringNight } = require('../utils/nightDelivery');
 const { calculateRainCharge } = require('../utils/rainCharge');
+const { resolveDeliveryPricing, loadActiveZones, loadActiveExclusionZones } = require('../utils/deliveryPricing');
 const { validateCoupon, validateCouponById, pickBestAutoApply } = require('../utils/coupons');
 
-class OrderError extends Error {}  // expected business failures → 400
+// Expected business failures → 400. clientCode lets specific failures carry a
+// distinct machine-readable code (e.g. OUT_OF_DELIVERY_RANGE) while everything
+// else keeps the legacy VALIDATION_ERROR.
+class OrderError extends Error {
+  constructor(message, clientCode) {
+    super(message);
+    this.clientCode = clientCode;
+  }
+}
 
 const generateOrderNumber = async (connection) => {
   const date = new Date();
@@ -192,7 +201,7 @@ const createOrder = async (req, res) => {
       return res.status(403).json({ code: 'FORBIDDEN', message: 'Your account is blocked' });
     }
 
-    const [settingRows] = await connection.query('SELECT shop_open, delivery_available, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge FROM settings LIMIT 1');
+    const [settingRows] = await connection.query('SELECT shop_open, delivery_available, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings LIMIT 1');
     const settings = settingRows[0];
 
     if (settings.shop_open === 0 || settings.shop_open === false) throw new OrderError('Shop is currently closed');
@@ -222,7 +231,7 @@ const createOrder = async (req, res) => {
     if (productEntries.length > 0) {
       const productIds = productEntries.map(e => e.productId);
       const [prodRows] = await connection.query(
-        'SELECT id, name, price, shop_id FROM products WHERE id IN (?) AND available = 1 AND deleted = 0 AND (shop_id IS NULL OR EXISTS (SELECT 1 FROM shops s WHERE s.id = products.shop_id AND s.is_open = 1 AND s.active = 1)) AND (group_id IS NULL OR EXISTS (SELECT 1 FROM product_groups g WHERE g.id = products.group_id AND g.active = 1))',
+        'SELECT id, name, price, shop_price, shop_id FROM products WHERE id IN (?) AND available = 1 AND deleted = 0 AND (shop_id IS NULL OR EXISTS (SELECT 1 FROM shops s WHERE s.id = products.shop_id AND s.is_open = 1 AND s.active = 1)) AND (group_id IS NULL OR EXISTS (SELECT 1 FROM product_groups g WHERE g.id = products.group_id AND g.active = 1))',
         [productIds]
       );
       for (const row of prodRows) productById.set(Number(row.id), row);
@@ -251,7 +260,7 @@ const createOrder = async (req, res) => {
     )];
     if (variantIdsInOrder.length > 0) {
       const [variantRows] = await connection.query(
-        'SELECT id, product_id, label, price, available, deleted FROM product_variants WHERE id IN (?)',
+        'SELECT id, product_id, label, price, shop_price, available, deleted FROM product_variants WHERE id IN (?)',
         [variantIdsInOrder]
       );
       for (const row of variantRows) variantById.set(Number(row.id), row);
@@ -268,6 +277,10 @@ const createOrder = async (req, res) => {
       const rawVariantId = item.variant_id || item.variantId || null;
       const variantId = rawVariantId !== null && rawVariantId !== undefined ? Number(rawVariantId) : null;
       let unitPrice;
+      // Shop-cost snapshot (VillKro's payable to the shop for this line).
+      // NULL when the item has no shop price configured, or is a combo
+      // (combos never carry a shop_id either — see effectiveVariantId below).
+      let shopUnitPrice = null;
       let productName = product.name;
       let variantLabel = null;
 
@@ -279,13 +292,16 @@ const createOrder = async (req, res) => {
           throw new OrderError('Selected option is unavailable or does not exist');
         }
         unitPrice = toMoney(variant.price);
+        shopUnitPrice = variant.shop_price !== null && variant.shop_price !== undefined ? toMoney(variant.shop_price) : null;
         variantLabel = variant.label;
         productName = `${product.name} (${variant.label})`;
       } else {
         unitPrice = toMoney(product.price);
+        shopUnitPrice = !isCombo && product.shop_price !== null && product.shop_price !== undefined ? toMoney(product.shop_price) : null;
       }
 
       const lineTotal = roundMoney(unitPrice * quantity);
+      const shopLineTotal = shopUnitPrice !== null ? roundMoney(shopUnitPrice * quantity) : null;
 
       subtotal += lineTotal;
       // Combos never carry a variant — force null so an unvalidated
@@ -301,30 +317,65 @@ const createOrder = async (req, res) => {
         quantity,
         unit_price: unitPrice,
         line_total: lineTotal,
+        shop_unit_price: shopUnitPrice,
+        shop_line_total: shopLineTotal,
         item_type: isCombo ? 'combo' : 'product'
       });
     }
 
     subtotal = roundMoney(subtotal);
+
+    // Radius-zone pricing (server-authoritative — never trusts the preview the
+    // client saw). Read + pure compute inside the existing transaction; the
+    // resolver falls back to legacy flat pricing when zone mode isn't fully
+    // configured or the order has no coordinates ("Enter Manually").
+    const zones = settings.radius_pricing_active ? await loadActiveZones(connection) : [];
+    // Exclusion squares block delivery regardless of zone/flat pricing mode.
+    const exclusionZones = await loadActiveExclusionZones(connection);
+    const pricing = resolveDeliveryPricing({
+      customerLat: latitude,
+      customerLng: longitude,
+      deliveryType: delivery_type,
+      settings,
+      zones,
+      exclusionZones,
+    });
+
+    if (pricing.outOfRange) {
+      throw new OrderError(
+        'Delivery is not available at this location. Please choose a closer address.',
+        'OUT_OF_DELIVERY_RANGE'
+      );
+    }
+    if (pricing.excluded) {
+      throw new OrderError(
+        pricing.exclusionMessage || 'Delivery is not available at this location.',
+        'DELIVERY_EXCLUDED'
+      );
+    }
+    if (payment_method === 'Cash' && !pricing.codAllowed) {
+      throw new OrderError(
+        'Cash on Delivery is not available at your location. Please pay via UPI.',
+        'COD_NOT_AVAILABLE'
+      );
+    }
+
     // Fast delivery is an ADD-ON, not a replacement: `deliveryCharge` stays
-    // the STANDARD fee even on fast orders, including for every coupon-engine
-    // call, so free-delivery coupons keep waiving the standard fee exactly as
-    // on a standard order (see cartController for the full rationale). The
-    // fast fee is never passed into the engine, so it's never discounted.
-    const deliveryCharge = roundMoney(toMoney(settings.delivery_charge || 0));
+    // the STANDARD fee (zone-aware via the resolver) even on fast orders,
+    // including for every coupon-engine call, so free-delivery coupons keep
+    // waiving the standard fee exactly as on a standard order (see
+    // cartController for the full rationale). The fast fee is never passed
+    // into the engine, so it's never discounted.
+    const deliveryCharge = roundMoney(toMoney(pricing.standardDeliveryCharge));
     const standardDeliveryCharge = deliveryCharge;
 
     const fastEnabled = Boolean(settings.fast_delivery_enabled);
     const isFastDelivery = delivery_type === 'fast' && fastEnabled;
     // Additive fast-delivery fee actually charged on this order.
-    const fastDeliveryFee = isFastDelivery ? roundMoney(toMoney(settings.fast_delivery_charge || 0)) : 0;
+    const fastDeliveryFee = isFastDelivery ? roundMoney(toMoney(pricing.fastDeliveryCharge)) : 0;
     const finalDeliveryType = isFastDelivery ? 'fast' : 'standard';
 
-    let nightCharge = 0;
-    if (settings.night_charge && settings.night_charge_start && settings.night_charge_end) {
-      const raw = calculateNightCharge(settings);
-      if (raw > 0) nightCharge = toMoney(raw);
-    }
+    let nightCharge = pricing.nightCharge > 0 ? toMoney(pricing.nightCharge) : 0;
 
     let rainCharge = 0;
     if (settings.rain_charge_enabled) {
@@ -359,10 +410,12 @@ const createOrder = async (req, res) => {
     let appliedCoupon = null;
     let couponDropped = false;
 
+    const zoneId = pricing.zone ? pricing.zone.id : null;
+
     if (couponCode || couponId) {
       const result = couponCode
-        ? await validateCoupon({ code: couponCode, subtotal, deliveryCharge, standardDeliveryCharge, userId, connection })
-        : await validateCouponById({ couponId, subtotal, deliveryCharge, standardDeliveryCharge, userId, connection });
+        ? await validateCoupon({ code: couponCode, subtotal, deliveryCharge, standardDeliveryCharge, userId, zoneId, connection })
+        : await validateCouponById({ couponId, subtotal, deliveryCharge, standardDeliveryCharge, userId, zoneId, connection });
       let failReason = result.ok ? null : (result.reason || 'Coupon is not valid');
       if (!failReason) {
         await connection.query('SELECT id FROM coupons WHERE id = ? FOR UPDATE', [result.coupon.id]);
@@ -381,7 +434,7 @@ const createOrder = async (req, res) => {
         appliedCoupon = result.coupon;
       }
     } else if (!noAutoApply) {
-      let best = await pickBestAutoApply({ subtotal, deliveryCharge, standardDeliveryCharge, userId, connection });
+      let best = await pickBestAutoApply({ subtotal, deliveryCharge, standardDeliveryCharge, userId, zoneId, connection });
       if (best) {
         await connection.query('SELECT id FROM coupons WHERE id = ? FOR UPDATE', [best.coupon.id]);
         const failReason = await recheckUsageUnderLock(connection, best.coupon, userId);
@@ -412,17 +465,19 @@ const createOrder = async (req, res) => {
           latitude, longitude, map_url, subtotal, delivery_charge, night_charge, rain_charge, fast_delivery_charge, total,
           payment_method, payment_status, status, note,
           delivery_distance_km, delivery_radius_km_snapshot, delivery_cost_per_km_snapshot,
-          free_delivery_offer_snapshot, delivery_type,
+          free_delivery_offer_snapshot, delivery_zone_id, delivery_eta_minutes_snapshot, delivery_type,
           idempotency_key, idempotency_key_created_at,
           coupon_id, coupon_code, coupon_title, discount_amount, free_delivery_waiver_amount
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', 'Pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', 'Pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           orderNumber, userId, user.name, user.phone, user.whatsapp_number, finalAddress,
           latitude || null, longitude || null, map_url || null,
           subtotal, standardDeliveryCharge, nightCharge, rainCharge, fastDeliveryFee, total,
           payment_method, note || null,
-          null, null, null,
+          pricing.distanceKm, pricing.zone ? pricing.zoneExtentKm : null, null,
           null,
+          pricing.zone ? pricing.zone.id : null,
+          pricing.etaMinutes,
           finalDeliveryType,
           idempotencyKey, idempotencyKey ? new Date() : null,
           appliedCoupon ? appliedCoupon.id : null,
@@ -479,13 +534,17 @@ const createOrder = async (req, res) => {
     }
 
     if (orderItems.length > 0) {
-      const placeholders = orderItems.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+      const placeholders = orderItems.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
       const values = [];
       for (const oi of orderItems) {
-        values.push(orderId, oi.product_id, oi.variant_id || null, oi.variant_label || null, oi.shop_id || null, oi.item_type || 'product', oi.product_name, oi.quantity, oi.unit_price, oi.line_total);
+        values.push(
+          orderId, oi.product_id, oi.variant_id || null, oi.variant_label || null, oi.shop_id || null,
+          oi.item_type || 'product', oi.product_name, oi.quantity, oi.unit_price, oi.line_total,
+          oi.shop_unit_price ?? null, oi.shop_line_total ?? null
+        );
       }
       await connection.query(
-        `INSERT INTO order_items (order_id, product_id, variant_id, variant_label, shop_id, item_type, product_name, quantity, unit_price, line_total) VALUES ${placeholders}`,
+        `INSERT INTO order_items (order_id, product_id, variant_id, variant_label, shop_id, item_type, product_name, quantity, unit_price, line_total, shop_unit_price, shop_line_total) VALUES ${placeholders}`,
         values
       );
     }
@@ -531,10 +590,14 @@ const createOrder = async (req, res) => {
       status: 'Pending',
       created_at: new Date(),
       createdAt: new Date().toISOString(),
-      deliveryDistanceKm: null,
-      deliveryRadiusKmSnapshot: null,
+      deliveryDistanceKm: pricing.distanceKm,
+      deliveryRadiusKmSnapshot: pricing.zone ? pricing.zoneExtentKm : null,
       deliveryCostPerKmSnapshot: null,
       freeDeliveryOfferSnapshot: null,
+      deliveryZoneId: pricing.zone ? pricing.zone.id : null,
+      delivery_zone_id: pricing.zone ? pricing.zone.id : null,
+      deliveryEtaMinutes: pricing.etaMinutes,
+      delivery_eta_minutes: pricing.etaMinutes,
       deliveryType: finalDeliveryType,
       deliveryMessage: freeDeliveryWaiver > 0
         ? 'Free delivery unlocked!'
@@ -589,7 +652,7 @@ const createOrder = async (req, res) => {
       }
     }
     if (error instanceof OrderError) {
-      return res.status(400).json({ code: 'VALIDATION_ERROR', message: error.message });
+      return res.status(400).json({ code: error.clientCode || 'VALIDATION_ERROR', message: error.message });
     }
     throw error;
   }
@@ -601,14 +664,23 @@ const getOrders = async (req, res) => {
   const rawOffset = Number.parseInt(req.query.offset, 10);
   const limit = Math.min(50, Math.max(1, Number.isNaN(rawLimit) ? 20 : rawLimit));
   const offset = Math.max(0, Number.isNaN(rawOffset) ? 0 : rawOffset);
+  const { date } = req.query;
+
+  let where = 'o.customer_id = ?';
+  const params = [userId];
+  if (date) {
+    where += ' AND DATE(o.created_at) = ?';
+    params.push(date);
+  }
 
   const [rows] = await pool.query(
-    'SELECT o.*, (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) as item_count FROM orders o WHERE o.customer_id = ? ORDER BY o.created_at DESC LIMIT ? OFFSET ?',
-    [userId, limit, offset]
+    `SELECT o.*, (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) as item_count
+     FROM orders o WHERE ${where} ORDER BY o.created_at DESC LIMIT ? OFFSET ?`,
+    [...params, limit, offset]
   );
   const [countRows] = await pool.query(
-    'SELECT COUNT(*) AS total FROM orders WHERE customer_id = ?',
-    [userId]
+    `SELECT COUNT(*) AS total FROM orders o WHERE ${where}`,
+    params
   );
   const total = Number(countRows[0].total);
   const orders = rows.map(o => ({ ...o, canCancel: o.status === 'Pending' }));

@@ -511,6 +511,42 @@ const ADMIN_ORDER_PUSH_TYPES = new Set([
   'rider_zero_available', 'order_cancelled_no_rider',
 ]);
 
+// Retry budget for deep-links that arrive before their target screen exists:
+// 50 attempts x 200ms = ~10s. Long enough to outlast a cold start and the
+// location-permission gate resolving, short enough not to fire into a
+// session the user has since left.
+const NAV_RETRY_INTERVAL_MS = 200;
+const NAV_MAX_ATTEMPTS = 50;
+
+/**
+ * Navigates once the navigator is ready AND the target screen is actually
+ * registered, retrying until then.
+ *
+ * A ready navigator is not enough: the customer stack renders ONLY the
+ * location-permission gate until permission resolves, so navigate('OrderDetail')
+ * during that window throws and the tap would otherwise be lost silently.
+ */
+function navigateWhenRouteExists(navigationRef, routeName, params) {
+  let attempts = 0;
+  const attempt = () => {
+    attempts += 1;
+    const retry = () => {
+      if (attempts < NAV_MAX_ATTEMPTS) setTimeout(attempt, NAV_RETRY_INTERVAL_MS);
+    };
+    if (!navigationRef?.current?.isReady?.()) {
+      retry();
+      return;
+    }
+    try {
+      navigationRef.current.navigate(routeName, params);
+    } catch (_) {
+      // Screen not in the current stack yet (gate still showing).
+      retry();
+    }
+  };
+  attempt();
+}
+
 /**
  * Navigate from a notification tap (foreground, background, or cold start).
  */
@@ -519,27 +555,13 @@ function navigateFromNotificationData(data, navigationRef) {
 
   // Shop-owner order notification → Dashboard tab (new-order popup lives there).
   if (data.type === 'shop_order') {
-    const tryNavigateShop = () => {
-      if (navigationRef?.current?.isReady()) {
-        navigationRef.current.navigate('ShopDashboard');
-      } else {
-        setTimeout(tryNavigateShop, 200);
-      }
-    };
-    tryNavigateShop();
+    navigateWhenRouteExists(navigationRef, 'ShopDashboard');
     return;
   }
 
   // Rider delivery offer → open rider dashboard (popup rehydrates there).
   if (data.type === 'rider_offer') {
-    const tryNavigateRider = () => {
-      if (navigationRef?.current?.isReady()) {
-        navigationRef.current.navigate('RiderDashboard');
-      } else {
-        setTimeout(tryNavigateRider, 200);
-      }
-    };
-    tryNavigateRider();
+    navigateWhenRouteExists(navigationRef, 'RiderDashboard');
     return;
   }
 
@@ -574,14 +596,7 @@ function navigateFromNotificationData(data, navigationRef) {
   const orderId = data.orderId;
   if (!orderId) return;
 
-  const tryNavigate = () => {
-    if (navigationRef?.current?.isReady()) {
-      navigationRef.current.navigate('OrderDetail', { orderId });
-    } else {
-      setTimeout(tryNavigate, 200);
-    }
-  };
-  tryNavigate();
+  navigateWhenRouteExists(navigationRef, 'OrderDetail', { orderId });
 }
 
 // ─── hook ────────────────────────────────────────────────────────────────────

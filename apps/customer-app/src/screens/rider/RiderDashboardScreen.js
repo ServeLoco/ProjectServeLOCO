@@ -23,11 +23,13 @@ import AppIcon from '../../components/AppIcon';
 import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useRiderOfferAlert } from '../../hooks/useRiderOfferAlert';
 import { useRiderLocationTracking } from '../../hooks/useRiderLocationTracking';
+import { useRiderIdleLocationPing } from '../../hooks/useRiderIdleLocationPing';
 import {
   getRiderActionFlags,
   isOutForDelivery,
   mergeRiderOrder,
 } from '../../utils/riderOrderActions';
+import { elapsedSecondsFromStart, formatElapsed } from '../../utils/riderOfferTime';
 import RiderOfferPopup from './RiderOfferPopup';
 
 const STEPS = [
@@ -294,6 +296,10 @@ export default function RiderDashboardScreen({ navigation }) {
   // screen is open, so running both here was a duplicate watcher (2x
   // battery/GPS calls) rather than extra coverage.
   useRiderLocationTracking(isFocused ? assignment : null);
+  // While free, keep a coarse position on the server — offers are ranked by
+  // distance from the pickup shop, and a rider who never pings is invisible to
+  // the near rings. Stops the moment a job starts (the watcher above takes over).
+  useRiderIdleLocationPing(isOnline, Boolean(assignment));
 
   const handleToggle = useCallback(async (next) => {
     const prev = isOnline;
@@ -475,6 +481,21 @@ export default function RiderDashboardScreen({ navigation }) {
   const isFastDelivery = assignment?.deliveryType === 'fast' || assignment?.delivery_type === 'fast';
   const displayName = rider?.displayName || rider?.display_name || 'Rider';
 
+  // Timer starts the moment the rider accepts (rider_assigned_at) and keeps
+  // ticking until the job reaches a terminal state.
+  const [nowTick, setNowTick] = useState(Date.now());
+  const assignmentId = assignment?.id;
+  const terminal = actionFlags?.terminal;
+  useEffect(() => {
+    if (!assignmentId || terminal) return undefined;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [assignmentId, terminal]);
+  const assignedAt = assignment?.riderAssignedAt || assignment?.rider_assigned_at;
+  const elapsedLabel = assignedAt
+    ? formatElapsed(elapsedSecondsFromStart(assignedAt, nowTick))
+    : null;
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       {/* Header */}
@@ -649,6 +670,13 @@ export default function RiderDashboardScreen({ navigation }) {
                 </View>
               </View>
 
+              {elapsedLabel ? (
+                <View style={styles.timerRow}>
+                  <AppIcon name="clock" size={14} color={colors.textSecondary} />
+                  <Text style={styles.timerText}>{elapsedLabel} since accepted</Text>
+                </View>
+              ) : null}
+
               {/* Step rail */}
               <View style={styles.stepRail}>
                 {STEPS.map((step, i) => {
@@ -696,12 +724,18 @@ export default function RiderDashboardScreen({ navigation }) {
                   <Text style={styles.itemsLabel}>Order items</Text>
                   {assignment.items.map((it, idx) => {
                     const variant = it.variantLabel || it.variant_label;
+                    const shopName = it.shopName || it.shop_name;
                     return (
                       <View key={it.id ?? idx} style={styles.itemRow}>
-                        <Text style={styles.itemLine} numberOfLines={1}>
-                          {it.quantity}x {it.productName || it.product_name}
-                          {variant ? ` (${variant})` : ''}
-                        </Text>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.itemLine} numberOfLines={1}>
+                            {it.quantity}x {it.productName || it.product_name}
+                            {variant ? ` (${variant})` : ''}
+                          </Text>
+                          {shopName ? (
+                            <Text style={styles.itemShopName} numberOfLines={1}>{shopName}</Text>
+                          ) : null}
+                        </View>
                       </View>
                     );
                   })}
@@ -711,6 +745,13 @@ export default function RiderDashboardScreen({ navigation }) {
                       <Text style={styles.totalValue}>₹{Number(assignment.total).toFixed(0)}</Text>
                     </View>
                   ) : null}
+                </View>
+              ) : null}
+
+              {assignment.total != null ? (
+                <View style={styles.totalRow}>
+                  <Text style={styles.totalLabel}>Order total</Text>
+                  <Text style={styles.totalValue}>₹{Number(assignment.total).toFixed(0)}</Text>
                 </View>
               ) : null}
 
@@ -858,6 +899,12 @@ export default function RiderDashboardScreen({ navigation }) {
                     {job.address ? (
                       <Text style={styles.queueJobAddress} numberOfLines={2}>
                         {job.address}
+                      </Text>
+                    ) : null}
+                    {(job.deliveryType || job.delivery_type || job.total != null) ? (
+                      <Text style={styles.queueJobMeta}>
+                        {(job.deliveryType || job.delivery_type) === 'fast' ? '⚡ Express' : 'Standard'}
+                        {job.total != null ? ` · ₹${Number(job.total).toFixed(0)}` : ''}
                       </Text>
                     ) : null}
                     <View style={styles.queueJobFooter}>
@@ -1105,6 +1152,12 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     marginBottom: spacing.sm,
   },
+  queueJobMeta: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontWeight: '700',
+    marginBottom: spacing.sm,
+  },
   queueJobFooter: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1169,7 +1222,13 @@ const styles = StyleSheet.create({
   statusChipText: { fontWeight: '800', fontSize: 12, color: colors.textSecondary },
   statusChipTextHot: { color: colors.badgeHotText },
   statusChipTextOk: { color: colors.successDark },
-
+  timerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: spacing.sm,
+  },
+  timerText: { fontSize: 12, fontWeight: '700', color: colors.textSecondary },
   stepRail: {
     flexDirection: 'row',
     marginBottom: spacing.lg,
@@ -1270,6 +1329,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     flex: 1,
   },
+  itemShopName: { fontSize: 11, fontWeight: '700', color: colors.saffronDark, marginTop: 1 },
   itemPrice: { fontSize: 13, fontWeight: '700', color: colors.textSecondary },
   totalRow: {
     flexDirection: 'row',

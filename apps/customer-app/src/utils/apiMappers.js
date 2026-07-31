@@ -259,6 +259,20 @@ function normalizeCartCalculation(payload = {}) {
     deliveryRadiusKm: pickFirst(bill.deliveryRadiusKm, bill.delivery_radius_km, null),
     deliveryWithinRange: asBoolean(pickFirst(bill.deliveryWithinRange, bill.delivery_within_range), true),
     requiresLocation: asBoolean(pickFirst(bill.requiresLocation, bill.requires_location), false),
+    // Radius-zone pricing: pin beyond the largest zone (order blocked) and
+    // per-zone Cash-on-Delivery policy. Defaults keep old servers harmless.
+    outOfRange: asBoolean(pickFirst(bill.outOfRange, bill.out_of_range), false),
+    nearestZoneName: pickFirst(bill.nearestZoneName, bill.nearest_zone_name, null),
+    // Separate from outOfRange: the pin sits inside a no-delivery exclusion
+    // square (e.g. a restricted compound) that the server blocks outright.
+    // The server reports outOfRange: false for these, so anything that only
+    // checks outOfRange would wrongly show delivery as available and let the
+    // customer reach Place Order before failing.
+    excluded: asBoolean(pickFirst(bill.excluded, bill.is_excluded), false),
+    exclusionMessage: pickFirst(bill.exclusionMessage, bill.exclusion_message, null),
+    codAllowed: asBoolean(pickFirst(bill.codAllowed, bill.cod_allowed), true),
+    radiusPricingApplied: asBoolean(pickFirst(bill.radiusPricingApplied, bill.radius_pricing_applied), false),
+    maxDeliveryRadiusKm: pickFirst(bill.maxDeliveryRadiusKm, bill.max_delivery_radius_km, null),
     // Free-delivery progress toward the nearest eligible free_delivery coupon
     // threshold, e.g. { minOrder: 149, amountRemaining: 30 }. Null when a
     // free_delivery coupon is already applied (see appliedCoupon) or none exists.

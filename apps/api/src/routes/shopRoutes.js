@@ -5,8 +5,10 @@ const asyncHandler = require('../utils/asyncHandler');
 const {
   getMyShop,
   toggleMyShop,
+  updateMyShopSchedule,
   getMyProducts,
   toggleMyProduct,
+  toggleMyProductVariant,
   getMyOrders,
   getMyOrderHistory,
   confirmMyOrder,
@@ -29,8 +31,10 @@ router.use(asyncHandler(requireShopOwner));
 
 router.get('/me', asyncHandler(getMyShop));
 router.patch('/me/toggle', asyncHandler(toggleMyShop));
+router.patch('/me/schedule', asyncHandler(updateMyShopSchedule));
 router.get('/products', asyncHandler(getMyProducts));
 router.patch('/products/:id/toggle', asyncHandler(toggleMyProduct));
+router.patch('/products/:id/variants/:variantId/toggle', asyncHandler(toggleMyProductVariant));
 router.patch('/products/:id/group', asyncHandler(assignMyProductGroup));
 router.get('/orders', asyncHandler(getMyOrders));
 router.get('/orders/history', asyncHandler(getMyOrderHistory));

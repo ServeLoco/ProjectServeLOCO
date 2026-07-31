@@ -57,6 +57,10 @@ export const ProductsApi = {
     `/admin/products/${id}/availability`,
     { method: 'PATCH', body: { available, isAvailable: available } }
   ),
+  updateVariantAvailability: (id, variantId, available) => apiClient(
+    `/admin/products/${id}/variants/${variantId}/availability`,
+    { method: 'PATCH', body: { available, isAvailable: available } }
+  ),
   attachImage: (id, imageId) => apiClient(
     `/admin/products/${id}/image`,
     { method: 'PATCH', body: { imageId, image_id: imageId } }
@@ -65,6 +69,8 @@ export const ProductsApi = {
   bulkImport: (formData) => apiClient('/admin/products/bulk-import', { method: 'POST', body: formData }),
   bulkUpdate: (ids, updates) => apiClient('/admin/products/bulk', { method: 'PATCH', body: { ids, updates } }),
   bulkDelete: (ids) => apiClient('/admin/products/bulk', { method: 'DELETE', body: { ids } }),
+  // Grid price editing — App ₹ / Shop ₹ columns, one row per product OR variant.
+  updatePricing: (rows) => apiClient('/admin/products/pricing', { method: 'PATCH', body: { rows } }),
 };
 
 export const CombosApi = {
@@ -111,6 +117,23 @@ export const ShopsApi = {
   readyOrder: (shopId, orderId) => apiClient(
     `/admin/shops/${shopId}/orders/${orderId}/ready`,
     { method: 'PATCH' }
+  ),
+  // Auto open/close schedule — mirrors shop-owner's own PATCH /shop/me/schedule.
+  updateSchedule: (id, openTime, closeTime) => apiClient(`/admin/shops/${id}/schedule`, {
+    method: 'PATCH',
+    body: { openTime, open_time: openTime, closeTime, close_time: closeTime },
+  }),
+  // Product groups — mirrors shop-owner's own GET/POST/PATCH/DELETE /shop/groups.
+  listGroups: (id) => apiClient(`/admin/shops/${id}/groups`, { method: 'GET' }),
+  createGroup: (id, name) => apiClient(`/admin/shops/${id}/groups`, { method: 'POST', body: { name } }),
+  updateGroup: (id, groupId, data) => apiClient(
+    `/admin/shops/${id}/groups/${groupId}`,
+    { method: 'PATCH', body: data }
+  ),
+  deleteGroup: (id, groupId) => apiClient(`/admin/shops/${id}/groups/${groupId}`, { method: 'DELETE' }),
+  assignProductGroup: (id, productId, groupId) => apiClient(
+    `/admin/shops/${id}/products/${productId}/group`,
+    { method: 'PATCH', body: { group_id: groupId, groupId } }
   ),
 };
 
@@ -172,6 +195,13 @@ export const SettingsApi = {
   update: (data) => apiClient('/admin/settings', { method: 'PATCH', body: data }),
 };
 
+export const DeliveryZonesApi = {
+  list: () => apiClient('/admin/delivery-zones', { method: 'GET' }),
+  create: (data) => apiClient('/admin/delivery-zones', { method: 'POST', body: data }),
+  update: (id, data) => apiClient(`/admin/delivery-zones/${id}`, { method: 'PATCH', body: data }),
+  remove: (id) => apiClient(`/admin/delivery-zones/${id}`, { method: 'DELETE' }),
+};
+
 export const ImagesApi = {
   list: () => apiClient('/admin/images', { method: 'GET' }),
   upload: (formData) => apiClient('/admin/images', { method: 'POST', body: formData }),
@@ -183,6 +213,8 @@ export const ReportsApi = {
   getCustomers: (params) => apiClient(withQuery('/admin/reports/customers', params), { method: 'GET' }),
   getTopProducts: (params) => apiClient(withQuery('/admin/reports/top-products', params), { method: 'GET' }),
   getShops: (params) => apiClient(withQuery('/admin/reports/shops', params), { method: 'GET' }),
+  getProfitSummary: (params) => apiClient(withQuery('/admin/reports/profit/summary', params), { method: 'GET' }),
+  getProfitOrders: (params) => apiClient(withQuery('/admin/reports/profit/orders', params), { method: 'GET' }),
 };
 
 export const HealthApi = {

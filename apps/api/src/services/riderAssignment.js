@@ -1,9 +1,13 @@
 /**
  * Rider auto-assignment engine.
- * One pending offer per order at a time; least completed deliveries today;
- * 300s offer timer; multi-order allowed; no post-accept cancel by rider.
+ * One pending offer per order at a time. Riders are picked from expanding
+ * rings around the pickup shop(s) (1/2/3 km, all shops at once on multi-shop
+ * orders, then distance-blind); inside a ring, free riders (no active order)
+ * are offered before busy ones, then least completed deliveries today.
+ * 150s offer timer; multi-order allowed; no post-accept cancel by rider.
  * If no eligible riders after shops confirm: wait RIDER_SEARCH_WINDOW_SEC
- * (default 10 min), re-scanning every RIDER_SEARCH_SCAN_SEC (default 30s)
+ * (default 30 min), re-scanning every RIDER_SEARCH_SCAN_SEC (default 30s;
+ * the 5s sweeper tick re-checks more often than that, which only helps)
  * before failAssignment (order stays open for admin).
  * See plans/order-lifecycle-all-cases.md and plans/rider-mode-order-assignment.md.
  */
@@ -14,6 +18,7 @@ const {
   listEligibleRiders,
   selectEligibleRider,
   syncDeliveryAvailabilityFromRiders,
+  countActiveRiders,
 } = require('../utils/riders');
 
 const RIDER_OFFER_TIMEOUT_SEC = config.RIDER_OFFER_TIMEOUT_SEC || 300;
@@ -86,6 +91,42 @@ const getExcludedRiderIdsForOrder = async (orderId, connection = pool) => {
 const loadOrder = async (orderId, connection = pool) => {
   const [rows] = await connection.query('SELECT * FROM orders WHERE id = ?', [orderId]);
   return rows[0] || null;
+};
+
+/**
+ * Map-pinned shops this order is picked up from — the centres the offer rings
+ * grow around. Multi-shop orders return every shop so all rings open at once.
+ * Empty for house-only orders or shops with no pin, which makes the selector
+ * fall back to the plain distance-blind rule.
+ */
+const getOrderPickupPoints = async (orderId) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT DISTINCT s.latitude, s.longitude
+       FROM order_items oi
+       JOIN shops s ON s.id = oi.shop_id
+       WHERE oi.order_id = ?
+         AND oi.shop_id IS NOT NULL
+         AND s.latitude IS NOT NULL
+         AND s.longitude IS NOT NULL`,
+      [orderId]
+    );
+    // Number(null) === 0 passes Number.isFinite, so a null pin would survive as
+    // a ring centred on lat/lng 0,0. The SQL above already excludes NULLs —
+    // this keeps the guard honest if that filter is ever relaxed.
+    const coord = (v) => {
+      if (v === null || v === undefined || v === '') return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    return rows
+      .map((r) => ({ lat: coord(r.latitude), lng: coord(r.longitude) }))
+      .filter((p) => p.lat !== null && p.lng !== null);
+  } catch (e) {
+    // Never block assignment on a pin lookup — degrade to distance-blind.
+    console.error('[rider-assign] getOrderPickupPoints failed:', e.message);
+    return [];
+  }
 };
 
 /**
@@ -407,7 +448,8 @@ const failAssignment = async (orderId, reason = 'No riders available') => {
 };
 
 /**
- * When eligible pool is empty: wait inside the search window, else fail.
+ * When eligible pool is empty: wait inside the search window (30 min
+ * default), else fail.
  * Fail reason distinguishes zero-ever-offered vs chain exhausted.
  */
 const waitOrFailNoEligible = async (orderId, excludedIds = []) => {
@@ -452,7 +494,8 @@ const continueAssignment = async (orderId) => {
     return { continued: false, ...outcome };
   }
 
-  const chosen = await selectEligibleRider(eligible);
+  const pickupPoints = await getOrderPickupPoints(orderId);
+  const chosen = await selectEligibleRider(eligible, { pickupPoints });
   if (!chosen) {
     const outcome = await waitOrFailNoEligible(orderId, excluded);
     return { continued: false, ...outcome };
@@ -525,14 +568,17 @@ const startAssignment = async (orderId) => {
       return { started: true, waiting: true, reason: 'waiting_for_riders' };
     }
 
-    const chosen = await selectEligibleRider(eligible);
+    const pickupPoints = await getOrderPickupPoints(orderId);
+    const chosen = await selectEligibleRider(eligible, { pickupPoints });
     if (!chosen) {
       log('startAssignment waiting for riders', { orderId, windowSec: RIDER_SEARCH_WINDOW_SEC });
       return { started: true, waiting: true, reason: 'waiting_for_riders' };
     }
 
     const offer = await createOffer(orderId, chosen);
-    log('startAssignment', { orderId, riderId: chosen.id, offerId: offer?.id });
+    log('startAssignment', {
+      orderId, riderId: chosen.id, offerId: offer?.id, distanceKm: chosen.distanceKm,
+    });
     return { started: true, offer, riderId: chosen.id };
   } catch (e) {
     console.error('[rider-assign] startAssignment failed:', e.message);
@@ -848,12 +894,23 @@ const expireDueOffers = async () => {
  * Recover / re-scan orders stuck in 'searching'/'offered' with no rider and
  * no pending offer:
  *  - crash between startAssignment commit and createOffer
- *  - waiting for riders to come online (10-min window after shop confirm)
+ *  - waiting for riders to come online (30-min window after shop confirm)
  *
  * Called by the offer sweeper every RIDER_SWEEPER_MS (~5s). That is at least
  * as frequent as the product "every RIDER_SEARCH_SCAN_SEC (30s)" re-scan.
  * continueAssignment either creates an offer, stays waiting, or fails the
  * window after RIDER_SEARCH_WINDOW_SEC.
+ *
+ * With nobody online, continueAssignment's own listEligibleRiders query is
+ * guaranteed empty for every single waiting order — a full re-scan (loadOrder
+ * + pending check + the eligible-riders JOIN, per order, every tick) buys
+ * nothing. One countActiveRiders() check up front collapses that to a single
+ * window-expiry check per order instead, while still letting failAssignment
+ * fire on schedule (an order stuck waiting the full RIDER_SEARCH_WINDOW_SEC
+ * with zero riders online is exactly the case that must notify admin).
+ * The SELECT above already guarantees the same not-cancelled/not-delivered/
+ * no-pending-offer/rider_id-NULL state continueAssignment re-checks via
+ * loadOrder, so skipping that recheck here is safe, not a shortcut.
  */
 const recoverStuckAssignments = async () => {
   const [rows] = await pool.query(
@@ -868,10 +925,20 @@ const recoverStuckAssignments = async () => {
      ORDER BY o.rider_search_started_at ASC
      LIMIT 50`
   );
+  if (rows.length === 0) return [];
+
+  const hasOnlineRiders = (await countActiveRiders()) > 0;
   const results = [];
   for (const row of rows) {
-    log('recoverStuckAssignments — resuming/scanning', row.id);
-    results.push(await continueAssignment(row.id));
+    if (hasOnlineRiders) {
+      log('recoverStuckAssignments — resuming/scanning', row.id);
+      results.push(await continueAssignment(row.id));
+      continue;
+    }
+    // Nobody to offer — just check whether this order's window has expired.
+    const excluded = await getExcludedRiderIdsForOrder(row.id);
+    const outcome = await waitOrFailNoEligible(row.id, excluded);
+    results.push({ continued: false, ...outcome });
   }
   return results;
 };
@@ -936,6 +1003,7 @@ module.exports = {
   continueAssignment,
   recoverStuckAssignments,
   getExcludedRiderIdsForOrder,
+  getOrderPickupPoints,
   revokeOffersForOrder,
   remindPendingOffers,
   isWithinSearchWindow,

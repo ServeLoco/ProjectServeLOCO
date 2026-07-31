@@ -6,7 +6,7 @@ const { pool } = require('../src/db/mysql');
 const jwt = require('jsonwebtoken');
 
 jest.mock('../src/db/mysql', () => ({
-  pool: { query: jest.fn(), getConnection: jest.fn() }
+  pool: { query: jest.fn().mockResolvedValue([[]]), getConnection: jest.fn() }
 }));
 
 jest.mock('../src/utils/coupons', () => ({
@@ -360,6 +360,7 @@ describe('Cart and Order Tests', () => {
         delivery_cost_per_km: 5
       }]]) // settings
       .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]) // product check
+      .mockResolvedValueOnce([[]]) // exclusion zones
       .mockResolvedValueOnce([{ insertId: 1001 }])
       .mockResolvedValueOnce([[{ COLUMN_NAME: "item_type" }]])
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // insert order
@@ -377,7 +378,7 @@ describe('Cart and Order Tests', () => {
 
     expect(res.statusCode).toEqual(201);
     expect(res.body).toHaveProperty('orderId', 1001);
-    expect(res.body.order).toHaveProperty('deliveryDistanceKm', null);
+    expect(res.body.order).toHaveProperty('deliveryDistanceKm', 0); // cosmetic shop-distance figure — customer coords match shop pin exactly
     expect(res.body.order).toHaveProperty('deliveryRadiusKmSnapshot', null);
     expect(res.body.order).toHaveProperty('deliveryCostPerKmSnapshot', null);
     expect(mockConnection.commit).toHaveBeenCalledTimes(1);
@@ -421,6 +422,7 @@ describe('Cart and Order Tests', () => {
       .mockResolvedValueOnce([[{ blocked: 0 }]])
       .mockResolvedValueOnce([[settings]])
       .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]])
+      .mockResolvedValueOnce([[]]) // exclusion zones
       .mockResolvedValueOnce([{ insertId: 1002 }])
       .mockResolvedValueOnce([[{ COLUMN_NAME: "item_type" }]])
       .mockResolvedValueOnce([{ affectedRows: 1 }]);
@@ -439,7 +441,7 @@ describe('Cart and Order Tests', () => {
     expect(orderRes.statusCode).toEqual(201);
     expect(orderRes.body.order.deliveryCharge).toBe(cartRes.body.deliveryCharge);
     expect(orderRes.body.order.deliveryCharge).toBe(10);
-    expect(orderRes.body.order.deliveryDistanceKm).toBeNull();
+    expect(orderRes.body.order.deliveryDistanceKm).toBe(1.0836); // cosmetic shop-distance figure, not zone-based
   });
 
   it('should charge the flat delivery_charge with no discount when subtotal is below any coupon threshold', async () => {
@@ -464,6 +466,7 @@ describe('Cart and Order Tests', () => {
         delivery_cost_per_km: 5
       }]])
       .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]])
+      .mockResolvedValueOnce([[]]) // exclusion zones
       .mockResolvedValueOnce([{ insertId: 1002 }])
       .mockResolvedValueOnce([[{ COLUMN_NAME: 'item_type' }]])
       .mockResolvedValueOnce([{ affectedRows: 1 }]);
@@ -747,6 +750,7 @@ describe('createOrder with variantId', () => {
         .mockResolvedValueOnce([[{ shop_open: 1, delivery_available: 1, delivery_charge: 10, night_charge: 0, fast_delivery_enabled: 0 }]])
         .mockResolvedValueOnce([[{ id: 1, name: 'Pizza', price: 349, available: 1 }]])
         .mockResolvedValueOnce([[{ id: 10, product_id: 1, label: 'Large', price: 349, available: 1, deleted: 0 }]])
+        .mockResolvedValueOnce([[]]) // exclusion zones
         .mockResolvedValueOnce([{ insertId: 2001 }])
         .mockResolvedValueOnce([{ affectedRows: 1 }]),
       commit: jest.fn(),

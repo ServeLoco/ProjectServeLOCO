@@ -53,7 +53,7 @@ async function listShopActiveOrders(shopId) {
 
   const orderIds = orders.map((o) => o.id);
   const [items] = await pool.query(
-    `SELECT id, order_id, product_name, quantity, variant_label,
+    `SELECT id, order_id, product_name, quantity, variant_label, shop_line_total,
             shop_confirmed_at, shop_rejected_at, shop_ready_at
      FROM order_items WHERE shop_id = ? AND order_id IN (?)`,
     [shopId, orderIds]
@@ -73,6 +73,13 @@ async function listShopActiveOrders(shopId) {
     const expectedMinutes = o.delivery_type === 'fast'
       ? settings.fast_delivery_minutes
       : settings.standard_delivery_minutes;
+    // What VillKro owes this shop for this order — items the shop already
+    // rejected don't count (they were never fulfilled). Sums only lines with
+    // a configured shop price; unconfigured lines are silently excluded
+    // rather than treated as free, same NULL-means-unset rule as the column.
+    const shopTotal = myItems
+      .filter((it) => it.shop_rejected_at === null && it.shop_line_total !== null && it.shop_line_total !== undefined)
+      .reduce((sum, it) => sum + Number(it.shop_line_total), 0);
     return {
       id: o.id,
       orderNumber: o.order_number,
@@ -88,6 +95,8 @@ async function listShopActiveOrders(shopId) {
       confirmed,
       rejected,
       ready,
+      shopTotal,
+      shop_total: shopTotal,
       items: myItems.map((it) => ({
         id: it.id,
         productName: it.product_name,
@@ -95,6 +104,8 @@ async function listShopActiveOrders(shopId) {
         quantity: it.quantity,
         variantLabel: it.variant_label,
         variant_label: it.variant_label,
+        shopLineTotal: it.shop_line_total !== null ? Number(it.shop_line_total) : null,
+        shop_line_total: it.shop_line_total !== null ? Number(it.shop_line_total) : null,
       })),
     };
   });

@@ -13,9 +13,10 @@ import { colors, radius, shadows, motion, motionConfig } from '../../theme';
  *   onValueChange fn(value) toggled callback
  *   activeColor  string    track color when ON (defaults to success green)
  *   disabled     boolean
- *   size         'md'|'lg' visual size
+ *   size         'sm'|'md'|'lg' visual size
  */
 const SIZES = {
+  sm: { w: 38, h: 22, thumb: 16, pad: 3 },
   md: { w: 46, h: 28, thumb: 22, pad: 3 },
   lg: { w: 56, h: 32, thumb: 26, pad: 3 },
 };
@@ -26,6 +27,7 @@ export default function ShopToggle({
   activeColor = colors.success,
   disabled = false,
   size = 'lg',
+  accessibilityLabel,
 }) {
   const dims = SIZES[size] || SIZES.lg;
   const anim = useRef(new Animated.Value(value ? 1 : 0)).current;
@@ -67,6 +69,7 @@ export default function ShopToggle({
       disabled={disabled}
       accessibilityRole="switch"
       accessibilityState={{ checked: value }}
+      accessibilityLabel={accessibilityLabel}
       style={{ opacity: disabled ? 0.5 : 1 }}
     >
       <Animated.View style={{ transform: [{ scale: press }] }}>

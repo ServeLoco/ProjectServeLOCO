@@ -1,8 +1,7 @@
 const { pool } = require('../db/mysql');
 const { isId, isPositiveInteger, validateCoordinates } = require('../validators');
-// Location-based distance pricing is removed, so we no longer import calculateDeliveryPricing
+const { resolveDeliveryPricing, loadActiveZones, loadActiveExclusionZones, parseBoundary, polygonAreaKm2 } = require('../utils/deliveryPricing');
 const { roundMoney, toMoney } = require('../utils/money');
-const { calculateNightCharge } = require('../utils/nightDelivery');
 const { calculateRainCharge } = require('../utils/rainCharge');
 const { validateCoupon, validateCouponById, pickBestAutoApply, findApplicableCoupons, getNextFreeDeliveryThreshold, getNearestUnlockableCoupon } = require('../utils/coupons');
 
@@ -17,7 +16,7 @@ const calculateCart = async (req, res) => {
   }
 
   const [settingRows] = await pool.query(
-    'SELECT shop_open, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, delivery_radius_km FROM settings LIMIT 1'
+    'SELECT shop_open, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, delivery_radius_km, shop_latitude, shop_longitude, radius_pricing_active FROM settings LIMIT 1'
   );
   const settings = settingRows[0] || {
     shop_open: 1, delivery_charge: 0, night_charge: 0,
@@ -211,8 +210,23 @@ const calculateCart = async (req, res) => {
   let requiresLocation = false;
   let deliveryMessage = '';
 
-  let deliveryCharge = roundMoney(toMoney(settings.delivery_charge || 0));
-  const standardDeliveryCharge = deliveryCharge;
+  // Radius-zone pricing: when active (flag + center pin + coords + zones), the
+  // matched zone's charges/ETAs/COD policy replace the flat settings values.
+  // Any missing precondition falls back to the legacy flat pricing inside the
+  // resolver, so the rest of this function (incl. the coupon block) is
+  // agnostic to which mode priced the cart.
+  const zones = settings.radius_pricing_active ? await loadActiveZones(pool) : [];
+  // Exclusion squares block delivery regardless of zone/flat pricing mode,
+  // so they're always loaded (small table) — not gated by radius_pricing_active.
+  const exclusionZones = await loadActiveExclusionZones(pool);
+  const pricing = resolveDeliveryPricing({
+    customerLat,
+    customerLng,
+    deliveryType: deliveryTypeInput,
+    settings,
+    zones,
+    exclusionZones,
+  });
 
   // Fast delivery is an ADD-ON, not a replacement: the standard delivery
   // charge always stays on the bill — with its coupon/free-delivery rules
@@ -223,38 +237,43 @@ const calculateCart = async (req, res) => {
   // waiving the standard fee exactly as on a standard order. The fast fee
   // is never passed into the engine, so it can never be discounted.
   const fastDeliveryEnabled = Boolean(settings.fast_delivery_enabled);
-  const fastDeliveryCharge = toMoney(settings.fast_delivery_charge || 0);
   const fastDeliveryAvailable = fastDeliveryEnabled;
-  const standardDeliveryMinutes = Number.isInteger(Number(settings.standard_delivery_minutes))
-    ? Number(settings.standard_delivery_minutes)
-    : 60;
-  const fastDeliveryMinutes = Number.isInteger(Number(settings.fast_delivery_minutes))
-    ? Number(settings.fast_delivery_minutes)
-    : 30;
   const isFast = deliveryTypeInput === 'fast' && fastDeliveryAvailable;
+  // deliveryCharge always stays the STANDARD fee (zone-aware via the
+  // resolver) even on fast orders — fast is additive, not a swap. See the
+  // add-on note above.
+  let deliveryCharge = pricing.standardDeliveryCharge;
+  const standardDeliveryCharge = pricing.standardDeliveryCharge;
+  const fastDeliveryCharge = pricing.fastDeliveryCharge;
+  const standardDeliveryMinutes = pricing.standardDeliveryMinutes;
+  const fastDeliveryMinutes = pricing.fastDeliveryMinutes;
+  deliveryDistanceKm = pricing.distanceKm;
   // Additive fast-delivery fee actually charged on this order (0 unless Fast
   // is selected).
   let fastDeliveryFee = isFast ? fastDeliveryCharge : 0;
 
-  if (customerLat === undefined || customerLat === null || customerLat === '' ||
-      customerLng === undefined || customerLng === null || customerLng === '') {
+  const missingCoords = customerLat === undefined || customerLat === null || customerLat === ''
+    || customerLng === undefined || customerLng === null || customerLng === '';
+  if (missingCoords) {
     requiresLocation = true;
     deliveryMessage = 'Customer GPS location is required.';
-  } else {
-    // Distance-based pricing is removed. Always use threshold/fixed delivery logic.
-    // Note: Coordinates are deliberately ignored for pricing calculation.
-    
-    deliveryDistanceKm = null;
-    deliveryWithinRange = true; // Always true now
-    requiresLocation = false;
-    // Finalized below, once the coupon discount (if any) is known.
+  }
+  // Checked independently of missingCoords, not as its else-branch: with zone
+  // pricing ON the resolver reports outOfRange for a cart with no
+  // coordinates, and that has to make the quote invalid. Previously the
+  // missing-coords branch swallowed it and still returned valid: true with a
+  // full flat-priced breakdown for an address nobody had checked. With zone
+  // pricing OFF the resolver reports outOfRange: false, so flat-pricing
+  // installs keep quoting as before and only see requiresLocation.
+  if (pricing.outOfRange) {
+    deliveryWithinRange = false;
+    if (!requiresLocation) deliveryMessage = 'Delivery is not available at this location.';
+  } else if (pricing.excluded) {
+    deliveryWithinRange = false;
+    deliveryMessage = pricing.exclusionMessage;
   }
 
-  let nightCharge = 0;
-  if (settings.night_charge && settings.night_charge_start && settings.night_charge_end) {
-    const raw = calculateNightCharge(settings);
-    if (raw > 0) nightCharge = toMoney(raw);
-  }
+  let nightCharge = pricing.nightCharge > 0 ? toMoney(pricing.nightCharge) : 0;
 
   let rainCharge = 0;
   if (settings.rain_charge_enabled) {
@@ -281,6 +300,9 @@ const calculateCart = async (req, res) => {
   // (auto-apply-only coupons can have code = NULL) — used to force-apply
   // that exact offer instead of falling back to "the best available one".
   const couponId = req.body.coupon_id || req.body.couponId || null;
+  // Matched delivery zone (null when unzoned/flat pricing) — used to gate
+  // zone-specific coupons (target_zones = 'selected').
+  const zoneId = pricing.zone ? pricing.zone.id : null;
   // Set once the user explicitly removes their applied coupon — distinguishes
   // "no code given yet" (auto-apply the best offer) from "user chose no
   // coupon" (must not silently re-apply another one on recalculation).
@@ -366,6 +388,7 @@ const calculateCart = async (req, res) => {
       standardDeliveryCharge,
       storeType: cartStoreType,
       userId,
+      zoneId,
       itemCount: totalItemCount,
     });
     if (result.ok) {
@@ -384,6 +407,7 @@ const calculateCart = async (req, res) => {
       standardDeliveryCharge,
       storeType: cartStoreType,
       userId,
+      zoneId,
       itemCount: totalItemCount,
     });
     if (result.ok) {
@@ -401,6 +425,7 @@ const calculateCart = async (req, res) => {
       standardDeliveryCharge,
       storeType: cartStoreType,
       userId,
+      zoneId,
       itemCount: totalItemCount,
     });
     if (best) {
@@ -420,6 +445,7 @@ const calculateCart = async (req, res) => {
       standardDeliveryCharge,
       storeType: cartStoreType,
       userId,
+      zoneId,
       itemCount: totalItemCount,
     });
     if (best) {
@@ -438,6 +464,7 @@ const calculateCart = async (req, res) => {
       standardDeliveryCharge,
       storeType: cartStoreType,
       userId,
+      zoneId,
       itemCount: totalItemCount,
     });
   } catch (_) {
@@ -460,7 +487,7 @@ const calculateCart = async (req, res) => {
   let freeDeliveryProgress = null;
   if (!isFreeDeliveryApplied) {
     try {
-      freeDeliveryProgress = await getNextFreeDeliveryThreshold({ subtotal, storeType: cartStoreType, userId, itemCount: totalItemCount });
+      freeDeliveryProgress = await getNextFreeDeliveryThreshold({ subtotal, storeType: cartStoreType, userId, zoneId, itemCount: totalItemCount });
     } catch (err) {
       // Non-fatal: no progress hint on error, but log so a broken hint
       // (e.g. missing migration column) doesn't fail silently in prod.
@@ -478,6 +505,7 @@ const calculateCart = async (req, res) => {
       subtotal,
       storeType: cartStoreType,
       userId,
+      zoneId,
       excludeCouponId: appliedCoupon?.id || null,
       itemCount: totalItemCount,
     });
@@ -485,7 +513,7 @@ const calculateCart = async (req, res) => {
     console.error('[cart] getNearestUnlockableCoupon failed:', err.message);
   }
 
-  if (!requiresLocation) {
+  if (!requiresLocation && deliveryWithinRange) {
     if (isFreeDeliveryApplied) {
       deliveryMessage = 'Free delivery unlocked!';
     } else if (freeDeliveryProgress) {
@@ -524,12 +552,59 @@ const calculateCart = async (req, res) => {
 
     // Location delivery details
     deliveryDistanceKm: deliveryDistanceKm !== null ? Number(deliveryDistanceKm.toFixed(4)) : null,
-    deliveryRadiusKm: Number(settings.delivery_radius_km) || 8.00,
+    delivery_distance_km: deliveryDistanceKm !== null ? Number(deliveryDistanceKm.toFixed(4)) : null,
+    deliveryRadiusKm: pricing.mode === 'zone' ? pricing.maxRadiusKm : (Number(settings.delivery_radius_km) || 8.00),
     deliveryWithinRange,
     requiresLocation,
     freeDeliveryProgress,
     nearestOfferProgress,
     deliveryMessage,
+
+    // Radius-zone pricing (additive; both casings per API contract)
+    outOfRange: pricing.outOfRange,
+    out_of_range: pricing.outOfRange,
+    // Only set when outOfRange — the nearest zone the pin could move into.
+    nearestZoneName: pricing.nearestZoneName || null,
+    nearest_zone_name: pricing.nearestZoneName || null,
+    excluded: pricing.excluded,
+    exclusionMessage: pricing.exclusionMessage,
+    exclusion_message: pricing.exclusionMessage,
+    codAllowed: pricing.codAllowed,
+    cod_allowed: pricing.codAllowed,
+    radiusPricingApplied: pricing.mode === 'zone',
+    radius_pricing_applied: pricing.mode === 'zone',
+    maxDeliveryRadiusKm: pricing.maxRadiusKm,
+    max_delivery_radius_km: pricing.maxRadiusKm,
+    deliveryZone: pricing.zone ? {
+      id: pricing.zone.id,
+      name: pricing.zone.name || null,
+      boundary: parseBoundary(pricing.zone.boundary),
+      parentZoneId: pricing.zone.parent_zone_id != null ? pricing.zone.parent_zone_id : null,
+      parent_zone_id: pricing.zone.parent_zone_id != null ? pricing.zone.parent_zone_id : null,
+      areaKm2: Math.round(polygonAreaKm2(parseBoundary(pricing.zone.boundary)) * 100) / 100,
+      area_km2: Math.round(polygonAreaKm2(parseBoundary(pricing.zone.boundary)) * 100) / 100,
+      extentKm: pricing.zoneExtentKm,
+      extent_km: pricing.zoneExtentKm,
+      codEnabled: Boolean(Number(pricing.zone.cod_enabled)),
+      cod_enabled: Boolean(Number(pricing.zone.cod_enabled)),
+      nightCharge: Number(pricing.zone.night_charge),
+      night_charge: Number(pricing.zone.night_charge),
+    } : null,
+    delivery_zone: pricing.zone ? {
+      id: pricing.zone.id,
+      name: pricing.zone.name || null,
+      boundary: parseBoundary(pricing.zone.boundary),
+      parentZoneId: pricing.zone.parent_zone_id != null ? pricing.zone.parent_zone_id : null,
+      parent_zone_id: pricing.zone.parent_zone_id != null ? pricing.zone.parent_zone_id : null,
+      areaKm2: Math.round(polygonAreaKm2(parseBoundary(pricing.zone.boundary)) * 100) / 100,
+      area_km2: Math.round(polygonAreaKm2(parseBoundary(pricing.zone.boundary)) * 100) / 100,
+      extentKm: pricing.zoneExtentKm,
+      extent_km: pricing.zoneExtentKm,
+      codEnabled: Boolean(Number(pricing.zone.cod_enabled)),
+      cod_enabled: Boolean(Number(pricing.zone.cod_enabled)),
+      nightCharge: Number(pricing.zone.night_charge),
+      night_charge: Number(pricing.zone.night_charge),
+    } : null,
 
     // Fast delivery
     deliveryType: isFast ? 'fast' : 'standard',
@@ -564,6 +639,37 @@ const validateCouponHandler = async (req, res) => {
 
   if (!code || typeof code !== 'string') {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Coupon code is required' });
+  }
+
+  // The zone is resolved HERE from the customer's coordinates, never taken
+  // from the request body: a client-supplied delivery_zone_id would let
+  // anyone unlock a zone-restricted coupon (and enumerate which zones each
+  // coupon covers) by guessing ids. Same derivation order-creation uses.
+  const { latitude, longitude, lat, lng } = req.body;
+  const customerLat = latitude !== undefined ? latitude : lat;
+  const customerLng = longitude !== undefined ? longitude : lng;
+  const hasCoords = customerLat !== undefined && customerLat !== null && customerLat !== ''
+    && customerLng !== undefined && customerLng !== null && customerLng !== '';
+  if (hasCoords && !validateCoordinates(customerLat, customerLng)) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Invalid GPS coordinates provided' });
+  }
+
+  let zoneId = null;
+  if (hasCoords) {
+    const [settingRows] = await pool.query(
+      'SELECT delivery_charge, night_charge, night_charge_start, night_charge_end, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings LIMIT 1'
+    );
+    const zoneSettings = settingRows[0] || {};
+    if (zoneSettings.radius_pricing_active) {
+      const pricing = resolveDeliveryPricing({
+        customerLat,
+        customerLng,
+        deliveryType: 'standard',
+        settings: zoneSettings,
+        zones: await loadActiveZones(pool),
+      });
+      zoneId = pricing.zone ? pricing.zone.id : null;
+    }
   }
 
   // Determine store type from items (same logic as calculateCart).
@@ -614,6 +720,7 @@ const validateCouponHandler = async (req, res) => {
     standardDeliveryCharge: stdCharge,
     storeType: cartStoreType,
     userId,
+    zoneId,
   });
 
   if (result.ok) {
@@ -640,6 +747,38 @@ const getAvailableCoupons = async (req, res) => {
   const { subtotal, delivery_charge, deliveryCharge, standard_delivery_charge, standardDeliveryCharge, store_type, storeType } = req.query;
   const userId = req.user?.id || null;
 
+  // The zone is resolved HERE from the customer's coordinates, never taken
+  // from the request — same reasoning as validateCouponHandler above: a
+  // client-supplied delivery_zone_id would let anyone list zone-restricted
+  // coupons/offers for a zone they aren't actually in (and enumerate which
+  // zones each coupon covers) just by guessing ids.
+  const { latitude, longitude, lat, lng } = req.query;
+  const customerLat = latitude !== undefined ? latitude : lat;
+  const customerLng = longitude !== undefined ? longitude : lng;
+  const hasCoords = customerLat !== undefined && customerLat !== null && customerLat !== ''
+    && customerLng !== undefined && customerLng !== null && customerLng !== '';
+  if (hasCoords && !validateCoordinates(customerLat, customerLng)) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Invalid GPS coordinates provided' });
+  }
+
+  let zoneId = null;
+  if (hasCoords) {
+    const [settingRows] = await pool.query(
+      'SELECT delivery_charge, night_charge, night_charge_start, night_charge_end, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings LIMIT 1'
+    );
+    const zoneSettings = settingRows[0] || {};
+    if (zoneSettings.radius_pricing_active) {
+      const pricing = resolveDeliveryPricing({
+        customerLat,
+        customerLng,
+        deliveryType: 'standard',
+        settings: zoneSettings,
+        zones: await loadActiveZones(pool),
+      });
+      zoneId = pricing.zone ? pricing.zone.id : null;
+    }
+  }
+
   let cartStoreType = store_type || storeType || null;
   if (cartStoreType && cartStoreType !== 'mixed') {
     try {
@@ -658,6 +797,7 @@ const getAvailableCoupons = async (req, res) => {
       : null,
     storeType: cartStoreType,
     userId,
+    zoneId,
   });
 
   res.status(200).json({ data: coupons });

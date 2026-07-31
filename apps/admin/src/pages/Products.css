@@ -259,6 +259,15 @@
   border-bottom: none;
 }
 
+/* Variant pricing sub-row — visually nested under its parent product. */
+.products-table tbody tr.variant-price-row {
+  background: rgba(148, 163, 184, 0.06);
+}
+
+.products-table tbody tr.variant-price-row:hover {
+  background-color: rgba(148, 163, 184, 0.1) !important;
+}
+
 /* ── Product item ────────────────────────────────────────── */
 .product-info {
   display: flex;

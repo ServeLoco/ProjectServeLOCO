@@ -33,15 +33,20 @@ import {
   ReconnectingPill,
   ExitAppModal,
   ErrorState,
+  EmptyState,
   VariantSheet,
+  ChangeLocationModal,
+  LocationPermissionCard,
 } from '../../../components';
+import { showToast } from '../../../components/Toast';
 import { colors, typography, spacing, radius, layout } from '../../../theme';
-import { useCartStore, useSettingsStore } from '../../../stores';
-import { useAuthGate, useStoreModes } from '../../../hooks';
+import { useCartStore, useSettingsStore, useDeliveryLocationStore, useDeliveryZonesStore } from '../../../stores';
+import { useAuthGate, useStoreModes, useHomeLocationPermission } from '../../../hooks';
 import { subscribeProductAvailabilityEvents } from '../../../api/realtimeClient';
 
 
 import {
+  cartApi,
   dashboardApi,
   notificationsApi,
   productsApi,
@@ -50,7 +55,7 @@ import {
   subscribeRealtimeLifecycle,
   subscribeShopEvents,
 } from '../../../api';
-import { isFresh, setCached } from '../../../utils/apiCache';
+import { isFresh, setCached, invalidate } from '../../../utils/apiCache';
 import {
   asArray,
   normalizeCategory,
@@ -75,11 +80,171 @@ export default function HomeScreen() {
   const updateQuantity = useCartStore(state => state.updateQuantity);
   const [variantSheetProduct, setVariantSheetProduct] = useState(null);
   const removeItem = useCartStore(state => state.removeItem);
+  const appliedCouponCode = useCartStore(state => state.appliedCouponCode);
+  const appliedCouponId = useCartStore(state => state.appliedCouponId);
+  const couponAutoApplyDisabled = useCartStore(state => state.couponAutoApplyDisabled);
+  const setFreeDeliveryProgress = useCartStore(state => state.setFreeDeliveryProgress);
+  const setFreeDeliveryUnlocked = useCartStore(state => state.setFreeDeliveryUnlocked);
+  // Bumped by useDeliveryZoneSync on a delivery_zones.updated push (admin
+  // saved a zone) — included below purely to retrigger the progress refresh.
+  const deliveryZonesVersion = useDeliveryZonesStore(state => state.version);
   const shopStatus = useSettingsStore(state => state.shopStatus);
   const setSettings = useSettingsStore(state => state.setSettings);
   const isSettingsStale = useSettingsStore(state => state.isStale);
   const markSettingsFetched = useSettingsStore(state => state.markFetched);
-  
+
+  // Delivery location — set in the background by useDeliveryLocationSync
+  // (live GPS) or manually below (Change Location) when GPS falls outside
+  // every admin-configured zone. insideDeliveryZone is null until the first
+  // check resolves, so the banner only shows once we actually know.
+  const deliveryCoords = useDeliveryLocationStore(state => state.coords);
+  const insideDeliveryZone = useDeliveryLocationStore(state => state.insideZone);
+  const deliveryZoneName = useDeliveryLocationStore(state => state.zoneName);
+  const deliveryZoneId = useDeliveryLocationStore(state => state.zoneId);
+  const isInitialLocationSyncComplete = useDeliveryLocationStore(state => state.isInitialSyncComplete);
+  const recentDeliveryLocations = useDeliveryLocationStore(state => state.recentLocations);
+  const setManualDeliveryLocation = useDeliveryLocationStore(state => state.setManualLocation);
+  const setDeliveryLocationLabel = useDeliveryLocationStore(state => state.setLocationLabel);
+  const [showLocationPicker, setShowLocationPicker] = useState(false);
+  const [savingLocation, setSavingLocation] = useState(false);
+  // Inline "Enable Location" card (top slot, replaces the old full-screen
+  // LocationPermissionGate route) — only shown while there's no usable
+  // coords at all. A manual pin or a granted permission both fall straight
+  // through to the existing locationBar / out-of-zone EmptyState below,
+  // unchanged, so returning users with a saved location never see it.
+  const { status: locationPermStatus, requestAllow: requestLocationAllow, openSettings: openLocationSettings } = useHomeLocationPermission();
+  const [requestingLocationAllow, setRequestingLocationAllow] = useState(false);
+  const needsLocationPermission = !deliveryCoords
+    && (locationPermStatus === 'denied' || locationPermStatus === 'blocked');
+  // Same gate the dashboard body below uses (needsLocationPermission /
+  // out-of-zone EmptyState) — the inline dashboard search dropdown hits the
+  // same ungated catalog endpoint and was showing results with no location
+  // and to customers confirmed outside every zone.
+  const isLocationGated = needsLocationPermission
+    || (isInitialLocationSyncComplete && insideDeliveryZone === false);
+  const handleAllowLocation = useCallback(async () => {
+    setRequestingLocationAllow(true);
+    try {
+      await requestLocationAllow();
+    } finally {
+      setRequestingLocationAllow(false);
+    }
+  }, [requestLocationAllow]);
+  const [isLocationSlow, setIsLocationSlow] = useState(false);
+
+  useEffect(() => {
+    if (isInitialLocationSyncComplete) {
+      setIsLocationSlow(false);
+      return undefined;
+    }
+    const timer = setTimeout(() => setIsLocationSlow(true), 2500);
+    return () => clearTimeout(timer);
+  }, [isInitialLocationSyncComplete]);
+
+  const handleConfirmPickedLocation = useCallback(async (lat, lng, selectedLabel = null) => {
+    setSavingLocation(true);
+    try {
+      const res = await cartApi.calculate({ items: [], latitude: lat, longitude: lng });
+      const body = res?.data || res || {};
+      const outOfRange = Boolean(body.outOfRange ?? body.out_of_range);
+      // An exclusion square blocks delivery while still reporting
+      // outOfRange: false — both mean "we can't deliver here".
+      const excluded = Boolean(body.excluded ?? body.is_excluded);
+      const exclusionMessage = body.exclusionMessage || body.exclusion_message;
+
+      const zone = body.deliveryZone || body.delivery_zone || null;
+      const deliverable = !(outOfRange || excluded);
+      // Save the pin either way and close the picker — an undeliverable pin
+      // still needs to land back on the dashboard, which already renders the
+      // "We don't deliver here yet" screen off insideZone === false.
+      setManualDeliveryLocation(
+        lat,
+        lng,
+        deliverable,
+        deliverable ? (zone?.name || null) : null,
+        deliverable ? (zone?.id ?? null) : null,
+      );
+      if (selectedLabel && deliverable) {
+        setDeliveryLocationLabel(selectedLabel);
+      }
+      setShowLocationPicker(false);
+      if (deliverable) {
+        showToast('Delivery location updated', { type: 'success' });
+      } else {
+        showToast(
+          excluded
+            ? (exclusionMessage || 'We cannot deliver to that location.')
+            : "We don't deliver to that location yet",
+          { type: 'error' },
+        );
+      }
+    } catch (_) {
+      showToast('Could not verify that location. Please try again.', { type: 'error' });
+    } finally {
+      setSavingLocation(false);
+    }
+  }, [setManualDeliveryLocation, setDeliveryLocationLabel]);
+
+  // Keeps StickyMiniCart's "Add ₹X more for FREE delivery" hint (and its
+  // progress bar) live on the dashboard the same way Cart/Checkout's bill
+  // already is — otherwise it's a snapshot from whenever the user last
+  // opened Cart, and a zone change here (or an admin zone-shape push) would
+  // leave it advertising a threshold/coupon that no longer applies (or
+  // missing one that now does) until the user happens to open Cart again.
+  // Only freeDeliveryProgress/freeDeliveryUnlocked are refreshed — the total
+  // shown is local subtotal (see StickyMiniCart), not the full priced bill,
+  // so there's no need to fetch or store more than that here.
+  const homeProgressSeqRef = useRef(0);
+  useEffect(() => {
+    if (items.length === 0) {
+      setFreeDeliveryProgress(null);
+      setFreeDeliveryUnlocked(false);
+      return undefined;
+    }
+
+    const seq = ++homeProgressSeqRef.current;
+    const timer = setTimeout(() => {
+      const payload = {
+        items: items.filter(item => item?.product?.id).map(item => ({
+          productId: item.product.id,
+          variantId: item.variant?.id ?? null,
+          quantity: item.quantity,
+          type: item.type || (item.product?.isCombo || item.product?.is_combo ? 'combo' : 'product'),
+          isCombo: (item.type || (item.product?.isCombo || item.product?.is_combo ? 'combo' : 'product')) === 'combo',
+        })),
+        coupon_code: appliedCouponCode || undefined,
+        coupon_id: !appliedCouponCode && appliedCouponId ? appliedCouponId : undefined,
+        no_auto_apply: couponAutoApplyDisabled,
+        latitude: deliveryCoords?.lat,
+        longitude: deliveryCoords?.lng,
+      };
+      cartApi.calculate(payload)
+        .then(res => {
+          if (seq !== homeProgressSeqRef.current) return; // superseded by a newer change
+          const body = res?.data || res || {};
+          setFreeDeliveryProgress(body.freeDeliveryProgress || body.free_delivery_progress || null);
+          setFreeDeliveryUnlocked(Boolean(
+            body.appliedCoupon
+            && Number(body.appliedCoupon.freeDeliveryWaiver || 0) > 0,
+          ));
+        })
+        .catch(() => { /* best-effort refresh — Cart's own calc is authoritative */ });
+    }, 80);
+
+    return () => clearTimeout(timer);
+  }, [
+    deliveryZoneId,
+    deliveryCoords?.lat,
+    deliveryCoords?.lng,
+    deliveryZonesVersion,
+    items,
+    appliedCouponCode,
+    appliedCouponId,
+    couponAutoApplyDisabled,
+    setFreeDeliveryProgress,
+    setFreeDeliveryUnlocked,
+  ]);
+
   const { modes, refetchModes } = useStoreModes();
   // 'fast_food' is only the pre-fetch fallback — swapped for the admin's
   // configured default mode (store_modes.is_default) once modes load, but
@@ -97,6 +262,7 @@ export default function HomeScreen() {
     }
   }, [modes, storeType]);
   const [isLoading, setIsLoading] = useState(true);
+  const isHomeLoading = isLoading || !isInitialLocationSyncComplete;
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [dashboardSections, setDashboardSections] = useState([]);
   const [homeError, setHomeError] = useState('');
@@ -147,6 +313,24 @@ export default function HomeScreen() {
   // instantly (no skeleton) while a fresh fetch revalidates in the background.
   const sectionsCacheRef = useRef({});
   const prefetchedModesRef = useRef(new Set());
+
+  // Both caches above are keyed by store type only, so moving the pin into a
+  // different delivery zone would keep repainting the previous zone's
+  // sections. ProductList/Categories fold zoneId into their cache keys
+  // instead; these two are refs (and a prefetch set) rather than keyed
+  // lookups, so dropping them wholesale on a zone change is the equivalent.
+  // Skipped on the first resolve (null -> id) — nothing is cached yet then,
+  // and clearing would only throw away the in-flight mount fetch.
+  const lastZoneIdRef = useRef(deliveryZoneId);
+  useEffect(() => {
+    if (lastZoneIdRef.current === deliveryZoneId) return;
+    const hadZone = lastZoneIdRef.current !== null && lastZoneIdRef.current !== undefined;
+    lastZoneIdRef.current = deliveryZoneId;
+    if (!hadZone) return;
+    sectionsCacheRef.current = {};
+    prefetchedModesRef.current = new Set();
+    invalidate('dashboard:');
+  }, [deliveryZoneId]);
 
   // Staggered entry for cards
   const staggerCatAnims = useRef(Array.from({ length: 12 }, () => new Animated.Value(0))).current;
@@ -226,7 +410,11 @@ export default function HomeScreen() {
     return () => {
       isMounted = false;
     };
-  }, [currentApiStoreType, fadeAnim, setSettings, markSettingsFetched, isSettingsStale, slideAnim, staggerCatAnims, staggerComboAnims, refetchModes]);
+    // deliveryZoneId is not read in the body — it is here so a zone change
+    // rebuilds this callback and re-fires the load effect below, refetching
+    // the dashboard for the new zone (the effect above has already dropped
+    // the now-wrong cached sections).
+  }, [currentApiStoreType, deliveryZoneId, fadeAnim, setSettings, markSettingsFetched, isSettingsStale, slideAnim, staggerCatAnims, staggerComboAnims, refetchModes]);
 
   useEffect(() => {
     let cleanupLoad;
@@ -267,7 +455,7 @@ export default function HomeScreen() {
 
   // Live OOS: when shop/admin marks a product unavailable, grey it out on
   // every product rail immediately (no pull-to-refresh) instead of removing
-  // it — ProductCard renders the greyed-out "Temporarily Unavailable" state
+  // it — ProductCard renders the greyed-out "Item Unavailable" state
   // itself. Available=true → silent dashboard re-fetch so it comes back with
   // fully correct data/ordering.
   useEffect(() => {
@@ -386,11 +574,37 @@ export default function HomeScreen() {
     });
 
     // Live push for a shop opening/closing while this screen stays mounted
-    // and foregrounded — the focus/foreground refreshes above don't cover
-    // that case. Jitter 0–3s so 10k clients don't thundering-herd the API
-    // when admin toggles a shop (TASK 17).
+    // and foregrounded. Card grey-out happens instantly (no network call,
+    // same pattern as product-availability below) by patching items whose
+    // shopId matches — the ambiguous "shop closed" vs "out of stock" split
+    // no longer exists, both render as one unavailable card, so this must
+    // flip just as fast as the OOS patch does. The jittered 0–3s full
+    // refetch still runs after for data correctness (new/removed items,
+    // pricing) without 10k clients thundering-herding the API (TASK 17).
     let shopRefetchTimer = null;
-    const unsubscribeShopEvents = subscribeShopEvents(() => {
+    const unsubscribeShopEvents = subscribeShopEvents(({ eventName, payload }) => {
+      if (eventName === 'shop.status.updated') {
+        const shopId = payload?.shopId;
+        const isOpen = payload?.isOpen;
+        if (shopId != null && isOpen != null) {
+          setDashboardSections((prev) => {
+            if (!Array.isArray(prev) || prev.length === 0) return prev;
+            return prev.map((section) => {
+              if (section?.sectionType !== 'product_block') return section;
+              const items = section.items || [];
+              let changed = false;
+              const nextItems = items.map((item) => {
+                if (String(item?.shopId) !== String(shopId)) return item;
+                changed = true;
+                return { ...item, shopIsOpen: Boolean(isOpen), shop_is_open: Boolean(isOpen) };
+              });
+              if (!changed) return section;
+              return { ...section, items: nextItems };
+            });
+          });
+        }
+      }
+
       if (shopRefetchTimer) clearTimeout(shopRefetchTimer);
       shopRefetchTimer = setTimeout(() => {
         shopRefetchTimer = null;
@@ -617,6 +831,7 @@ export default function HomeScreen() {
         onSearchPress={handleSearchPress}
         onProductPress={handleProductPress}
         onSearchOpenChange={setIsSearchOverlayOpen}
+        isLocationGated={isLocationGated}
         dismissSignal={searchDismissSignal}
         cartItems={items}
         addItem={addItem}
@@ -642,13 +857,46 @@ export default function HomeScreen() {
         <View style={styles.topBarRibbonBar} />
       </View>
 
+      {insideDeliveryZone !== false && deliveryCoords && (
+        <View style={styles.locationBar}>
+          <AppIcon name="location" size={16} color={colors.saffron} />
+          <Text style={styles.locationBarText} numberOfLines={1}>
+            {/* zoneName is only ever set in zone-pricing mode. On a flat-pricing
+                install it stays null forever, so the "finding" placeholder must
+                not outlive the initial sync. */}
+            {deliveryZoneName
+              || (isInitialLocationSyncComplete ? 'Delivery location' : 'Finding your area…')}
+          </Text>
+          <PressableScale onPress={() => setShowLocationPicker(true)} accessibilityRole="button" accessibilityLabel="Change delivery location">
+            <Text style={styles.locationBarChange}>Change</Text>
+          </PressableScale>
+        </View>
+      )}
+
       {shopStatus === 'closed' && (
         <View style={styles.closedBanner}>
           <Text style={styles.closedText}>Shop is currently closed. We are not accepting orders.</Text>
         </View>
       )}
 
-      {!isLoading && homeError && dashboardSections.length === 0 ? (
+      {needsLocationPermission ? (
+        <LocationPermissionCard
+          variant={locationPermStatus}
+          requesting={requestingLocationAllow}
+          onAllow={handleAllowLocation}
+          onOpenSettings={openLocationSettings}
+          onPickManually={() => setShowLocationPicker(true)}
+        />
+      ) : isInitialLocationSyncComplete && insideDeliveryZone === false ? (
+        <EmptyState
+          icon={<AppIcon name="location" size={56} color={colors.textTertiary} />}
+          title="We don't deliver here yet"
+          subtitle="We're expanding rapidly and hope to serve your location soon. Thank you for your patience."
+          actionLabel="Change Location"
+          onAction={() => setShowLocationPicker(true)}
+          style={styles.emptyState}
+        />
+      ) : !isHomeLoading && homeError && dashboardSections.length === 0 ? (
         <ErrorState
           message="Unable to load home. Tap to retry."
           onRetry={() => loadHomeData(true)}
@@ -656,14 +904,14 @@ export default function HomeScreen() {
         />
       ) : (
         <>
-          {!isLoading && homeError ? (
+          {!isHomeLoading && homeError ? (
             <View style={styles.homeErrorCard}>
               <Text style={styles.homeErrorText}>{homeError}</Text>
               <Button label="Retry" size="small" variant="outline" onPress={() => loadHomeData(true)} />
             </View>
           ) : null}
 
-          {isLoading ? (
+          {isHomeLoading || (!deliveryCoords && locationPermStatus === 'checking') ? (
         <ScrollView
           style={styles.skeletonContainer}
           refreshControl={
@@ -679,6 +927,9 @@ export default function HomeScreen() {
         >
            <LoadingSkeleton style={{ height: 48, borderRadius: radius.md, marginBottom: spacing.lg }} />
            <LoadingSkeleton style={{ height: 120, borderRadius: radius.lg, marginBottom: spacing.xl }} />
+           {isLocationSlow ? (
+             <Text style={styles.locationLoadingNotice}>Slow internet — setting your delivery location…</Text>
+           ) : null}
 
             <View style={styles.skeletonCategoryRow}>
              <LoadingSkeleton style={[styles.skeletonCategoryCard, { width: categoryCardWidth }]} />
@@ -840,7 +1091,18 @@ export default function HomeScreen() {
             if (section.sectionType === 'product_block' || section.sectionType === 'combo_block') {
               const isComboBlock = section.sectionType === 'combo_block';
               const normalizedItems = section.items.map(normalizeProduct);
-              const visibleItems = isComboBlock ? normalizedItems.slice(0, 2) : normalizedItems;
+              // Unavailable items (shop closed or turned off) sink to the end of
+              // the row — stable sort keeps the admin's arranged relative order
+              // within each group. Recomputed every render, so the moment a live
+              // availability/shop-status patch flips an item's flag, the row
+              // reorders in the same tick the card greys out (or comes back to
+              // the front the instant it's available again).
+              const sortedItems = [...normalizedItems].sort((a, b) => {
+                const aOut = !a.available || a.shopIsOpen === false || a.shop_is_open === false;
+                const bOut = !b.available || b.shopIsOpen === false || b.shop_is_open === false;
+                return aOut === bOut ? 0 : aOut ? 1 : -1;
+              });
+              const visibleItems = isComboBlock ? sortedItems.slice(0, 2) : sortedItems;
               // Show the "See all" button when EITHER:
               //   (a) admin enabled the explicit "show_see_all" flag, OR
               //   (b) the section has more items than are shown on the dashboard
@@ -958,13 +1220,16 @@ export default function HomeScreen() {
         </>
       )}
 
-      {/* Sticky Mini Cart — Home has the floating tab bar, so float above it */}
-      <StickyMiniCart
-        itemCount={cartItemCount}
-        totalAmount={cartDisplayTotal}
-        onPress={handleCartPress}
-        aboveTabBar
-      />
+      {/* Sticky Mini Cart — Home has the floating tab bar, so float above it.
+          Hidden outside the delivery area — nothing here can be ordered. */}
+      {insideDeliveryZone !== false && (
+        <StickyMiniCart
+          itemCount={cartItemCount}
+          totalAmount={cartDisplayTotal}
+          onPress={handleCartPress}
+          aboveTabBar
+        />
+      )}
       <ReconnectingPill />
 
       <VariantSheet
@@ -982,6 +1247,15 @@ export default function HomeScreen() {
           BackHandler.exitApp();
         }}
       />
+
+      <ChangeLocationModal
+        recentLocations={recentDeliveryLocations}
+        onSelectRecent={(location) => handleConfirmPickedLocation(location.lat, location.lng)}
+        visible={showLocationPicker}
+        initialCenter={deliveryCoords ? { latitude: deliveryCoords.lat, longitude: deliveryCoords.lng } : undefined}
+        onConfirm={handleConfirmPickedLocation}
+        onClose={() => !savingLocation && setShowLocationPicker(false)}
+      />
     </AppScreen>
   );
 }
@@ -996,6 +1270,7 @@ function HomeHeader({
   onProductPress,
   onSearchOpenChange,
   dismissSignal,
+  isLocationGated,
   cartItems = [],
   addItem,
   updateQuantity,
@@ -1225,7 +1500,11 @@ function HomeHeader({
 
   const runSearch = useCallback(async (query) => {
     const trimmed = String(query || '').trim();
-    if (!trimmed) {
+    // No location yet, or confirmed outside every zone — the catalog isn't
+    // zone-scoped server-side, so hitting the endpoint here would show the
+    // exact items ProductListScreen/CategoriesScreen refuse to show for the
+    // same customer. Stay empty instead of leaking the full catalog.
+    if (!trimmed || isLocationGated) {
       setSearchResults([]);
       setIsSearching(false);
       return;
@@ -1245,11 +1524,11 @@ function HomeHeader({
     } finally {
       setIsSearching(false);
     }
-  }, []);
+  }, [isLocationGated]);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (!searchQuery.trim()) {
+    if (!searchQuery.trim() || isLocationGated) {
       setSearchResults([]);
       setIsSearching(false);
       return;
@@ -1260,7 +1539,7 @@ function HomeHeader({
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
-  }, [searchQuery, runSearch]);
+  }, [searchQuery, runSearch, isLocationGated]);
 
   useEffect(() => {
     Animated.timing(dropdownAnim, {
@@ -2172,6 +2451,14 @@ const styles = StyleSheet.create({
     flex: 1,
     padding: spacing.md,
   },
+  locationLoadingNotice: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: -spacing.lg,
+    marginBottom: spacing.lg,
+  },
   homeHeader: {
     paddingHorizontal: spacing.md,
     backgroundColor: colors.bgApp,
@@ -2191,6 +2478,24 @@ const styles = StyleSheet.create({
   },
   // Saffron ribbon separator below the top bar — the dashboard ScrollView
   // starts here and scrolls up under it. Acts as a visual anchor.
+  locationBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.xs,
+  },
+  locationBarText: {
+    flex: 1,
+    ...typography.caption,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  locationBarChange: {
+    ...typography.caption,
+    fontWeight: '700',
+    color: colors.saffron,
+  },
   topBarRibbon: {
     height: 6,
     justifyContent: 'center',
@@ -2609,6 +2914,12 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.textInverse,
     fontWeight: '700',
+  },
+  emptyState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.xl,
   },
   homeErrorCard: {
     marginHorizontal: spacing.md,

@@ -1,0 +1,24 @@
+.delivery-zone-map-wrap {
+  width: 100%;
+}
+
+.delivery-zone-map {
+  width: 100%;
+  height: 640px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border-color, #e2e8f0);
+  z-index: 0;
+}
+
+.delivery-zone-map-error {
+  color: var(--danger-color);
+  margin-top: 8px;
+  font-size: 0.85rem;
+}
+
+.delivery-zone-map-hint {
+  margin-top: 8px;
+  font-size: 0.85rem;
+  color: var(--text-secondary, #64748b);
+}

@@ -1,4 +1,6 @@
 const { pool } = require('../db/mysql');
+const config = require('../config/env');
+const { roundMoney } = require('../utils/money');
 const { syncGlobalShopOpenState } = require('../utils/shops');
 const { emitToAllCustomers, emitToAdmins } = require('../realtime/socket');
 const {
@@ -8,13 +10,28 @@ const {
   readyShopOrder,
 } = require('../services/shopOrderActions');
 
+// Same fixed offset riders.js uses for "today" — the DB session time_zone
+// isn't guaranteed to be IST, so a plain DATE(created_at) comparison can put
+// late-night orders on the wrong calendar day for the ?date= filter below.
+const HISTORY_TODAY_TZ = config.RIDER_TODAY_TZ || '+05:30';
+
+// MySQL TIME columns come back as 'HH:MM:SS' — trim to 'HH:MM' for the API.
+const formatTime = (t) => (t ? String(t).slice(0, 5) : null);
+
 const shopShape = (s) => ({
   id: s.id,
   name: s.name,
   is_open: Boolean(s.is_open),
   isOpen: Boolean(s.is_open),
   active: Boolean(s.active),
+  open_time: formatTime(s.open_time),
+  openTime: formatTime(s.open_time),
+  close_time: formatTime(s.close_time),
+  closeTime: formatTime(s.close_time),
 });
+
+const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // GET /me — the owner's own shop.
 const getMyShop = async (req, res) => {
@@ -46,7 +63,7 @@ const toggleMyShop = async (req, res) => {
   }
 
   await pool.query('UPDATE shops SET is_open = ? WHERE id = ?', [isOpen ? 1 : 0, req.shop.id]);
-  const [rows] = await pool.query('SELECT id, name, is_open, active FROM shops WHERE id = ?', [req.shop.id]);
+  const [rows] = await pool.query('SELECT id, name, is_open, active, open_time, close_time FROM shops WHERE id = ?', [req.shop.id]);
   emitToAllCustomers('shop.status.updated', { shopId: req.shop.id, isOpen: Boolean(isOpen) });
   // Admin dashboard's Shops table has no other way to learn a shop owner
   // toggled their own shop — keep it in sync the same way rider toggles do.
@@ -68,6 +85,36 @@ const toggleMyShop = async (req, res) => {
   require('../utils/microCache').bust('dashboard');
   require('../utils/microCache').bust('categories');
   res.status(200).json({ message: 'Shop updated', shop: shopShape(rows[0]) });
+};
+
+// PATCH /me/schedule — body { openTime, closeTime } as 'HH:MM' strings, or
+// both null to turn the schedule off. Purely a schedule write: it does NOT
+// touch is_open itself — shopScheduleSweeper is what flips is_open the
+// minute the clock crosses either boundary, exactly once, only if the shop
+// isn't already in that state (so it never fights a manual toggle made at
+// any other time of day).
+const updateMyShopSchedule = async (req, res) => {
+  const openTime = req.body.openTime !== undefined ? req.body.openTime : req.body.open_time;
+  const closeTime = req.body.closeTime !== undefined ? req.body.closeTime : req.body.close_time;
+
+  const bothNull = openTime === null && closeTime === null;
+  const bothValid = HHMM_RE.test(openTime) && HHMM_RE.test(closeTime);
+  if (!bothNull && !bothValid) {
+    return res.status(400).json({
+      code: 'VALIDATION_ERROR',
+      message: 'Provide both openTime and closeTime as "HH:MM", or both null to turn scheduling off.',
+    });
+  }
+  if (bothValid && openTime === closeTime) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Open and close time must be different.' });
+  }
+
+  await pool.query('UPDATE shops SET open_time = ?, close_time = ? WHERE id = ?', [openTime, closeTime, req.shop.id]);
+  const [rows] = await pool.query(
+    'SELECT id, name, is_open, active, open_time, close_time FROM shops WHERE id = ?',
+    [req.shop.id],
+  );
+  res.status(200).json({ message: 'Shop schedule updated', shop: shopShape(rows[0]) });
 };
 
 // GET /products — this shop's non-deleted products, available as a boolean,
@@ -152,6 +199,44 @@ const toggleMyProduct = async (req, res) => {
   });
 };
 
+// PATCH /products/:id/variants/:variantId/toggle — flip a single variant's
+// availability. Joins through products to confirm both the product and the
+// variant belong to this shop, so a wrong-shop id 404s like toggleMyProduct.
+const toggleMyProductVariant = async (req, res) => {
+  const available = req.body.available !== undefined ? req.body.available : req.body.isAvailable;
+  if (typeof available !== 'boolean') {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'available (boolean) is required' });
+  }
+  const productId = Number(req.params.id);
+  const variantId = Number(req.params.variantId);
+  const isAvailable = Boolean(available);
+  const [result] = await pool.query(
+    `UPDATE product_variants v
+     JOIN products p ON p.id = v.product_id
+     SET v.available = ?
+     WHERE v.id = ? AND v.product_id = ? AND p.shop_id = ? AND v.deleted = 0 AND p.deleted = 0`,
+    [isAvailable ? 1 : 0, variantId, productId, req.shop.id]
+  );
+  if (result.affectedRows === 0) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Variant not found' });
+  }
+  emitToAllCustomers('product.availability.updated', {
+    productId,
+    id: productId,
+    variantId,
+    available: isAvailable,
+    shopId: req.shop.id,
+  });
+  require('../utils/microCache').bust('dashboard');
+  require('../utils/microCache').bust('categories');
+  res.status(200).json({
+    message: 'Variant updated',
+    productId, product_id: productId,
+    variantId, variant_id: variantId,
+    available: isAvailable,
+  });
+};
+
 // GET /orders — orders with ≥1 of this shop's items and status Accepted/Preparing.
 // Only this shop's items are returned; no prices, address, phone, or totals.
 // Includes expectedMinutes (from settings, keyed by the order's delivery_type)
@@ -169,22 +254,52 @@ const getMyOrders = async (req, res) => {
 // list for the "Orders" tab. Capped at 100 rows — this is a recent-history
 // view, not a paginated report.
 const getMyOrderHistory = async (req, res) => {
+  const { date } = req.query;
+  if (date !== undefined && !DATE_RE.test(date)) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'date must be "YYYY-MM-DD"' });
+  }
+  const params = [req.shop.id];
+  let where = 'WHERE oi.shop_id = ?';
+  if (date) {
+    where += " AND DATE(CONVERT_TZ(o.created_at, '+00:00', ?)) = ?";
+    params.push(HISTORY_TODAY_TZ, date);
+  }
+
   const [orders] = await pool.query(
     `SELECT DISTINCT o.id, o.order_number, o.status, o.note, o.admin_remark, o.created_at, o.delivery_type
      FROM orders o JOIN order_items oi ON oi.order_id = o.id
-     WHERE oi.shop_id = ?
+     ${where}
      ORDER BY o.created_at DESC
      LIMIT 100`,
-    [req.shop.id]
+    params
   );
 
+  // Payout total is computed independently via SQL SUM rather than folding
+  // over the `orders` page above (which is capped at 100 rows). Bucketed by
+  // created_at — same day scoping as the order list — so the total always
+  // matches the orders shown on screen.
+  const [payoutRows] = await pool.query(
+    `SELECT COALESCE(SUM(oi.shop_line_total), 0) as total
+     FROM orders o JOIN order_items oi ON oi.order_id = o.id
+     ${where}
+       AND o.status = 'Delivered'
+       AND oi.shop_rejected_at IS NULL
+       AND oi.shop_line_total IS NOT NULL`,
+    params
+  );
+  const payableTotal = Number(payoutRows[0].total) || 0;
+
   if (orders.length === 0) {
-    return res.status(200).json({ orders: [] });
+    return res.status(200).json({
+      orders: [],
+      payableTotal: roundMoney(payableTotal),
+      payable_total: roundMoney(payableTotal),
+    });
   }
 
   const orderIds = orders.map(o => o.id);
   const [items] = await pool.query(
-    'SELECT id, order_id, product_name, quantity, variant_label, shop_confirmed_at, shop_rejected_at, shop_ready_at FROM order_items WHERE shop_id = ? AND order_id IN (?)',
+    'SELECT id, order_id, product_name, quantity, variant_label, shop_line_total, shop_confirmed_at, shop_rejected_at, shop_ready_at FROM order_items WHERE shop_id = ? AND order_id IN (?) ORDER BY id ASC',
     [req.shop.id, orderIds]
   );
 
@@ -199,6 +314,10 @@ const getMyOrderHistory = async (req, res) => {
     const confirmed = myItems.length > 0 && myItems.every(it => it.shop_confirmed_at !== null);
     const rejected = myItems.length > 0 && myItems.every(it => it.shop_rejected_at !== null);
     const ready = myItems.length > 0 && myItems.every(it => it.shop_ready_at !== null);
+    const payableItems = o.status === 'Cancelled'
+      ? []
+      : myItems.filter(it => it.shop_rejected_at === null && it.shop_line_total !== null && it.shop_line_total !== undefined);
+    const shopTotal = roundMoney(payableItems.reduce((sum, it) => sum + Number(it.shop_line_total), 0));
     return {
       id: o.id,
       orderNumber: o.order_number,
@@ -214,6 +333,8 @@ const getMyOrderHistory = async (req, res) => {
       confirmed,
       rejected,
       ready,
+      shopTotal,
+      shop_total: shopTotal,
       items: myItems.map(it => ({
         id: it.id,
         productName: it.product_name,
@@ -221,11 +342,17 @@ const getMyOrderHistory = async (req, res) => {
         quantity: it.quantity,
         variantLabel: it.variant_label,
         variant_label: it.variant_label,
+        shopLineTotal: it.shop_line_total !== null ? Number(it.shop_line_total) : null,
+        shop_line_total: it.shop_line_total !== null ? Number(it.shop_line_total) : null,
       })),
     };
   });
 
-  res.status(200).json({ orders: result });
+  res.status(200).json({
+    orders: result,
+    payableTotal: roundMoney(payableTotal),
+    payable_total: roundMoney(payableTotal),
+  });
 };
 
 // PATCH /orders/:orderId/confirm — mark this shop's items as confirmed.
@@ -391,8 +518,10 @@ const assignMyProductGroup = async (req, res) => {
 module.exports = {
   getMyShop,
   toggleMyShop,
+  updateMyShopSchedule,
   getMyProducts,
   toggleMyProduct,
+  toggleMyProductVariant,
   getMyOrders,
   getMyOrderHistory,
   confirmMyOrder,

@@ -14,8 +14,9 @@ import {
   useCustomerRealtime,
   useLocalNotifications,
   useNetworkStatus,
-  usePreciseLocationPermissionOnStart,
   useShopStatusSync,
+  useDeliveryZoneSync,
+  useDeliveryLocationSync,
   useProductAvailabilitySync,
   useAuthRoleSync,
 } from './src/hooks';
@@ -50,11 +51,27 @@ function isUpdateRequired(current, required) {
 const LAST_NATIVE_VERSION_KEY = 'serveloco-last-native-version';
 const AUTH_STORAGE_KEY = 'serveloco-customer-auth';
 
+// Registered at module load — BEFORE any component effect runs — so the
+// token/logout providers are always ready by the time the first request
+// goes out. Background sync hooks (useDeliveryZoneSync, useDeliveryLocationSync)
+// mount their effects ahead of App's own effects and can fire an authed
+// request on the very first render; if these providers were registered
+// inside a useEffect instead, that request would go out with no
+// Authorization header, get a 401, and trigger a spurious logout.
+setCustomerLogoutHandler(() => {
+  useAuthStore.getState().logout();
+});
+setCustomerTokenProvider(() => useAuthStore.getState().token);
+setAdminTokenProvider(() => useAuthStore.getState().adminToken);
+setAdminReMintHandler(() => useAuthStore.getState().mintAdminSession());
+setAdminSessionClearHandler(() => useAuthStore.getState().clearAdminSession());
+
 function App() {
   useCustomerRealtime();
   useLocalNotifications(navigationRef);
-  usePreciseLocationPermissionOnStart();
   useShopStatusSync();
+  useDeliveryZoneSync();
+  useDeliveryLocationSync();
   useProductAvailabilitySync();
   useAuthRoleSync();
   const { isOnline } = useNetworkStatus();
@@ -148,26 +165,6 @@ function App() {
   }, []);
 
   useEffect(() => {
-    // Hand the http client a callback so any 401 it sees can wipe the
-    // session; CustomerNavigator then re-renders the Auth screen because
-    // isAuthenticated flips back to false.
-    setCustomerLogoutHandler(() => {
-      useAuthStore.getState().logout();
-    });
-
-    // Tell the http client how to read the current customer token so it can
-    // attach the Authorization header on { auth: 'customer' } requests.
-    // Without this, every authenticated call goes out tokenless -> 401 ->
-    // the logout handler above fires and bounces the user to Auth.
-    setCustomerTokenProvider(() => useAuthStore.getState().token);
-
-    // Admin Mode token plumbing: how to read the current admin JWT, how to
-    // re-mint it on a 401 (12h expiry — see httpClient), and how to clear
-    // the admin session when re-mint itself is rejected (phone deactivated).
-    setAdminTokenProvider(() => useAuthStore.getState().adminToken);
-    setAdminReMintHandler(() => useAuthStore.getState().mintAdminSession());
-    setAdminSessionClearHandler(() => useAuthStore.getState().clearAdminSession());
-
     // Clear the image memory cache when the app comes back to the
     // foreground after being backgrounded for a while. expo-image's
     // disk cache persists across launches, so we only need to clear

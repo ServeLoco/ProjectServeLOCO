@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { CouponsApi, CustomersApi } from '../api';
+import { CouponsApi, CustomersApi, DeliveryZonesApi } from '../api';
 import { Loading, ErrorState, EmptyState } from '../components/SharedUI';
 import { useStoreModes } from '../hooks/useStoreModes';
 import './Coupons.css';
@@ -14,6 +14,17 @@ const TARGET_AUDIENCE_OPTIONS = [
   { value: 'all', label: 'All Users' },
   { value: 'selected', label: 'Selected Users' },
 ];
+
+const TARGET_ZONES_OPTIONS = [
+  { value: 'all', label: 'All Zones' },
+  { value: 'selected', label: 'Selected Zones' },
+];
+
+const zoneSizeLabel = (zone) => {
+  const extent = Number(zone.extentKm ?? zone.extent_km);
+  const size = Number.isFinite(extent) ? ` (~${extent}km)` : '';
+  return `${zone.name || `Zone #${zone.id}`}${size}`;
+};
 
 // Future templates to consider (not yet shipped):
 //   - Flash Sale: short window, percent off, very high priority
@@ -124,6 +135,7 @@ const EMPTY_FORM = {
   total_usage_limit: '', per_user_usage_limit: '1', first_order_only: false, first_n_orders: '',
   target_audience: 'all', auto_apply: false, requires_code: true, priority: '0', active: true,
   targeted_user_ids: [],
+  target_zones: 'all', targeted_zone_ids: [],
 };
 
 function CouponPreview({ form }) {
@@ -230,6 +242,11 @@ export default function Coupons() {
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [wizardStep, setWizardStep] = useState('template');
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
+  const [zones, setZones] = useState([]);
+
+  useEffect(() => {
+    DeliveryZonesApi.list().then(res => setZones(res.data || [])).catch(() => setZones([]));
+  }, []);
 
   const fetchCoupons = useCallback(async (params = {}) => {
     setLoading(true); setError(null);
@@ -278,6 +295,8 @@ export default function Coupons() {
         requires_code: c.requires_code !== null ? Boolean(c.requires_code) : true,
         priority: c.priority !== null ? String(c.priority) : '0', active: Boolean(c.active),
         targeted_user_ids: (c.targetedUsers || []).map(u => u.user_id),
+        target_zones: c.target_zones || 'all',
+        targeted_zone_ids: (c.targetedZones || []).map(z => z.delivery_zone_id),
       });
       setEditingId(id); setShowForm(true); setFormError(null);
       setSelectedTemplateId('custom'); setWizardStep('form');
@@ -350,6 +369,15 @@ export default function Coupons() {
 
   const handleRemoveTargetedUser = (userId) => {
     setForm(prev => ({ ...prev, targeted_user_ids: prev.targeted_user_ids.filter(id => id !== userId) }));
+  };
+
+  const handleToggleTargetedZone = (zoneId) => {
+    setForm(prev => ({
+      ...prev,
+      targeted_zone_ids: prev.targeted_zone_ids.includes(zoneId)
+        ? prev.targeted_zone_ids.filter(id => id !== zoneId)
+        : [...prev.targeted_zone_ids, zoneId],
+    }));
   };
 
   const handleSubmit = async (e) => {
@@ -432,7 +460,7 @@ export default function Coupons() {
       ) : (
         <div className="coupons-table-wrap">
           <table className="coupons-table">
-            <thead><tr><th>Code / Title</th><th>Discount</th><th>Min Order</th><th>Auto-apply</th><th>Priority</th><th>Target</th><th>Usage</th><th>Status</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Code / Title</th><th>Discount</th><th>Min Order</th><th>Auto-apply</th><th>Priority</th><th>Target</th><th>Zones</th><th>Usage</th><th>Status</th><th>Actions</th></tr></thead>
             <tbody>
               {coupons.map(c => (
                 <tr key={c.id}>
@@ -445,6 +473,7 @@ export default function Coupons() {
                   <td>{c.auto_apply ? <span className="coupon-auto-tag">Yes</span> : 'No'}</td>
                   <td>{c.auto_apply ? Number(c.priority) || 0 : '—'}</td>
                   <td>{c.target_audience === 'selected' ? 'Selected' : 'All'}</td>
+                  <td>{c.target_zones === 'selected' ? 'Selected' : 'All'}</td>
                   <td>
                     {c.totalRedemptions ?? 0}
                     {c.total_usage_limit ? ` / ${c.total_usage_limit} used` : ' used'}
@@ -591,6 +620,25 @@ export default function Coupons() {
                         {userSearchResults.length > 0 && (<div className="user-search-results">{userSearchResults.map(u => (<button type="button" key={u.id} className="user-search-item" onClick={() => handleAddTargetedUser(u)}>{u.name} — {u.phone}</button>))}</div>)}
                         {form.targeted_user_ids.length > 0 && (<div className="targeted-users-list">{form.targeted_user_ids.map(uid => (<span key={uid} className="targeted-user-chip">User #{uid}<button type="button" onClick={() => handleRemoveTargetedUser(uid)}>X</button></span>))}</div>)}
                       </div>
+                    )}
+                  </fieldset>
+                )}
+                {showField('target_audience') && (
+                  <fieldset><legend>Target Delivery Zones</legend>
+                    <div className="form-row"><label>Zones</label><select value={form.target_zones} onChange={e => handleFormChange('target_zones', e.target.value)}>{TARGET_ZONES_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></div>
+                    {form.target_zones === 'selected' && (
+                      zones.length === 0 ? (
+                        <p className="coupon-form-info">No delivery zones exist yet — create one on the Delivery Zones page first.</p>
+                      ) : (
+                        <div className="targeted-zones-list">
+                          {zones.map(z => (
+                            <label key={z.id} className="targeted-zone-item">
+                              <input type="checkbox" checked={form.targeted_zone_ids.includes(z.id)} onChange={() => handleToggleTargetedZone(z.id)} />
+                              {zoneSizeLabel(z)}
+                            </label>
+                          ))}
+                        </div>
+                      )
                     )}
                   </fieldset>
                 )}

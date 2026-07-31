@@ -21,6 +21,20 @@ export const HEADING_CHANGE_DEGREES = 45;
 /** Soft heartbeat only (stuck GPS / no move) — not the main update cadence. */
 export const PING_MAX_INTERVAL_MS = 60_000;
 
+// Idle presence pings — used by useRiderIdleLocationPing while the rider is
+// online with no active job. The server ranks offers by distance from the
+// pickup shop, so a free rider who never reports a position can only ever be
+// reached by the distance-blind fallback ring.
+//
+// Deliberately NOT a watchPositionAsync: a one-shot Balanced fix every 90 s
+// lets the GPS chip sleep in between, unlike the High-accuracy 3 s watch that
+// runs during an actual delivery. Must stay under the server's
+// RIDER_LOCATION_MAX_AGE_SEC (600 s) with room for missed pings.
+export const IDLE_PING_INTERVAL_MS = 90_000;
+export const IDLE_PING_ACCURACY = Location.Accuracy.Balanced;
+/** Give up on a fix well before the next tick so attempts can never pile up. */
+export const IDLE_PING_TIMEOUT_MS = 30_000;
+
 /** Haversine distance in meters. */
 export function distanceMeters(lat1, lng1, lat2, lng2) {
   const R = 6371000;

@@ -6,7 +6,7 @@ const jwt = require('jsonwebtoken');
 
 jest.mock('../src/db/mysql', () => ({
   pool: {
-    query: jest.fn(),
+    query: jest.fn().mockResolvedValue([[]]),
     getConnection: jest.fn(),
   },
 }));
@@ -155,6 +155,7 @@ describe('Order idempotency', () => {
         delivery_charge: 0,
       }]])
       .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test' }]])
+      .mockResolvedValueOnce([[]]) // exclusion zones
       .mockResolvedValueOnce([{ insertId: 999 }])
       .mockResolvedValueOnce([{ affectedRows: 1 }]);
 
@@ -208,6 +209,7 @@ describe('Order idempotency', () => {
         delivery_cost_per_km: 5
       }]])
       .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test' }]])
+      .mockResolvedValueOnce([[]]) // exclusion zones
       .mockResolvedValueOnce([{ insertId: 777 }])
       .mockResolvedValueOnce([{ affectedRows: 1 }]);
 
@@ -257,6 +259,7 @@ describe('Order idempotency', () => {
       delivery_radius_km: 8, delivery_cost_per_km: 5
     }]]);
     mockConnection.query.mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test' }]]);
+    mockConnection.query.mockResolvedValueOnce([[]]); // exclusion zones
     mockConnection.query.mockResolvedValueOnce([{ insertId: 888 }]);
     mockConnection.query.mockResolvedValueOnce([{ affectedRows: 1 }]);
 
@@ -382,6 +385,7 @@ describe('Order idempotency', () => {
         delivery_charge: 10, night_charge: 0,
       }]])
       .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test' }]])
+      .mockResolvedValueOnce([[]]) // exclusion zones
       .mockResolvedValueOnce([{ insertId: 999 }])
       .mockResolvedValueOnce([{ affectedRows: 1 }]);
 
@@ -395,7 +399,8 @@ describe('Order idempotency', () => {
         shop_open: 1, delivery_available: 1,
         delivery_charge: 10, night_charge: 0,
       }]])
-      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test' }]]);
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test' }]])
+      .mockResolvedValueOnce([[]]); // exclusion zones
     const dupErr = new Error("Duplicate entry '1-idem-race-001' for key 'orders.idx_orders_idempotency'");
     dupErr.code = 'ER_DUP_ENTRY';
     dupErr.errno = 1062;

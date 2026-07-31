@@ -66,6 +66,13 @@ const formatDateTime = (value) => {
   });
 };
 const statusClassName = (status) => String(status || 'unknown').toLowerCase().replace(/\s+/g, '-');
+// Local YYYY-MM-DD (not toISOString, which shifts to UTC and can land on the
+// wrong day near midnight for IST users).
+const todayStr = () => {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+};
 
 export default function Orders() {
   const [orders, setOrders] = useState([]);
@@ -74,6 +81,9 @@ export default function Orders() {
   const [error, setError] = useState(null);
 
   const [filters, setFilters] = useState(EMPTY_FILTERS);
+  // Default view is "today only". History mode lets the admin pick any date
+  // range to browse older orders; leaving history mode snaps back to today.
+  const [historyMode, setHistoryMode] = useState(false);
 
   const [selectedOrder, setSelectedOrder] = useState(null);
   const [updating, setUpdating] = useState(false);
@@ -82,6 +92,7 @@ export default function Orders() {
   const [pageMessage, setPageMessage] = useState(null);
   const [showCreateOrder, setShowCreateOrder] = useState(false);
   const filtersRef = useRef(filters);
+  const historyModeRef = useRef(historyMode);
   const paginationRef = useRef(pagination);
   const selectedOrderRef = useRef(selectedOrder);
   const refreshTimerRef = useRef(null);
@@ -91,6 +102,10 @@ export default function Orders() {
   useEffect(() => {
     filtersRef.current = filters;
   }, [filters]);
+
+  useEffect(() => {
+    historyModeRef.current = historyMode;
+  }, [historyMode]);
 
   useEffect(() => {
     paginationRef.current = pagination;
@@ -106,6 +121,11 @@ export default function Orders() {
       setError(null);
       
       const params = { page, limit: 20, ...filtersRef.current };
+      if (!historyModeRef.current) {
+        // Default view: today only, regardless of any stale date filter state.
+        params.dateFrom = todayStr();
+        params.dateTo = todayStr();
+      }
       Object.keys(params).forEach(k => !params[k] && delete params[k]);
 
       const res = await OrdersApi.list(params);
@@ -157,7 +177,7 @@ export default function Orders() {
     // Debounce so typing in the search box doesn't fire a request per keystroke.
     const timer = setTimeout(() => fetchOrders(1), 300);
     return () => clearTimeout(timer);
-  }, [filters]);
+  }, [filters, historyMode]);
 
   useAdminRefresh(() => fetchOrders(paginationRef.current.page || 1));
 
@@ -272,6 +292,15 @@ export default function Orders() {
   };
 
   const clearFilters = () => setFilters(EMPTY_FILTERS);
+
+  const openHistory = () => {
+    setFilters(EMPTY_FILTERS);
+    setHistoryMode(true);
+  };
+  const backToToday = () => {
+    setFilters(EMPTY_FILTERS);
+    setHistoryMode(false);
+  };
 
   const handleRowClick = async (id) => {
     try {
@@ -653,6 +682,15 @@ export default function Orders() {
           <button className="btn-secondary" onClick={() => fetchOrders(pagination.page)} disabled={loading}>
             {loading ? 'Refreshing...' : 'Refresh'}
           </button>
+          {historyMode ? (
+            <button className="btn-secondary" onClick={backToToday}>
+              ← Back to Today
+            </button>
+          ) : (
+            <button className="btn-secondary" onClick={openHistory}>
+              Order History
+            </button>
+          )}
           <button
             className="btn-export"
             onClick={handleExportCSV}
@@ -916,7 +954,7 @@ export default function Orders() {
                   <strong>{formatKm(selectedOrder.delivery_distance_km)}</strong>
                 </div>
                 <div className="detail-row">
-                  <span>Radius used:</span>
+                  <span>Zone extent:</span>
                   <strong>{formatKm(selectedOrder.delivery_radius_km_snapshot)}</strong>
                 </div>
                 <div className="detail-row">
@@ -1041,6 +1079,7 @@ export default function Orders() {
                           background, color,
                         }}>
                           {sc.shopName} {label}
+                          {(sc.shopTotal ?? sc.shop_total) > 0 ? ` · ₹${sc.shopTotal ?? sc.shop_total} owed` : ''}
                         </span>
                       );
                     })}
@@ -1075,6 +1114,9 @@ export default function Orders() {
                   </div>
                   {Number(selectedOrder.discountAmount ?? selectedOrder.discount_amount) > 0 && (
                     <div className="detail-row"><span>Discount:</span> <strong>- ₹{formatMoney(selectedOrder.discountAmount ?? selectedOrder.discount_amount)}</strong></div>
+                  )}
+                  {Number(selectedOrder.freeDeliveryWaiverAmount ?? selectedOrder.free_delivery_waiver_amount) > 0 && (
+                    <div className="detail-row"><span>Free delivery waiver:</span> <strong style={{ color: '#15803d' }}>−₹{formatMoney(selectedOrder.freeDeliveryWaiverAmount ?? selectedOrder.free_delivery_waiver_amount)}</strong></div>
                   )}
                   <div className="detail-row" style={{ fontSize: '1.2rem', marginTop: '0.5rem' }}>
                     <span>Total:</span> <strong style={{ color: 'var(--primary-color)' }}>₹{formatMoney(selectedOrder.total)}</strong>

@@ -1,0 +1,147 @@
+.delivery-zones-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.delivery-zones-page .page-subtitle {
+  color: var(--text-secondary);
+  margin-top: 4px;
+  max-width: 720px;
+}
+
+.zone-card {
+  background: var(--surface-color);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.zone-card h2 {
+  color: var(--text-primary);
+  margin: 0 0 4px;
+  font-size: 1.05rem;
+}
+
+.zone-card-hint {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  margin: 0 0 14px;
+  max-width: 680px;
+}
+
+.zone-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.zone-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.zone-toggle input {
+  width: 20px;
+  height: 20px;
+}
+
+.zone-warning {
+  margin: 12px 0 0;
+  color: var(--warning-color);
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+}
+
+.zone-center-controls {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.zone-center-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.zone-center-controls .form-input {
+  width: 160px;
+}
+
+.zone-table-wrap {
+  overflow-x: auto;
+}
+
+.zone-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 860px;
+}
+
+.zone-table th {
+  text-align: left;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.zone-table td {
+  padding: 8px 6px;
+  border-bottom: 1px solid var(--border-color);
+  vertical-align: middle;
+  color: var(--text-primary);
+}
+
+.zone-input {
+  width: 90px;
+}
+
+input.zone-input[type="text"] {
+  width: 150px;
+}
+
+.zone-parent-select {
+  width: 150px;
+}
+
+.zone-checkbox-cell {
+  text-align: center;
+}
+
+.zone-checkbox-cell input {
+  width: 18px;
+  height: 18px;
+}
+
+.zone-actions-cell {
+  display: flex;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.zone-new-row {
+  background: var(--surface-hover);
+}
+
+.zone-empty {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  margin: 12px 0 0;
+}

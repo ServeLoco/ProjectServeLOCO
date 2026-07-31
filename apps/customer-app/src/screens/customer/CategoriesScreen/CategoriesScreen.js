@@ -22,10 +22,12 @@ import {
   PressableScale,
   ProductImage,
   ErrorState,
+  EmptyState,
+  LocationPermissionCard,
 } from '../../../components';
 import { colors, typography, spacing, radius, shadows, layout } from '../../../theme';
-import { useCartStore } from '../../../stores';
-import { useStoreModes, useCachedFetch } from '../../../hooks';
+import { useCartStore, useDeliveryLocationStore } from '../../../stores';
+import { useStoreModes, useCachedFetch, useHomeLocationPermission } from '../../../hooks';
 import { productsApi } from '../../../api';
 import { trackEvent } from '../../../api/analyticsClient';
 import { asArray, normalizeCategory } from '../../../utils';
@@ -56,7 +58,35 @@ export default function CategoriesScreen() {
   const [activeChip, setActiveChip] = useState('All');
 
   const normalizedStoreType = storeType;
-  const categoriesCacheKey = `categories:${storeType}`;
+
+  // Delivery zone gating — same rule as HomeScreen: everything in this admin
+  // panel is zone-based, so category browsing must never show items before
+  // we actually know the pin's zone.
+  const deliveryCoords = useDeliveryLocationStore(state => state.coords);
+  const insideDeliveryZone = useDeliveryLocationStore(state => state.insideZone);
+  const deliveryZoneId = useDeliveryLocationStore(state => state.zoneId);
+  const isInitialLocationSyncComplete = useDeliveryLocationStore(state => state.isInitialSyncComplete);
+  // Keyed on zoneId too: the category catalog isn't zone-scoped server-side
+  // yet, but this way the cache is already correct the day it becomes so,
+  // instead of painting zone A's cached categories the instant the pin moves
+  // into zone B. useCachedFetch refetches automatically on a key change.
+  const categoriesCacheKey = `categories:${storeType}:${deliveryZoneId ?? 'none'}`;
+  const { status: locationPermStatus, requestAllow: requestLocationAllow, openSettings: openLocationSettings } = useHomeLocationPermission();
+  const [requestingLocationAllow, setRequestingLocationAllow] = useState(false);
+  const needsLocationPermission = !deliveryCoords
+    && (locationPermStatus === 'denied' || locationPermStatus === 'blocked');
+  const outOfDeliveryZone = !needsLocationPermission
+    && isInitialLocationSyncComplete
+    && insideDeliveryZone === false;
+  const isLocationGated = needsLocationPermission || outOfDeliveryZone;
+  const handleAllowLocation = useCallback(async () => {
+    setRequestingLocationAllow(true);
+    try {
+      await requestLocationAllow();
+    } finally {
+      setRequestingLocationAllow(false);
+    }
+  }, [requestLocationAllow]);
 
   const fetchCategories = useCallback(async () => {
     const response = await productsApi.getCategories({ type: storeType });
@@ -69,7 +99,7 @@ export default function CategoriesScreen() {
     isRefreshing,
     error,
     refresh,
-  } = useCachedFetch(categoriesCacheKey, fetchCategories);
+  } = useCachedFetch(categoriesCacheKey, fetchCategories, { enabled: !isLocationGated });
 
   const categories = categoriesData || [];
   const isError = Boolean(error) && categories.length === 0;
@@ -237,7 +267,23 @@ export default function CategoriesScreen() {
 
         {/* List / Empty State */}
         <View style={styles.listContainer}>
-          {isLoading ? (
+          {needsLocationPermission ? (
+            <LocationPermissionCard
+              variant={locationPermStatus}
+              requesting={requestingLocationAllow}
+              onAllow={handleAllowLocation}
+              onOpenSettings={openLocationSettings}
+            />
+          ) : outOfDeliveryZone ? (
+            <EmptyState
+              icon={<AppIcon name="location" size={56} color={colors.textTertiary} />}
+              title="We don't deliver here yet"
+              subtitle="We're expanding rapidly and hope to serve your location soon. Thank you for your patience."
+              actionLabel="Go to Home"
+              onAction={() => navigation.navigate('Home')}
+              style={styles.emptyState}
+            />
+          ) : isLoading ? (
             renderSkeletonList()
           ) : isError ? (
             <ErrorState

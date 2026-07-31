@@ -7,11 +7,27 @@ const shopApi = {
   getMyShop: () => apiClient.get('/shop/me', { auth: 'customer' }),
   toggleShop: (isOpen) =>
     apiClient.patch('/shop/me/toggle', { is_open: isOpen, isOpen }, { auth: 'customer' }),
+  // openTime/closeTime as 'HH:MM' strings, or both null to turn scheduling off.
+  updateSchedule: (openTime, closeTime) =>
+    apiClient.patch(
+      '/shop/me/schedule',
+      { openTime, open_time: openTime, closeTime, close_time: closeTime },
+      { auth: 'customer' },
+    ),
   getMyProducts: () => apiClient.get('/shop/products', { auth: 'customer' }),
   toggleProduct: (id, available) =>
     apiClient.patch(`/shop/products/${id}/toggle`, { available, isAvailable: available }, { auth: 'customer' }),
+  toggleVariant: (productId, variantId, available) =>
+    apiClient.patch(
+      `/shop/products/${productId}/variants/${variantId}/toggle`,
+      { available, isAvailable: available },
+      { auth: 'customer' },
+    ),
   getMyOrders: () => apiClient.get('/shop/orders', { auth: 'customer' }),
-  getOrderHistory: () => apiClient.get('/shop/orders/history', { auth: 'customer' }),
+  getOrderHistory: (params = {}) => {
+    const q = new URLSearchParams(params).toString();
+    return apiClient.get(`/shop/orders/history${q ? `?${q}` : ''}`, { auth: 'customer' });
+  },
   confirmOrder: (orderId) =>
     apiClient.patch(`/shop/orders/${orderId}/confirm`, {}, { auth: 'customer' }),
   rejectOrder: (orderId) =>

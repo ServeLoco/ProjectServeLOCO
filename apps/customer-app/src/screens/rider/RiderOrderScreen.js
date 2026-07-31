@@ -20,6 +20,7 @@ import {
   getRiderActionFlags,
   mergeRiderOrder,
 } from '../../utils/riderOrderActions';
+import { elapsedSecondsFromStart, formatElapsed } from '../../utils/riderOfferTime';
 
 /**
  * Full-screen delivery map + status actions for one assigned order.
@@ -127,6 +128,14 @@ export default function RiderOrderScreen({ route, navigation }) {
     ]);
   };
 
+  const terminal = order ? getRiderActionFlags(order).terminal : true;
+  const [nowTick, setNowTick] = useState(Date.now());
+  useEffect(() => {
+    if (!orderId || terminal) return undefined;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [orderId, terminal]);
+
   if (loading && !order) {
     return (
       <SafeAreaView style={styles.container}>
@@ -150,6 +159,10 @@ export default function RiderOrderScreen({ route, navigation }) {
   const phone = order?.phone;
   const pickedUp = flags.pickedUp;
   const isFast = order?.deliveryType === 'fast' || order?.delivery_type === 'fast';
+  const assignedAt = order?.riderAssignedAt || order?.rider_assigned_at;
+  const elapsedLabel = assignedAt
+    ? formatElapsed(elapsedSecondsFromStart(assignedAt, nowTick))
+    : null;
 
   return (
     <View style={styles.root}>
@@ -176,6 +189,12 @@ export default function RiderOrderScreen({ route, navigation }) {
                   </Text>
                 </View>
               </View>
+              {elapsedLabel ? (
+                <View style={styles.timerRow}>
+                  <AppIcon name="clock" size={13} color={colors.textSecondary} />
+                  <Text style={styles.timerText}>{elapsedLabel} since accepted</Text>
+                </View>
+              ) : null}
             </View>
             {phone ? (
               <TouchableOpacity
@@ -203,12 +222,18 @@ export default function RiderOrderScreen({ route, navigation }) {
               <Text style={styles.itemsLabel}>Order items</Text>
               {order.items.map((it, idx) => {
                 const variant = it.variantLabel || it.variant_label;
+                const shopName = it.shopName || it.shop_name;
                 return (
                   <View key={it.id ?? idx} style={styles.itemRow}>
-                    <Text style={styles.itemLine} numberOfLines={1}>
-                      {it.quantity}x {it.productName || it.product_name}
-                      {variant ? ` (${variant})` : ''}
-                    </Text>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.itemLine} numberOfLines={1}>
+                        {it.quantity}x {it.productName || it.product_name}
+                        {variant ? ` (${variant})` : ''}
+                      </Text>
+                      {shopName ? (
+                        <Text style={styles.itemShopName} numberOfLines={1}>{shopName}</Text>
+                      ) : null}
+                    </View>
                   </View>
                 );
               })}
@@ -327,6 +352,8 @@ const styles = StyleSheet.create({
   orderNum: { ...typography.h2, fontSize: 20 },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs },
   statusLine: { ...typography.caption, color: colors.textSecondary, fontWeight: '700' },
+  timerRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 2 },
+  timerText: { fontSize: 12, fontWeight: '700', color: colors.textSecondary },
   deliveryTypeBadge: {
     backgroundColor: colors.infoLight,
     borderRadius: radius.pill,
@@ -383,6 +410,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     flex: 1,
   },
+  itemShopName: { fontSize: 11, fontWeight: '700', color: colors.saffronDark, marginTop: 1 },
   itemPrice: { fontSize: 13, fontWeight: '700', color: colors.textSecondary },
   totalRow: {
     flexDirection: 'row',

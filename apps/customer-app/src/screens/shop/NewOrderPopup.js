@@ -158,17 +158,30 @@ export default function NewOrderPopup({
 
             <Text style={styles.itemsLabel}>Items</Text>
             <ScrollView style={styles.itemsCard} showsVerticalScrollIndicator={false}>
-              {(order.items || []).map((it, idx) => (
-                <View key={idx} style={styles.itemRow}>
-                  <View style={styles.qtyChip}>
-                    <Text style={styles.qtyChipText}>{it.quantity}x</Text>
+              {(order.items || []).map((it, idx) => {
+                const lineTotal = it.shopLineTotal ?? it.shop_line_total;
+                return (
+                  <View key={idx} style={styles.itemRow}>
+                    <View style={styles.qtyChip}>
+                      <Text style={styles.qtyChipText}>{it.quantity}x</Text>
+                    </View>
+                    <Text style={styles.itemName} numberOfLines={1}>
+                      {it.productName || it.product_name}
+                    </Text>
+                    <Text style={styles.itemPrice}>
+                      {lineTotal != null ? `₹${lineTotal}` : ''}
+                    </Text>
                   </View>
-                  <Text style={styles.itemName}>
-                    {it.productName || it.product_name}
-                  </Text>
-                </View>
-              ))}
+                );
+              })}
             </ScrollView>
+
+            {(order.shopTotal ?? order.shop_total) > 0 && (
+              <View style={styles.totalRow}>
+                <Text style={styles.totalLabel}>You'll receive</Text>
+                <Text style={styles.totalValue}>₹{order.shopTotal ?? order.shop_total}</Text>
+              </View>
+            )}
 
             {error && (
               <View style={styles.errorPill}>
@@ -318,7 +331,7 @@ const styles = StyleSheet.create({
   },
   itemsCard: {
     backgroundColor: colors.bgApp, borderRadius: radius.lg,
-    borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.lg,
+    borderWidth: 1, borderColor: colors.border, padding: spacing.md, marginBottom: spacing.sm,
     maxHeight: 220,
   },
   itemRow: {
@@ -330,6 +343,16 @@ const styles = StyleSheet.create({
   },
   qtyChipText: { color: colors.saffronDark, fontWeight: '800', fontSize: 13 },
   itemName: { flex: 1, ...typography.bodyLarge, color: colors.textPrimary, fontWeight: '500' },
+  itemPrice: {
+    ...typography.bodyLarge, color: colors.textSecondary, fontWeight: '700',
+    minWidth: 64, textAlign: 'right',
+  },
+  totalRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: spacing.xs, marginBottom: spacing.lg,
+  },
+  totalLabel: { ...typography.bodySmall, color: colors.textSecondary, fontWeight: '700' },
+  totalValue: { ...typography.h4, color: colors.successDark, fontWeight: '800' },
   errorPill: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs,
     backgroundColor: colors.errorLight, borderRadius: radius.pill,

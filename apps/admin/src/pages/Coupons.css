@@ -1244,6 +1244,30 @@
   color: white;
 }
 
+/* Targeted zones section */
+.targeted-zones-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.targeted-zone-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.88rem;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.targeted-zone-item input {
+  width: 16px;
+  height: 16px;
+}
+
 /* Coupon status badges */
 .coupon-status {
   display: inline-flex;

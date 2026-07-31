@@ -23,7 +23,10 @@ import {
  * Premium non-dismissible Accept/Reject offer modal.
  * Countdown is always derived from server expiresAt.
  */
-const OFFER_TIMEOUT_SEC = 300; // matches API RIDER_OFFER_TIMEOUT_SEC default (5 min)
+// Fallback only — the real total now rides on offer.offerTimeoutSec so the
+// progress bar can't silently drift if RIDER_OFFER_TIMEOUT_SEC is overridden
+// via env without a matching client release.
+const DEFAULT_OFFER_TIMEOUT_SEC = 150;
 
 /**
  * @param {object} props
@@ -132,7 +135,8 @@ export default function RiderOfferPopup({
   const items = offer.items || [];
   const phone = offer.phone;
   const isFast = offer.deliveryType === 'fast' || offer.delivery_type === 'fast';
-  const progress = Math.min(1, Math.max(0, secondsLeft / OFFER_TIMEOUT_SEC));
+  const offerTimeoutSec = offer.offerTimeoutSec || offer.offer_timeout_sec || DEFAULT_OFFER_TIMEOUT_SEC;
+  const progress = Math.min(1, Math.max(0, secondsLeft / offerTimeoutSec));
 
   return (
     <Modal visible transparent animationType="none" onRequestClose={() => {}}>
@@ -284,16 +288,22 @@ export default function RiderOfferPopup({
                 <ScrollView style={styles.itemsCard} showsVerticalScrollIndicator={false}>
                   {items.map((it, idx) => {
                     const variant = it.variantLabel || it.variant_label;
+                    const shopName = it.shopName || it.shop_name;
                     return (
                       <View
                         key={it.id ?? idx}
                         style={[styles.itemRow, idx === items.length - 1 && styles.itemRowLast]}
                       >
                         <Text style={styles.itemQty}>{it.quantity}x</Text>
-                        <Text style={styles.itemName} numberOfLines={1}>
-                          {it.productName || it.product_name}
-                          {variant ? ` (${variant})` : ''}
-                        </Text>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.itemName} numberOfLines={1}>
+                            {it.productName || it.product_name}
+                            {variant ? ` (${variant})` : ''}
+                          </Text>
+                          {shopName ? (
+                            <Text style={styles.itemShopName} numberOfLines={1}>{shopName}</Text>
+                          ) : null}
+                        </View>
                       </View>
                     );
                   })}
@@ -629,6 +639,7 @@ const styles = StyleSheet.create({
     minWidth: 28,
   },
   itemName: { flex: 1, ...typography.body, color: colors.textPrimary, fontWeight: '600' },
+  itemShopName: { fontSize: 11, fontWeight: '700', color: colors.saffronDark, marginTop: 1 },
   itemPrice: { fontSize: 13, fontWeight: '700', color: colors.textSecondary },
 
   totalRow: {

@@ -210,11 +210,15 @@ async function request(path, options = {}) {
     // reacts to isAuthenticated flipping back to false and re-renders
     // Auth automatically.
     //
-    // IMPORTANT: only trigger logout for customer-authed endpoints.
-    // Public endpoints (login, signup, password-reset) also return 401
-    // on bad credentials — we must NOT clobber a valid session in that
-    // case.
-    if (options.auth === 'customer' && response.status === 401) {
+    // IMPORTANT: only trigger logout for customer-authed endpoints, and only
+    // when a token was actually attached. A 401 on a request we sent WITHOUT
+    // a token (e.g. a background sync hook racing the token provider's
+    // registration on cold start) means "we forgot the token", not "the
+    // server rejected our session" — treating it as a logout would nuke a
+    // perfectly valid session. Public endpoints (login, signup,
+    // password-reset) also return 401 on bad credentials — we must NOT
+    // clobber a valid session in that case either.
+    if (options.auth === 'customer' && response.status === 401 && requestHeaders.Authorization) {
       triggerLogout();
     }
 

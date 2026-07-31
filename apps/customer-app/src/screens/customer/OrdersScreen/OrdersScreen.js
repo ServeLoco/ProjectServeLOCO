@@ -22,10 +22,12 @@ import {
   SkeletonRow,
   EmptyState,
   ErrorState,
+  DayHistoryPicker,
 } from '../../../components';
 import { colors, typography, spacing, radius, shadows, layout } from '../../../theme';
 import { ordersApi, subscribeOrderEvents, subscribeRealtimeLifecycle } from '../../../api';
 import { asArray, normalizeOrder } from '../../../utils';
+import { todayDateStr } from '../../../utils/dateStr';
 import {
   getRealtimeOrderId,
   getRealtimeOrderKey,
@@ -296,6 +298,10 @@ export default function OrdersScreen() {
   const [cancellingId, setCancellingId] = useState(null);
   const [pagination, setPagination] = useState({ limit: 20, offset: 0, hasMore: true, total: 0 });
   const [isLoadingMore, setIsLoadingMore] = useState(false);
+  // Default view is today only; picking a day from history browses that day.
+  const [selectedDate, setSelectedDate] = useState(() => todayDateStr());
+  const [pickerVisible, setPickerVisible] = useState(false);
+  const isToday = selectedDate === todayDateStr();
 
   // Animations
   const listOpacity = useRef(new Animated.Value(1)).current;
@@ -315,7 +321,7 @@ export default function OrdersScreen() {
 
     const offset = refresh ? 0 : pagination.offset;
 
-    ordersApi.getOrders({ limit: pagination.limit, offset })
+    ordersApi.getOrders({ limit: pagination.limit, offset, date: selectedDate })
       .then(response => {
         const meta = response?.meta || { total: 0, limit: 20, offset: 0, hasMore: false };
         // Store the RAW page — the status-chip filter is applied at render
@@ -348,7 +354,7 @@ export default function OrdersScreen() {
         setIsRefreshing(false);
         setIsLoadingMore(false);
       });
-  }, [listOpacity, pagination.limit, pagination.offset]);
+  }, [listOpacity, pagination.limit, pagination.offset, selectedDate]);
 
   // Keep a ref to the latest fetchOrders so the realtime subscription can call
   // the most recent version without depending on pagination state. Without
@@ -381,6 +387,15 @@ export default function OrdersScreen() {
     fetchOrders(true);
   };
 
+  const handleSelectDate = useCallback((dateStr) => {
+    setSelectedDate(dateStr);
+    setPickerVisible(false);
+  }, []);
+
+  const backToToday = useCallback(() => {
+    setSelectedDate(todayDateStr());
+  }, []);
+
   useEffect(() => {
     if (isFocused) {
       // Always a full refresh: fetchOrders(false) at offset > 0 is a
@@ -389,7 +404,7 @@ export default function OrdersScreen() {
       // first focus still shows the skeleton rather than the pull spinner.
       fetchOrders(true);
     }
-  }, [isFocused]); // Re-fetch on focus only
+  }, [isFocused, selectedDate]); // Re-fetch on focus, or when browsing a different day
 
   useEffect(() => {
     const unsubscribeOrders = subscribeOrderEvents(({ eventName, payload }) => {
@@ -722,6 +737,22 @@ export default function OrdersScreen() {
     <AppScreen style={styles.container} safeAreaBottom={false}>
       <AppHeader title="My Orders" />
 
+      <View style={styles.dateRow}>
+        <Text style={styles.dateRowText}>
+          {isToday ? "Today's orders" : `Orders on ${selectedDate}`}
+        </Text>
+        {isToday ? (
+          <TouchableOpacity style={styles.historyBtn} onPress={() => setPickerVisible(true)}>
+            <AppIcon name="orders" size={14} color={colors.saffronDark} />
+            <Text style={styles.historyBtnText}>History</Text>
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity style={styles.historyBtn} onPress={backToToday}>
+            <Text style={styles.historyBtnText}>← Today</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+
       {/* Summary hero (only shown when we actually have orders) */}
       {!isLoading && !isError && orders.length > 0 && (
         <View style={styles.summaryWrap}>
@@ -816,6 +847,12 @@ export default function OrdersScreen() {
         )}
       </View>
 
+      <DayHistoryPicker
+        visible={pickerVisible}
+        onClose={() => setPickerVisible(false)}
+        onSelectDate={handleSelectDate}
+        selectedDate={selectedDate}
+      />
     </AppScreen>
   );
 }
@@ -836,6 +873,26 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.bgApp,
   },
+
+  /* ----- Date row (today / history) ----- */
+  dateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.sm,
+  },
+  dateRowText: {
+    ...typography.bodySmall,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  historyBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: colors.saffronLight, borderRadius: radius.pill,
+    paddingHorizontal: 12, paddingVertical: 8,
+  },
+  historyBtnText: { color: colors.saffronDark, fontWeight: '800', fontSize: 13 },
 
   /* ----- Summary hero ----- */
   summaryWrap: {

@@ -1,0 +1,71 @@
+.delivery-pin-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin-top: 0.75rem;
+}
+
+.delivery-pin-picker-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.delivery-pin-picker-title {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.delivery-pin-picker-hint {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.delivery-pin-map {
+  height: 220px;
+  width: 100%;
+  border-radius: var(--radius-md, 8px);
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+  z-index: 0;
+}
+
+.delivery-pin-coords {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 0.5rem;
+  align-items: end;
+}
+
+.delivery-pin-coords label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.delivery-pin-clear {
+  white-space: nowrap;
+  padding: 0.55rem 0.75rem;
+  height: fit-content;
+}
+
+.delivery-pin-error {
+  color: var(--danger, #dc2626);
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+.delivery-pin-marker-wrap {
+  background: transparent !important;
+  border: none !important;
+}
+
+.delivery-pin-marker {
+  font-size: 30px;
+  line-height: 1;
+  filter: drop-shadow(0 4px 6px rgba(0, 0, 0, 0.35));
+}

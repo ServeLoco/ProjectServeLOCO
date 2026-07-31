@@ -21,6 +21,7 @@ import MobileDashboard from './pages/MobileDashboard';
 import Customers from './pages/Customers';
 import Notifications from './pages/Notifications';
 import Settings from './pages/Settings';
+import DeliveryZones from './pages/DeliveryZones';
 import Images from './pages/Images';
 import Reports from './pages/Reports';
 import Health from './pages/Health';
@@ -87,6 +88,7 @@ function App() {
                   <Route path="/customers" element={<Customers />} />
                   <Route path="/notifications" element={<Notifications />} />
                   <Route path="/settings" element={<Settings />} />
+                  <Route path="/delivery-zones" element={<DeliveryZones />} />
                   <Route path="/images" element={<Images />} />
                   <Route path="/reports" element={<Reports />} />
                   <Route path="/health" element={<Health />} />

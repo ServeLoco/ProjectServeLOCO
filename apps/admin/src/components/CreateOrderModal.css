@@ -301,6 +301,11 @@
   color: var(--text-primary);
 }
 
+.com-radio-pill.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .com-radio-pill.active {
   border-color: var(--primary-color);
   background: var(--primary-soft);

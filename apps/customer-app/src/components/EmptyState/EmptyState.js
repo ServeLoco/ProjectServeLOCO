@@ -12,10 +12,11 @@ import Button from '../Button';
  *   subtitle    - secondary descriptive line
  *   actionLabel - button text
  *   onAction    - button press handler
- *   icon        - optional ReactNode icon above title
- *   style       - container style
+ *   icon          - optional ReactNode icon above title
+ *   style         - container style
+ *   actionVariant - Button variant for the action (default 'primary')
  */
-function EmptyState({ title, subtitle, actionLabel, onAction, icon, style }) {
+function EmptyState({ title, subtitle, actionLabel, onAction, icon, style, actionVariant = 'primary' }) {
   return (
     <View style={[styles.container, style]}>
       {icon ? <View style={styles.iconWrap}>{icon}</View> : null}
@@ -27,7 +28,7 @@ function EmptyState({ title, subtitle, actionLabel, onAction, icon, style }) {
         <Button
           label={actionLabel}
           onPress={onAction}
-          variant="primary"
+          variant={actionVariant}
           size="md"
           fullWidth={false}
           style={styles.btn}

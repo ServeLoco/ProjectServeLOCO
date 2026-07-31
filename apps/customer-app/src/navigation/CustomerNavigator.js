@@ -277,6 +277,10 @@ const styles = StyleSheet.create({
 // ─────────────────────────────────────────────────────────────────────────────
 // CustomerNavigator — root navigator
 // ─────────────────────────────────────────────────────────────────────────────
+// Location permission is no longer a navigation gate — the dashboard is
+// reachable the instant the user is authenticated. Home itself asks for
+// location (inline card in its top slot, see useHomeLocationPermission) so
+// browsing was never blocked by a separate full-screen route.
 function CustomerNavigatorTree({ isAuthenticated }) {
   // StickyMiniCart free-delivery line: keep store progress synced on every
   // cart change (Home / list / categories), not only Cart/Checkout screens.

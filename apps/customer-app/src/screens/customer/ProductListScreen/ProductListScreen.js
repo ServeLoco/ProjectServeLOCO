@@ -24,12 +24,13 @@ import {
   EmptyState,
   ErrorState,
   VariantSheet,
+  LocationPermissionCard,
 } from '../../../components';
 import { colors, typography, spacing, radius, layout } from '../../../theme';
-import { useCartStore } from '../../../stores';
-import { useAuthGate, useStoreModes } from '../../../hooks';
+import { useCartStore, useDeliveryLocationStore } from '../../../stores';
+import { useAuthGate, useStoreModes, useHomeLocationPermission } from '../../../hooks';
 import { productsApi, dashboardApi } from '../../../api';
-import { subscribeProductAvailabilityEvents } from '../../../api/realtimeClient';
+import { subscribeProductAvailabilityEvents, subscribeShopEvents } from '../../../api/realtimeClient';
 import { asArray, normalizeProduct } from '../../../utils';
 import { getCached, setCached, stableKey, isFresh } from '../../../utils/apiCache';
 
@@ -70,6 +71,30 @@ export default function ProductListScreen() {
   const updateQuantity = useCartStore(state => state.updateQuantity);
   const removeItem = useCartStore(state => state.removeItem);
   const [variantSheetProduct, setVariantSheetProduct] = useState(null);
+
+  // Delivery zone gating — same rule as HomeScreen: everything in this admin
+  // panel is zone-based, so search/category results must never show items
+  // for a pin the user hasn't set or that falls outside every zone.
+  const deliveryCoords = useDeliveryLocationStore(state => state.coords);
+  const insideDeliveryZone = useDeliveryLocationStore(state => state.insideZone);
+  const deliveryZoneId = useDeliveryLocationStore(state => state.zoneId);
+  const isInitialLocationSyncComplete = useDeliveryLocationStore(state => state.isInitialSyncComplete);
+  const { status: locationPermStatus, requestAllow: requestLocationAllow, openSettings: openLocationSettings } = useHomeLocationPermission();
+  const [requestingLocationAllow, setRequestingLocationAllow] = useState(false);
+  const needsLocationPermission = !deliveryCoords
+    && (locationPermStatus === 'denied' || locationPermStatus === 'blocked');
+  const outOfDeliveryZone = !needsLocationPermission
+    && isInitialLocationSyncComplete
+    && insideDeliveryZone === false;
+  const isLocationGated = needsLocationPermission || outOfDeliveryZone;
+  const handleAllowLocation = useCallback(async () => {
+    setRequestingLocationAllow(true);
+    try {
+      await requestLocationAllow();
+    } finally {
+      setRequestingLocationAllow(false);
+    }
+  }, [requestLocationAllow]);
 
   // State
   const [searchQuery, setSearchQuery] = useState(initialQuery);
@@ -126,12 +151,40 @@ export default function ProductListScreen() {
     });
   }, []);
 
+  // Live shop-closed: same instant grey-out as OOS above, patched by shopId
+  // — shop-closed and out-of-stock render as one unavailable card, so both
+  // must flip in the same tick instead of waiting on a refetch.
+  useEffect(() => {
+    return subscribeShopEvents(({ eventName, payload }) => {
+      if (eventName !== 'shop.status.updated') return;
+      const shopId = payload?.shopId;
+      const isOpen = payload?.isOpen;
+      if (shopId == null || isOpen == null) return;
+      setProducts((prev) =>
+        (prev || []).map((p) =>
+          String(p?.shopId) === String(shopId)
+            ? { ...p, shopIsOpen: Boolean(isOpen), shop_is_open: Boolean(isOpen) }
+            : p
+        ),
+      );
+    });
+  }, []);
+
   /**
    * @param {boolean|{ refresh?: boolean, loadMore?: boolean, silent?: boolean }} opts
    *   boolean true = pull-to-refresh (legacy)
    *   silent = revalidate page 0 without dropping already-loaded pages
    */
   const fetchProducts = async (opts = false) => {
+    // No zone-resolved location yet — nothing to query, and showing catalog
+    // items before we know the zone is exactly the bug this gate fixes.
+    if (isLocationGated) {
+      setIsLoading(false);
+      setIsRefreshing(false);
+      setIsLoadingMore(false);
+      return;
+    }
+
     const options = typeof opts === 'boolean' ? { refresh: opts } : (opts || {});
     const refresh = !!options.refresh;
     const loadMore = !!options.loadMore;
@@ -141,12 +194,17 @@ export default function ProductListScreen() {
     const queryCategoryId = isOriginalCategory ? route.params?.categoryId : undefined;
     const pageOffset = loadMore ? nextOffsetRef.current : 0;
 
-    // Cache key covers network params including offset (each page is its own entry).
+    // Cache key covers network params including offset (each page is its own
+    // entry) and the active delivery zone — the catalog isn't zone-scoped
+    // server-side yet, but keying on zoneId means the cache is already
+    // correct the day it becomes so, instead of painting zone A's cached
+    // results the instant the pin moves into zone B.
     const requestParams = sectionSlug
       ? {
           sectionSlug,
           storeType: sectionStoreType,
           include_closed_shops: 1,
+          zoneId: deliveryZoneId,
         }
       : {
           category: activeCategory !== 'All' ? activeCategory : undefined,
@@ -162,6 +220,7 @@ export default function ProductListScreen() {
           mode,
           limit: PAGE_SIZE,
           offset: pageOffset,
+          zoneId: deliveryZoneId,
         };
     const cacheKey = `products:${stableKey(requestParams)}`;
     const cached = getCached(cacheKey);
@@ -338,7 +397,7 @@ export default function ProductListScreen() {
   useEffect(() => {
     fetchProducts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeCategory, offerId, sectionSlug, sectionStoreType, mode, route.params?.categoryId]);
+  }, [activeCategory, offerId, sectionSlug, sectionStoreType, mode, route.params?.categoryId, isLocationGated, deliveryZoneId]);
 
   // Debounced Search
   useEffect(() => {
@@ -348,7 +407,7 @@ export default function ProductListScreen() {
       }, 500);
       return () => clearTimeout(timer);
     }
-  }, [searchQuery, mode]);
+  }, [searchQuery, mode, isLocationGated, deliveryZoneId]);
 
   // Silent revalidate on refocus (skip first focus — mount effect already loaded).
   // Freshness throttle 15s: skip network if list page-0 cache is still fresh.
@@ -359,7 +418,7 @@ export default function ProductListScreen() {
         const isOriginalCategory = activeCategory === initialCategory;
         const queryCategoryId = isOriginalCategory ? route.params?.categoryId : undefined;
         const requestParams = sectionSlug
-          ? { sectionSlug, storeType: sectionStoreType, include_closed_shops: 1 }
+          ? { sectionSlug, storeType: sectionStoreType, include_closed_shops: 1, zoneId: deliveryZoneId }
           : {
               category: activeCategory !== 'All' ? activeCategory : undefined,
               categoryId: queryCategoryId,
@@ -374,6 +433,7 @@ export default function ProductListScreen() {
               mode,
               limit: PAGE_SIZE,
               offset: 0,
+              zoneId: deliveryZoneId,
             };
         const focusKey = `products:${stableKey(requestParams)}`;
         if (!isFresh(focusKey, 15_000)) {
@@ -392,6 +452,7 @@ export default function ProductListScreen() {
       searchQuery,
       route.params?.categoryId,
       initialCategory,
+      deliveryZoneId,
     ]),
   );
 
@@ -566,7 +627,23 @@ export default function ProductListScreen() {
       </View>
 
       <View style={styles.listContainer}>
-        {isLoading ? (
+        {needsLocationPermission ? (
+          <LocationPermissionCard
+            variant={locationPermStatus}
+            requesting={requestingLocationAllow}
+            onAllow={handleAllowLocation}
+            onOpenSettings={openLocationSettings}
+          />
+        ) : outOfDeliveryZone ? (
+          <EmptyState
+            icon={<AppIcon name="location" size={56} color={colors.textTertiary} />}
+            title="We don't deliver here yet"
+            subtitle="We're expanding rapidly and hope to serve your location soon. Thank you for your patience."
+            actionLabel="Go to Home"
+            onAction={() => navigation.navigate('Home')}
+            style={styles.emptyState}
+          />
+        ) : isLoading ? (
           renderSkeleton()
         ) : isError ? (
           renderErrorState()

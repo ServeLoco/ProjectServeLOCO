@@ -11,7 +11,7 @@ import {
   setAdminSessionClearHandler,
   setCustomerLogoutHandler,
 } from '../src/api/httpClient';
-import { setAdminTokenProvider } from '../src/api/sessionTokens';
+import { setAdminTokenProvider, setCustomerTokenProvider } from '../src/api/sessionTokens';
 
 describe('httpClient', () => {
   let originalFetch;
@@ -21,6 +21,9 @@ describe('httpClient', () => {
     originalFetch = global.fetch;
     logoutHandler = jest.fn();
     setCustomerLogoutHandler(logoutHandler);
+    // Most tests exercise a request that DID carry a token — the "no token
+    // attached" case is covered by its own test below with the provider unset.
+    setCustomerTokenProvider(() => 'valid-customer-token');
   });
 
   afterEach(() => {
@@ -29,6 +32,7 @@ describe('httpClient', () => {
     setAdminReMintHandler(null);
     setAdminSessionClearHandler(null);
     setAdminTokenProvider(null);
+    setCustomerTokenProvider(null);
     jest.clearAllTimers();
   });
 
@@ -64,6 +68,18 @@ describe('httpClient', () => {
     // Allow the synchronous triggerLogout to run
     await new Promise((r) => setImmediate(r));
     expect(logoutHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT trigger logout on a 401 when no customer token was attached', async () => {
+    // Regression guard: a background sync hook racing the token provider's
+    // registration on cold start (see App.js) can fire a customer-authed
+    // request before a token exists. That 401 must never be treated as
+    // "the server rejected our session" — only "we forgot the token".
+    setCustomerTokenProvider(null);
+    mockFetchOnce(jsonResponse(401, { code: 'UNAUTHORIZED', message: 'no token' }));
+    await expect(apiClient.get('/me', { auth: 'customer' })).rejects.toBeDefined();
+    await new Promise((r) => setImmediate(r));
+    expect(logoutHandler).not.toHaveBeenCalled();
   });
 
   it('re-mints and retries once on a 401 for admin-authed requests', async () => {

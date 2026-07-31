@@ -124,6 +124,21 @@ export default function Products() {
     }
   };
 
+  const toggleVariantAvailability = async (product, variant) => {
+    const newStatus = !variant.available;
+    try {
+      await ProductsApi.updateVariantAvailability(product.id, variant.id, newStatus);
+      setProducts(prev => prev.map(p => (
+        p.id === product.id
+          ? { ...p, variants: p.variants.map(v => v.id === variant.id ? { ...v, available: newStatus } : v) }
+          : p
+      )));
+    } catch (err) {
+      console.error(err);
+      setError(GENERIC_ERROR);
+    }
+  };
+
   // Generic bulk action using the new batch APIs
   const runBulkUpdate = async (updates, successLabel) => {
     setBulkUpdating(true);
@@ -179,6 +194,97 @@ export default function Products() {
     } finally {
       setBulkUpdating(false);
     }
+  };
+
+  // ── Pricing grid (App ₹ / Shop ₹ inline edit) ────────────────────────────
+  // Variants are treated as separate rows/products here: a variant's key is
+  // "productId:variantId", a plain product's key is just "productId". Edits
+  // are staged locally and sent as one batched PATCH so a shop owner's whole
+  // menu re-price doesn't fire one request per cell.
+  const [priceEdits, setPriceEdits] = useState({});
+  const [savingPrices, setSavingPrices] = useState(false);
+  const priceRowKey = (productId, variantId) => (variantId ? `${productId}:${variantId}` : `${productId}`);
+  const dirtyPriceCount = Object.keys(priceEdits).length;
+
+  const handlePriceFieldChange = (key, field, value) => {
+    setPriceEdits(prev => ({ ...prev, [key]: { ...prev[key], [field]: value } }));
+  };
+
+  const discardPriceEdits = () => setPriceEdits({});
+
+  const handleSavePrices = async () => {
+    const rows = [];
+    for (const [key, edit] of Object.entries(priceEdits)) {
+      const [productIdStr, variantIdStr] = key.split(':');
+      const row = { productId: Number(productIdStr) };
+      if (variantIdStr) row.variantId = Number(variantIdStr);
+      if (edit.price !== undefined && edit.price !== '') row.price = edit.price;
+      if (edit.shopPrice !== undefined) row.shopPrice = edit.shopPrice === '' ? null : edit.shopPrice;
+      if (row.price !== undefined || row.shopPrice !== undefined) rows.push(row);
+    }
+    if (rows.length === 0) { setPriceEdits({}); return; }
+
+    setSavingPrices(true);
+    setError(null);
+    try {
+      const res = await ProductsApi.updatePricing(rows);
+      setPriceEdits({});
+      if (res.errors && res.errors.length > 0) {
+        setError(`${res.updated} row(s) saved, ${res.errors.length} failed: ${res.errors[0].message}`);
+      } else {
+        showSuccess(`Updated pricing for ${res.updated} item${res.updated === 1 ? '' : 's'}.`);
+      }
+      fetchProducts(pagination.page);
+    } catch (err) {
+      console.error(err);
+      setError(GENERIC_ERROR);
+    } finally {
+      setSavingPrices(false);
+    }
+  };
+
+  // Renders the App ₹ / Shop ₹ input pair for one pricing-grid row (a plain
+  // product, or a single variant treated as its own row/product). Reads the
+  // staged edit if there is one, otherwise the value the server sent.
+  const renderPriceCells = (productId, variantId, currentPrice, currentShopPrice, originalPrice) => {
+    const key = priceRowKey(productId, variantId);
+    const edit = priceEdits[key];
+    const priceValue = edit?.price !== undefined ? edit.price : (currentPrice ?? '');
+    const shopPriceValue = edit?.shopPrice !== undefined
+      ? edit.shopPrice
+      : (currentShopPrice === null || currentShopPrice === undefined ? '' : currentShopPrice);
+    const effectivePrice = Number(priceValue);
+    const effectiveShopPrice = shopPriceValue === '' || shopPriceValue === null ? null : Number(shopPriceValue);
+    const margin = Number.isFinite(effectivePrice) && effectiveShopPrice !== null && Number.isFinite(effectiveShopPrice)
+      ? effectivePrice - effectiveShopPrice
+      : null;
+    return (
+      <>
+        <td>
+          <input
+            type="number" min="0" step="0.01"
+            style={{ width: '5.5rem', padding: '0.3rem 0.4rem', border: '1px solid var(--border-color, #ddd)', borderRadius: 4 }}
+            value={priceValue}
+            onChange={(e) => handlePriceFieldChange(key, 'price', e.target.value)}
+          />
+          {originalPrice ? <div style={{ fontSize: '0.75rem', textDecoration: 'line-through', color: 'var(--text-secondary)' }}>₹{originalPrice}</div> : null}
+        </td>
+        <td>
+          <input
+            type="number" min="0" step="0.01"
+            placeholder="—"
+            style={{ width: '5.5rem', padding: '0.3rem 0.4rem', border: '1px solid var(--border-color, #ddd)', borderRadius: 4 }}
+            value={shopPriceValue === null ? '' : shopPriceValue}
+            onChange={(e) => handlePriceFieldChange(key, 'shopPrice', e.target.value)}
+          />
+          {margin !== null && (
+            <div style={{ fontSize: '0.75rem', color: margin >= 0 ? 'var(--text-secondary)' : '#b91c1c' }}>
+              Margin ₹{margin.toFixed(2)}
+            </div>
+          )}
+        </td>
+      </>
+    );
   };
 
   const openCreateDrawer = () => { setEditingProduct(null); setDrawerOpen(true); };
@@ -297,6 +403,18 @@ export default function Products() {
         </div>
       )}
 
+      {dirtyPriceCount > 0 && (
+        <div className="bulk-actions-bar">
+          <span className="bulk-actions-info">{dirtyPriceCount} price edit{dirtyPriceCount === 1 ? '' : 's'} unsaved</span>
+          <div className="bulk-actions-buttons">
+            <button className="btn-secondary" disabled={savingPrices} onClick={discardPriceEdits}>Discard</button>
+            <button className="btn-primary" disabled={savingPrices} onClick={handleSavePrices}>
+              {savingPrices ? 'Saving…' : 'Save prices'}
+            </button>
+          </div>
+        </div>
+      )}
+
       {successMessage && (
         <MessageBanner type="success" message={successMessage} onDismiss={() => setSuccessMessage(null)} />
       )}
@@ -314,7 +432,8 @@ export default function Products() {
                 />
               </th>
               <th>Product</th>
-              <th>Price</th>
+              <th>App ₹</th>
+              <th>Shop ₹</th>
               <th>Category</th>
               <th>Shop</th>
               <th>Order</th>
@@ -324,67 +443,110 @@ export default function Products() {
           </thead>
           <tbody>
             {loading && products.length === 0 ? (
-              <tr><td colSpan="8" style={{ textAlign: 'center', padding: '2rem' }}>Loading products...</td></tr>
+              <tr><td colSpan="9" style={{ textAlign: 'center', padding: '2rem' }}>Loading products...</td></tr>
             ) : products.length === 0 ? (
-              <tr><td colSpan="8" style={{ textAlign: 'center', padding: '2rem' }}>No products found.</td></tr>
+              <tr><td colSpan="9" style={{ textAlign: 'center', padding: '2rem' }}>No products found.</td></tr>
             ) : (
-              products.map(p => (
-                <tr key={p.id} className={selectedIds.includes(p.id) ? 'selected' : ''}>
-                  <td>
-                    <input type="checkbox" checked={selectedIds.includes(p.id)} onChange={() => toggleSelection(p.id)} />
-                  </td>
-                  <td>
-                    <div className="product-info">
-                      <img src={normalizeImageUrl(p.imageUrl || p.image_url) || FALLBACK_IMAGE} onError={handleImageError} alt={p.name} className="product-thumbnail" />
-                      <div className="product-details">
-                        <span className="product-name">{p.name}</span>
-                        <span className="product-unit">{p.unit || '1 plate'} {p.featured ? '• Featured' : ''}</span>
-                      </div>
-                    </div>
-                  </td>
-                  <td>
-                    <strong style={{ color: 'var(--text-primary)' }}>₹{p.price}</strong>
-                    {p.original_price && <div style={{ fontSize: '0.8rem', textDecoration: 'line-through', color: 'var(--text-secondary)' }}>₹{p.original_price}</div>}
-                  </td>
-                  <td>{p.category_name}</td>
-                  <td>{p.shop_name || '—'}</td>
-                  <td>{p.display_order || 0}</td>
-                  <td>
-                    <button
-                      className={`availability-toggle ${p.available ? 'in-stock' : 'out-of-stock'}`}
-                      onClick={() => toggleAvailability(p)}
-                    >
-                      {p.available ? 'In Stock' : 'Out of Stock'}
-                    </button>
-                    {(p.available_from_time || p.available_until_time) ? (
-                      <div style={{ marginTop: '0.25rem' }}>
-                        <span style={{
-                          display: 'inline-block',
-                          padding: '2px 8px',
-                          borderRadius: 10,
-                          fontSize: '0.7rem',
-                          fontWeight: 600,
-                          background: isWithinTimeWindow(p.available_from_time, p.available_until_time)
-                            ? 'rgba(34, 197, 94, 0.15)'
-                            : 'rgba(239, 68, 68, 0.15)',
-                          color: isWithinTimeWindow(p.available_from_time, p.available_until_time)
-                            ? '#15803d'
-                            : '#b91c1c',
-                          marginRight: 6,
-                        }}>
-                          {isWithinTimeWindow(p.available_from_time, p.available_until_time) ? '✓ Visible now' : '✗ Hidden now'}
-                        </span>
-                        <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                          ⏰ {formatTimeWindow(p.available_from_time, p.available_until_time)}
-                        </span>
-                      </div>
-                    ) : null}
-                  </td>
-                  <td>
-                    <button className="action-link" onClick={() => openEditDrawer(p)}>Edit</button>
-                  </td>
-                </tr>
-              ))
+              products.map(p => {
+                const hasVariants = Array.isArray(p.variants) && p.variants.length > 0;
+                return (
+                  <React.Fragment key={p.id}>
+                    <tr className={selectedIds.includes(p.id) ? 'selected' : ''}>
+                      <td>
+                        <input type="checkbox" checked={selectedIds.includes(p.id)} onChange={() => toggleSelection(p.id)} />
+                      </td>
+                      <td>
+                        <div className="product-info">
+                          <img src={normalizeImageUrl(p.imageUrl || p.image_url) || FALLBACK_IMAGE} onError={handleImageError} alt={p.name} className="product-thumbnail" />
+                          <div className="product-details">
+                            <span className="product-name">{p.name}</span>
+                            <span className="product-unit">
+                              {p.unit || '1 plate'} {p.featured ? '• Featured' : ''} {hasVariants ? `• ${p.variants.length} option${p.variants.length === 1 ? '' : 's'} below` : ''}
+                            </span>
+                          </div>
+                        </div>
+                      </td>
+                      {hasVariants ? (
+                        // Variants are edited as their own rows right below —
+                        // the parent product's price cells stay read-only so
+                        // there's exactly one place to change each number.
+                        <td colSpan={2} style={{ color: 'var(--text-secondary)', fontStyle: 'italic' }}>
+                          Priced per option ↓
+                        </td>
+                      ) : (
+                        renderPriceCells(p.id, undefined, p.price, p.shop_price, p.original_price)
+                      )}
+                      <td>{p.category_name}</td>
+                      <td>{p.shop_name || '—'}</td>
+                      <td>{p.display_order || 0}</td>
+                      <td>
+                        <button
+                          className={`availability-toggle ${p.available ? 'in-stock' : 'out-of-stock'}`}
+                          onClick={() => toggleAvailability(p)}
+                        >
+                          {p.available ? 'In Stock' : 'Out of Stock'}
+                        </button>
+                        {(p.available_from_time || p.available_until_time) ? (
+                          <div style={{ marginTop: '0.25rem' }}>
+                            <span style={{
+                              display: 'inline-block',
+                              padding: '2px 8px',
+                              borderRadius: 10,
+                              fontSize: '0.7rem',
+                              fontWeight: 600,
+                              background: isWithinTimeWindow(p.available_from_time, p.available_until_time)
+                                ? 'rgba(34, 197, 94, 0.15)'
+                                : 'rgba(239, 68, 68, 0.15)',
+                              color: isWithinTimeWindow(p.available_from_time, p.available_until_time)
+                                ? '#15803d'
+                                : '#b91c1c',
+                              marginRight: 6,
+                            }}>
+                              {isWithinTimeWindow(p.available_from_time, p.available_until_time) ? '✓ Visible now' : '✗ Hidden now'}
+                            </span>
+                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                              ⏰ {formatTimeWindow(p.available_from_time, p.available_until_time)}
+                            </span>
+                          </div>
+                        ) : null}
+                      </td>
+                      <td>
+                        <button className="action-link" onClick={() => openEditDrawer(p)}>Edit</button>
+                      </td>
+                    </tr>
+                    {hasVariants && p.variants.map(v => (
+                      // Variants are treated as their own products for pricing
+                      // purposes — each gets its own App ₹ / Shop ₹ row, keyed
+                      // "productId:variantId" so a save touches only that variant.
+                      <tr key={`${p.id}-v${v.id}`} className="variant-price-row">
+                        <td />
+                        <td>
+                          <div className="product-info" style={{ paddingLeft: '1.5rem' }}>
+                            <div className="product-details">
+                              <span className="product-name" style={{ fontSize: '0.85rem' }}>↳ {v.label}</span>
+                              <span className="product-unit">{v.isDefault || v.is_default ? 'Default option' : ''}</span>
+                            </div>
+                          </div>
+                        </td>
+                        {renderPriceCells(p.id, v.id, v.price, v.shopPrice ?? v.shop_price, v.originalPrice ?? v.original_price)}
+                        <td colSpan={2} style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>Inherits from {p.name}</td>
+                        <td>—</td>
+                        <td>
+                          <button
+                            className={`availability-toggle ${v.available ? 'in-stock' : 'out-of-stock'}`}
+                            onClick={() => toggleVariantAvailability(p, v)}
+                          >
+                            {v.available ? 'In Stock' : 'Out of Stock'}
+                          </button>
+                        </td>
+                        <td>
+                          <button className="action-link" onClick={() => openEditDrawer(p)}>Edit</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </React.Fragment>
+                );
+              })
             )}
           </tbody>
         </table>

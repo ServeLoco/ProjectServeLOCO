@@ -10,6 +10,10 @@ const {
   readyShopOrder,
 } = require('../services/shopOrderActions');
 
+// MySQL TIME columns come back as 'HH:MM:SS' — trim to 'HH:MM' for the API.
+const formatTime = (t) => (t ? String(t).slice(0, 5) : null);
+const HHMM_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
 // Maps a raw shops + users JOIN row to the admin response shape. The response
 // duplicates fields in both camelCase and snake_case because different clients
 // read different casings (the codebase-wide response contract).
@@ -31,34 +35,30 @@ const mapShopRow = (row) => ({
   longitude: row.longitude != null ? Number(row.longitude) : null,
   lat: row.latitude != null ? Number(row.latitude) : null,
   lng: row.longitude != null ? Number(row.longitude) : null,
+  open_time: formatTime(row.open_time),
+  openTime: formatTime(row.open_time),
+  close_time: formatTime(row.close_time),
+  closeTime: formatTime(row.close_time),
   created_at: row.created_at,
 });
 
-// Fetch a single shop in the admin row shape (joined with owner + product count).
-const fetchShopRow = async (shopId) => {
-  const [rows] = await pool.query(
-    `SELECT s.id, s.name, s.is_open, s.active, s.latitude, s.longitude,
+const SHOP_ROW_SELECT = `SELECT s.id, s.name, s.is_open, s.active, s.latitude, s.longitude,
        s.owner_user_id, u.name AS owner_name, u.phone AS owner_phone,
+       s.open_time, s.close_time,
        (SELECT COUNT(*) FROM products p WHERE p.shop_id = s.id AND p.deleted = 0) AS product_count, s.created_at
      FROM shops s
-     LEFT JOIN users u ON u.id = s.owner_user_id
-     WHERE s.id = ?`,
-    [shopId]
-  );
+     LEFT JOIN users u ON u.id = s.owner_user_id`;
+
+// Fetch a single shop in the admin row shape (joined with owner + product count).
+const fetchShopRow = async (shopId) => {
+  const [rows] = await pool.query(`${SHOP_ROW_SELECT} WHERE s.id = ?`, [shopId]);
   return rows.length > 0 ? mapShopRow(rows[0]) : null;
 };
 
 // GET /api/admin/shops — every shop (including active = 0), with owner info +
 // product count.
 const listShops = async (req, res) => {
-  const [rows] = await pool.query(
-    `SELECT s.id, s.name, s.is_open, s.active, s.latitude, s.longitude,
-       s.owner_user_id, u.name AS owner_name, u.phone AS owner_phone,
-       (SELECT COUNT(*) FROM products p WHERE p.shop_id = s.id AND p.deleted = 0) AS product_count, s.created_at
-     FROM shops s
-     LEFT JOIN users u ON u.id = s.owner_user_id
-     ORDER BY s.id ASC`
-  );
+  const [rows] = await pool.query(`${SHOP_ROW_SELECT} ORDER BY s.id ASC`);
   res.status(200).json({ shops: rows.map(mapShopRow) });
 };
 
@@ -284,6 +284,37 @@ const updateShop = async (req, res) => {
   res.status(200).json({ message: 'Shop updated', shop });
 };
 
+// PATCH /api/admin/shops/:id/schedule — body { openTime, closeTime } as 'HH:MM'
+// strings, or both null to turn scheduling off. Same rules as the shop-owner's
+// own PATCH /shop/me/schedule (shopOwnerController.updateMyShopSchedule) —
+// this purely writes the schedule; shopScheduleSweeper is what flips is_open.
+const updateShopSchedule = async (req, res) => {
+  const shopId = Number(req.params.id);
+  const shop = await loadShopOr404(shopId);
+  if (!shop) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Shop not found' });
+  }
+
+  const openTime = req.body.openTime !== undefined ? req.body.openTime : req.body.open_time;
+  const closeTime = req.body.closeTime !== undefined ? req.body.closeTime : req.body.close_time;
+
+  const bothNull = openTime === null && closeTime === null;
+  const bothValid = HHMM_RE.test(openTime) && HHMM_RE.test(closeTime);
+  if (!bothNull && !bothValid) {
+    return res.status(400).json({
+      code: 'VALIDATION_ERROR',
+      message: 'Provide both openTime and closeTime as "HH:MM", or both null to turn scheduling off.',
+    });
+  }
+  if (bothValid && openTime === closeTime) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Open and close time must be different.' });
+  }
+
+  await pool.query('UPDATE shops SET open_time = ?, close_time = ? WHERE id = ?', [openTime, closeTime, shopId]);
+  const updated = await fetchShopRow(shopId);
+  res.status(200).json({ message: 'Shop schedule updated', shop: updated });
+};
+
 // DELETE /api/admin/shops/:id — remove a shop from the platform.
 // Products are NOT deleted: they move to the default "home" catalogue
 // (shop_id = NULL, house items). group_id is cleared because product_groups
@@ -437,13 +468,154 @@ const adminReadyShopOrder = async (req, res) => {
   res.status(200).json({ message: result.message });
 };
 
+const groupShape = (g) => ({
+  id: g.id,
+  name: g.name,
+  active: Boolean(g.active),
+  isActive: Boolean(g.active),
+  productCount: g.product_count ?? 0,
+  product_count: g.product_count ?? 0,
+});
+
+// GET /api/admin/shops/:id/groups — this shop's product groups with member counts.
+const listShopGroups = async (req, res) => {
+  const shopId = Number(req.params.id);
+  const shop = await loadShopOr404(shopId);
+  if (!shop) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Shop not found' });
+  }
+  const [rows] = await pool.query(
+    `SELECT pg.id, pg.name, pg.active,
+       (SELECT COUNT(*) FROM products p WHERE p.group_id = pg.id AND p.deleted = 0) AS product_count
+     FROM product_groups pg
+     WHERE pg.shop_id = ?
+     ORDER BY pg.name ASC`,
+    [shopId]
+  );
+  res.status(200).json({ groups: rows.map(groupShape) });
+};
+
+// POST /api/admin/shops/:id/groups — body { name }.
+const createShopGroup = async (req, res) => {
+  const shopId = Number(req.params.id);
+  const shop = await loadShopOr404(shopId);
+  if (!shop) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Shop not found' });
+  }
+  const { name } = req.body;
+  if (!name || !String(name).trim()) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Group name is required' });
+  }
+  const [result] = await pool.query(
+    'INSERT INTO product_groups (shop_id, name) VALUES (?, ?)',
+    [shopId, String(name).trim()]
+  );
+  const [rows] = await pool.query(
+    'SELECT id, name, active, 0 AS product_count FROM product_groups WHERE id = ?',
+    [result.insertId]
+  );
+  res.status(201).json({ group: groupShape(rows[0]) });
+};
+
+// PATCH /api/admin/shops/:id/groups/:groupId — body may contain name and/or
+// active. Scoped to this shop — a group id from another shop 404s.
+const updateShopGroup = async (req, res) => {
+  const shopId = Number(req.params.id);
+  const { groupId } = req.params;
+  const { name, active } = req.body;
+
+  const [existing] = await pool.query(
+    'SELECT id FROM product_groups WHERE id = ? AND shop_id = ?',
+    [groupId, shopId]
+  );
+  if (existing.length === 0) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Group not found' });
+  }
+
+  const sets = [];
+  const values = [];
+  if (name !== undefined) {
+    if (!String(name).trim()) {
+      return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Group name cannot be empty' });
+    }
+    sets.push('name = ?');
+    values.push(String(name).trim());
+  }
+  if (active !== undefined) {
+    sets.push('active = ?');
+    values.push(active ? 1 : 0);
+  }
+  if (sets.length > 0) {
+    values.push(groupId);
+    await pool.query(`UPDATE product_groups SET ${sets.join(', ')} WHERE id = ?`, values);
+  }
+
+  const [rows] = await pool.query(
+    `SELECT pg.id, pg.name, pg.active,
+       (SELECT COUNT(*) FROM products p WHERE p.group_id = pg.id AND p.deleted = 0) AS product_count
+     FROM product_groups pg WHERE pg.id = ?`,
+    [groupId]
+  );
+  res.status(200).json({ message: 'Group updated', group: groupShape(rows[0]) });
+};
+
+// DELETE /api/admin/shops/:id/groups/:groupId — member products become
+// ungrouped, not deleted.
+const deleteShopGroup = async (req, res) => {
+  const shopId = Number(req.params.id);
+  const { groupId } = req.params;
+  const [existing] = await pool.query(
+    'SELECT id FROM product_groups WHERE id = ? AND shop_id = ?',
+    [groupId, shopId]
+  );
+  if (existing.length === 0) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Group not found' });
+  }
+  await pool.query('UPDATE products SET group_id = NULL WHERE group_id = ?', [groupId]);
+  await pool.query('DELETE FROM product_groups WHERE id = ?', [groupId]);
+  res.status(200).json({ message: 'Group deleted' });
+};
+
+// PATCH /api/admin/shops/:id/products/:productId/group — body { group_id }
+// (null clears it). Validates the group belongs to this shop when non-null.
+const assignShopProductGroup = async (req, res) => {
+  const shopId = Number(req.params.id);
+  const { productId } = req.params;
+  const groupId = req.body.group_id !== undefined ? req.body.group_id : req.body.groupId;
+
+  if (groupId !== null && groupId !== undefined) {
+    const [groupRows] = await pool.query(
+      'SELECT id FROM product_groups WHERE id = ? AND shop_id = ?',
+      [groupId, shopId]
+    );
+    if (groupRows.length === 0) {
+      return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Unknown group_id' });
+    }
+  }
+
+  const [result] = await pool.query(
+    'UPDATE products SET group_id = ? WHERE id = ? AND shop_id = ? AND deleted = 0',
+    [groupId || null, productId, shopId]
+  );
+  if (result.affectedRows === 0) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Product not found' });
+  }
+  res.status(200).json({ message: 'Product group updated' });
+};
+
 module.exports = {
   listShops,
   createShop,
   updateShop,
+  updateShopSchedule,
   deleteShop,
   listShopOrders,
   adminConfirmShopOrder,
   adminRejectShopOrder,
   adminReadyShopOrder,
+  listShopGroups,
+  createShopGroup,
+  updateShopGroup,
+  deleteShopGroup,
+  assignShopProductGroup,
 };

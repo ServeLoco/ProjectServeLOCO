@@ -157,7 +157,9 @@ describe('Product Variants — admin validation', () => {
         .mockResolvedValueOnce([{ insertId: 601 }]) // INSERT variant 1
         .mockResolvedValueOnce([{ insertId: 602 }]) // INSERT variant 2
         .mockResolvedValueOnce([{ affectedRows: 0 }]) // soft-delete missing
-        .mockResolvedValueOnce([{ affectedRows: 1 }]), // price sync
+        .mockResolvedValueOnce([{ affectedRows: 1 }]) // price sync
+        .mockResolvedValueOnce([[{ price: 149, shop_price: null }]]) // re-read default variant
+        .mockResolvedValueOnce([{ affectedRows: 1 }]), // shop_price mirror sync
       commit: jest.fn(),
       rollback: jest.fn(),
       release: jest.fn(),
@@ -202,7 +204,9 @@ describe('Product Variants — admin upsert', () => {
         .mockResolvedValueOnce([{ insertId: 602 }]) // INSERT variant Medium
         .mockResolvedValueOnce([{ insertId: 603 }]) // INSERT variant Large
         .mockResolvedValueOnce([{ affectedRows: 0 }]) // soft-delete not-in-payload
-        .mockResolvedValueOnce([{ affectedRows: 1 }]), // price sync
+        .mockResolvedValueOnce([{ affectedRows: 1 }]) // price sync
+        .mockResolvedValueOnce([[{ price: 149, shop_price: null }]]) // re-read default variant
+        .mockResolvedValueOnce([{ affectedRows: 1 }]), // shop_price mirror sync
       commit: jest.fn(),
       rollback: jest.fn(),
       release: jest.fn(),
@@ -247,7 +251,9 @@ describe('Product Variants — admin upsert', () => {
         .mockResolvedValueOnce([{ affectedRows: 1 }]) // UPDATE existing variant id=10
         .mockResolvedValueOnce([{ insertId: 601 }])   // INSERT new variant
         .mockResolvedValueOnce([{ affectedRows: 1 }]) // soft-delete NOT IN (10, 601)
-        .mockResolvedValueOnce([{ affectedRows: 1 }]), // price sync
+        .mockResolvedValueOnce([{ affectedRows: 1 }]) // price sync
+        .mockResolvedValueOnce([[{ price: 149, shop_price: null }]]) // re-read default variant
+        .mockResolvedValueOnce([{ affectedRows: 1 }]), // shop_price mirror sync
       commit: jest.fn(),
       rollback: jest.fn(),
       release: jest.fn(),

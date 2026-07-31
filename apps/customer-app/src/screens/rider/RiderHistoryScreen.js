@@ -5,6 +5,7 @@ import {
   RefreshControl,
   StyleSheet,
   Text,
+  TouchableOpacity,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -12,6 +13,8 @@ import { useFocusEffect } from '@react-navigation/native';
 import { colors, spacing, typography, radius, shadows } from '../../theme';
 import { riderApi } from '../../api';
 import AppIcon from '../../components/AppIcon';
+import DayHistoryPicker from '../../components/DayHistoryPicker';
+import { todayDateStr } from '../../utils/dateStr';
 
 function formatWhen(value) {
   if (!value) return '';
@@ -33,10 +36,14 @@ export default function RiderHistoryScreen() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  // Default view is today only; picking a day from history browses that day.
+  const [selectedDate, setSelectedDate] = useState(() => todayDateStr());
+  const [pickerVisible, setPickerVisible] = useState(false);
+  const isToday = selectedDate === todayDateStr();
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (date) => {
     try {
-      const res = await riderApi.getHistory({ page: 1, limit: 40 });
+      const res = await riderApi.getHistory({ page: 1, limit: 40, date: date || selectedDate });
       setOrders(res?.orders || []);
     } catch (_) {
       setOrders([]);
@@ -44,9 +51,23 @@ export default function RiderHistoryScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [selectedDate]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  const handleSelectDate = useCallback((dateStr) => {
+    setSelectedDate(dateStr);
+    setPickerVisible(false);
+    setLoading(true);
+    load(dateStr);
+  }, [load]);
+
+  const backToToday = useCallback(() => {
+    const t = todayDateStr();
+    setSelectedDate(t);
+    setLoading(true);
+    load(t);
+  }, [load]);
 
   const deliveredCount = orders.filter((o) => o.status === 'Delivered').length;
 
@@ -77,7 +98,14 @@ export default function RiderHistoryScreen() {
             </View>
           ) : null}
           <View style={styles.metaRow}>
-            {when ? <Text style={styles.meta}>{when}</Text> : null}
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              {when ? <Text style={styles.meta}>{when}</Text> : null}
+              {(item.deliveryType || item.delivery_type) ? (
+                <Text style={styles.meta}>
+                  · {(item.deliveryType || item.delivery_type) === 'fast' ? '⚡ Express' : 'Standard'}
+                </Text>
+              ) : null}
+            </View>
             {item.total != null ? (
               <Text style={styles.total}>₹{Number(item.total).toFixed(0)}</Text>
             ) : null}
@@ -90,10 +118,25 @@ export default function RiderHistoryScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.header}>
-        <Text style={styles.title}>History</Text>
-        <Text style={styles.subtitle}>
-          {loading ? 'Loading…' : `${deliveredCount} delivered · ${orders.length} total`}
-        </Text>
+        <View style={{ flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+          <View>
+            <Text style={styles.title}>History</Text>
+            <Text style={styles.subtitle}>
+              {loading ? 'Loading…' : `${deliveredCount} delivered · ${orders.length} total`}
+            </Text>
+            <Text style={styles.subtitle}>{isToday ? 'Today' : selectedDate}</Text>
+          </View>
+          {isToday ? (
+            <TouchableOpacity style={styles.historyBtn} onPress={() => setPickerVisible(true)}>
+              <AppIcon name="orders" size={14} color={colors.saffronDark} />
+              <Text style={styles.historyBtnText}>Browse days</Text>
+            </TouchableOpacity>
+          ) : (
+            <TouchableOpacity style={styles.historyBtn} onPress={backToToday}>
+              <Text style={styles.historyBtnText}>← Today</Text>
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
       {loading ? (
@@ -125,6 +168,13 @@ export default function RiderHistoryScreen() {
           )}
         />
       )}
+
+      <DayHistoryPicker
+        visible={pickerVisible}
+        onClose={() => setPickerVisible(false)}
+        onSelectDate={handleSelectDate}
+        selectedDate={selectedDate}
+      />
     </SafeAreaView>
   );
 }
@@ -143,6 +193,12 @@ const styles = StyleSheet.create({
     marginTop: 4,
     fontWeight: '500',
   },
+  historyBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: colors.saffronLight, borderRadius: radius.pill,
+    paddingHorizontal: 12, paddingVertical: 8,
+  },
+  historyBtnText: { color: colors.saffronDark, fontWeight: '800', fontSize: 13 },
   list: {
     paddingHorizontal: spacing.lg,
     paddingBottom: spacing.xxl,

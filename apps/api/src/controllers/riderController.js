@@ -59,7 +59,7 @@ const shapeShopPin = (row) => ({
   lng: numOrNull(row.longitude),
 });
 
-const shapeItemRow = (it) => ({
+const shapeItemRow = (it, shopName = it.shop_name || null) => ({
   id: it.id,
   productName: it.product_name,
   product_name: it.product_name,
@@ -68,6 +68,8 @@ const shapeItemRow = (it) => ({
   variant_label: it.variant_label,
   shopId: it.shop_id,
   shop_id: it.shop_id,
+  shopName,
+  shop_name: shopName,
   unitPrice: it.unit_price,
   unit_price: it.unit_price,
   lineTotal: it.line_total,
@@ -97,14 +99,16 @@ const loadAssignmentExtrasBatch = async (orderRows) => {
   );
 
   const shopsByOrder = new Map();
+  const shopNameById = new Map();
   for (const row of shopRows) {
     if (!shopsByOrder.has(row.order_id)) shopsByOrder.set(row.order_id, []);
     shopsByOrder.get(row.order_id).push(shapeShopPin(row));
+    shopNameById.set(row.id, row.name);
   }
   const itemsByOrder = new Map();
   for (const row of itemRows) {
     if (!itemsByOrder.has(row.order_id)) itemsByOrder.set(row.order_id, []);
-    itemsByOrder.get(row.order_id).push(shapeItemRow(row));
+    itemsByOrder.get(row.order_id).push(shapeItemRow(row, shopNameById.get(row.shop_id) || null));
   }
 
   return orderRows.map((orderRow) => {
@@ -135,6 +139,11 @@ const shapeOffer = (row) => {
     expires_at: expiresAt,
     secondsRemaining,
     seconds_remaining: secondsRemaining,
+    // Lets the popup's progress bar scale to the real timeout instead of a
+    // hardcoded client constant that would silently drift if
+    // RIDER_OFFER_TIMEOUT_SEC is ever overridden via env.
+    offerTimeoutSec: assignment.RIDER_OFFER_TIMEOUT_SEC,
+    offer_timeout_sec: assignment.RIDER_OFFER_TIMEOUT_SEC,
     orderNumber: row.order_number,
     order_number: row.order_number,
     total: row.total,
@@ -337,12 +346,13 @@ const getActiveOffer = async (req, res) => {
       [row.order_id]
     );
     offer.shops = shops;
+    const shopNameById = new Map(shops.map((s) => [s.id, s.name]));
     const [items] = await pool.query(
       `SELECT id, product_name, quantity, variant_label, shop_id, unit_price, line_total
        FROM order_items WHERE order_id = ?`,
       [row.order_id]
     );
-    offer.items = items.map(shapeItemRow);
+    offer.items = items.map((it) => shapeItemRow(it, shopNameById.get(it.shop_id) || null));
     offers.push(offer);
   }
 
@@ -424,21 +434,28 @@ const getAssignmentHistory = async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit, 10) || 20));
   const offset = (page - 1) * limit;
+  const { date } = req.query;
+
+  let where = `rider_id = ? AND status IN ('Delivered', 'Cancelled')`;
+  const baseParams = [req.rider.id];
+  if (date) {
+    where += ' AND DATE(updated_at) = ?';
+    baseParams.push(date);
+  }
 
   const [countRows] = await pool.query(
-    `SELECT COUNT(*) AS cnt FROM orders
-     WHERE rider_id = ? AND status IN ('Delivered', 'Cancelled')`,
-    [req.rider.id]
+    `SELECT COUNT(*) AS cnt FROM orders WHERE ${where}`,
+    baseParams
   );
   const total = Number(countRows[0]?.cnt) || 0;
 
   const [rows] = await pool.query(
     `SELECT id, order_number, status, address, total, rider_assigned_at, rider_picked_up_at, created_at, updated_at
      FROM orders
-     WHERE rider_id = ? AND status IN ('Delivered', 'Cancelled')
+     WHERE ${where}
      ORDER BY updated_at DESC
      LIMIT ? OFFSET ?`,
-    [req.rider.id, limit, offset]
+    [...baseParams, limit, offset]
   );
 
   res.status(200).json({

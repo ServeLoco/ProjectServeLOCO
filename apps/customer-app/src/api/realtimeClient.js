@@ -49,6 +49,13 @@ const AUTH_ROLE_EVENTS = [
   'auth.role.updated',
 ];
 
+// Admin created/edited/deleted a delivery zone (boundary or pricing) —
+// anyone mid-checkout should reprice against the new zone data immediately,
+// not wait for their next pin move.
+const DELIVERY_ZONE_EVENTS = [
+  'delivery_zones.updated',
+];
+
 const LIFECYCLE_EVENTS = [
   'connected',
   'reconnected',
@@ -154,6 +161,14 @@ function subscribeAuthRoleEvents(handler) {
   return () => unsubscribers.forEach(unsubscribe => unsubscribe());
 }
 
+function subscribeDeliveryZoneEvents(handler) {
+  const unsubscribers = DELIVERY_ZONE_EVENTS.map(eventName =>
+    subscribeRealtime(eventName, payload => handler({ eventName, payload }))
+  );
+
+  return () => unsubscribers.forEach(unsubscribe => unsubscribe());
+}
+
 // Module-level: any shop open/close event busts product/category SWR caches
 // so the next screen paint revalidates. Invalidation also defeats the TASK-16
 // freshness throttle (no entry = not fresh).
@@ -208,6 +223,10 @@ function bindSocketEvents(nextSocket) {
   });
 
   AUTH_ROLE_EVENTS.forEach(eventName => {
+    nextSocket.on(eventName, payload => emitLocal(eventName, payload));
+  });
+
+  DELIVERY_ZONE_EVENTS.forEach(eventName => {
     nextSocket.on(eventName, payload => emitLocal(eventName, payload));
   });
 
@@ -302,6 +321,7 @@ export {
   emitRealtimeForeground,
   getRealtimeConnectionState,
   subscribeAuthRoleEvents,
+  subscribeDeliveryZoneEvents,
   subscribeNotificationEvents,
   subscribeOrderEvents,
   subscribeRealtime,

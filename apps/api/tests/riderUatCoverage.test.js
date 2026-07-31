@@ -242,12 +242,12 @@ describe('UAT 14.5 — timeout treated as reject then continue', () => {
     expect(adminInbox.createAdminNotification).not.toHaveBeenCalled();
   });
 
-  it('offer timeout constant is 5 minutes', () => {
-    expect(assignment.RIDER_OFFER_TIMEOUT_SEC).toBe(300);
+  it('offer timeout constant is 2.5 minutes', () => {
+    expect(assignment.RIDER_OFFER_TIMEOUT_SEC).toBe(150);
   });
 
-  it('search window defaults are 10 min / 30s scan', () => {
-    expect(assignment.RIDER_SEARCH_WINDOW_SEC).toBe(600);
+  it('search window defaults are 30 min / 30s scan', () => {
+    expect(assignment.RIDER_SEARCH_WINDOW_SEC).toBe(1800);
     expect(assignment.RIDER_SEARCH_SCAN_SEC).toBe(30);
   });
 });

@@ -30,6 +30,7 @@ import {
   requestPreciseLocationPermission,
   openAppLocationSettings,
 } from '../../hooks/usePreciseLocationPermissionOnStart';
+import { deliveryZonesApi } from '../../api';
 import AppIcon from '../AppIcon';
 import PressableScale from '../PressableScale';
 
@@ -53,6 +54,19 @@ const DEFAULT_ZOOM = 13.5;
 // checkout sheet up/down never re-pads the camera (that was re-centering to live GPS).
 const FIXED_CAMERA_SHEET_PAD = Math.round(Dimensions.get('window').height * 0.40);
 
+// Distinct, visually-separable colors for the delivery-zone map overlay —
+// cycled by zone index so neighboring/nested zones don't blend together.
+const ZONE_COLOR_PALETTE = [
+  '#eab308', // yellow
+  '#22c55e', // green
+  '#3b82f6', // blue
+  '#f97316', // orange
+  '#a855f7', // purple
+  '#ec4899', // pink
+  '#14b8a6', // teal
+  '#ef4444', // red
+];
+
 // GPS can hang indefinitely on some devices; cap it so buttons never spin forever.
 function getPositionWithTimeout() {
   return Promise.race([
@@ -61,6 +75,36 @@ function getPositionWithTimeout() {
       setTimeout(() => reject(new Error('GPS_TIMEOUT')), GPS_TIMEOUT_MS),
     ),
   ]);
+}
+
+// Standard ray-casting point-in-polygon test against a zone's boundary
+// ({lat,lng} points, any polygon shape — circle/square/rectangle zones are
+// already flattened to boundary points by the admin side).
+function isPointInPolygon(lat, lng, boundary) {
+  let inside = false;
+  for (let i = 0, j = boundary.length - 1; i < boundary.length; j = i++) {
+    const yi = Number(boundary[i].lat);
+    const xi = Number(boundary[i].lng);
+    const yj = Number(boundary[j].lat);
+    const xj = Number(boundary[j].lng);
+    const intersects = ((yi > lat) !== (yj > lat))
+      && (lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+// Camera heuristic ONLY — never pricing or eligibility, which stay
+// server-side. "Is the pin inside any shaded zone" is all this needs, so it
+// deliberately skips the server's parent/child precedence (irrelevant to
+// "any") and exclusion squares (a camera zoom is not a delivery decision).
+// Anything the customer is actually told about delivery comes from the
+// cart-calculate response.
+function isInsideAnyZone(lat, lng, zones) {
+  return zones.some((zone) => (
+    Array.isArray(zone.boundary) && zone.boundary.length >= 3
+    && isPointInPolygon(lat, lng, zone.boundary)
+  ));
 }
 
 /**
@@ -82,6 +126,8 @@ function getPositionWithTimeout() {
  * `showConfirmHint`: plain cue above Confirm when user tried Place Order without confirming.
  * `onLocateStatus`: 'loading' | 'ready' | 'error' for parent chips (live GPS helper).
  * `onPinMoved`: after pan or recenter — parent should clear confirmed delivery (non-autoCommit).
+ * `onLiveCenterChange(lat, lng)`: fires on every settled pan/fly, even before Confirm —
+ *   lets the parent preview zone-specific pricing for wherever the pin currently sits.
  *
  * Imperative (`apiRef`): `{ confirmLocation(), locateToLive() }`.
  * (Plain function + apiRef — avoids forwardRef barrel interop issues on RN.)
@@ -89,6 +135,7 @@ function getPositionWithTimeout() {
 export default function LocationPicker({
   visible,
   initialCenter,
+  initialZoom = DEFAULT_ZOOM,
   onConfirm,
   onClose,
   inline = false,
@@ -105,6 +152,14 @@ export default function LocationPicker({
   onMapTouchEnd,
   onLocateStatus,
   onPinMoved,
+  onLiveCenterChange,
+  onMapReady,
+  showZoneOverlay = true,
+  // Immersive normally lifts the pin well above screen-center to leave room
+  // for checkout's draggable bottom sheet. Callers with no such sheet (e.g.
+  // a plain full-screen "change location" flow) pass this to keep the pin
+  // genuinely centered in the visible map instead.
+  centeredPin = false,
 }) {
   const insets = useSafeAreaInsets();
   const reducedMotion = useReducedMotion();
@@ -125,17 +180,27 @@ export default function LocationPicker({
   const onLocateStatusRef = useRef(onLocateStatus);
   const onPinMovedRef = useRef(onPinMoved);
   const onConfirmRef = useRef(onConfirm);
+  const onLiveCenterChangeRef = useRef(onLiveCenterChange);
+  const onMapReadyRef = useRef(onMapReady);
   const autoCommitRef = useRef(autoCommit);
   const sheetReserveRef = useRef(sheetReserve);
   const immersiveRef = useRef(immersive);
+  const centeredPinRef = useRef(centeredPin);
   onLocateStatusRef.current = onLocateStatus;
   onPinMovedRef.current = onPinMoved;
   onConfirmRef.current = onConfirm;
+  onLiveCenterChangeRef.current = onLiveCenterChange;
+  onMapReadyRef.current = onMapReady;
   autoCommitRef.current = autoCommit;
   sheetReserveRef.current = sheetReserve;
   immersiveRef.current = immersive;
+  centeredPinRef.current = centeredPin;
   const commitTimerRef = useRef(null);
   const zoomRetryTimersRef = useRef([]);
+  // After a live-GPS fly-in that lands outside every delivery zone, this
+  // pulls the camera back out so the zones are visible instead of leaving
+  // the user tight-zoomed on empty, unserviceable ground.
+  const zoneVisibilityTimerRef = useRef(null);
   // Last zoom applied via setCamera — seed effect must not clobber live zoom.
   const zoomRef = useRef(DEFAULT_ZOOM);
   const liveZoomAppliedRef = useRef(false);
@@ -149,6 +214,10 @@ export default function LocationPicker({
   const [confirming, setConfirming] = useState(false);
   const [recentering, setRecentering] = useState(false);
   const [gpsError, setGpsError] = useState(null);
+  // Tiles fetch over the network — on a slow connection the map frame is just
+  // its black background for several seconds with nothing telling the user
+  // why. Covers that gap with a spinner until Mapbox reports the style loaded.
+  const [mapStyleLoaded, setMapStyleLoaded] = useState(false);
   // Saffron after the user taps Confirm location.
   const [pinActive, setPinActive] = useState(false);
   // Live GPS / last fly-to center (map only until Confirm).
@@ -162,12 +231,64 @@ export default function LocationPicker({
     const c = initialCenter || DEFAULT_MAP_CENTER;
     return {
       centerCoordinate: [Number(c.longitude), Number(c.latitude)],
-      zoomLevel: DEFAULT_ZOOM,
+      zoomLevel: initialZoom,
       animationMode: 'moveTo',
       animationDuration: 0,
       key: 0,
     };
   });
+
+  // Active delivery zone boundaries, shaded on the map so the customer can
+  // see where to drop the pin instead of guessing. Geometry-only, fetched
+  // once — zone shape edits are rare enough not to need realtime sync here.
+  const [deliveryZones, setDeliveryZones] = useState([]);
+  // Zones load async and can still be empty right when live GPS resolves
+  // (both kick off near mount) — the out-of-zone check reads this ref at
+  // fire-time (1.8s later) instead of the value closed over at call-time,
+  // so it isn't skipped just because the fetch hadn't landed yet.
+  const deliveryZonesRef = useRef(deliveryZones);
+  deliveryZonesRef.current = deliveryZones;
+  useEffect(() => {
+    if (!mapboxAvailable) return undefined;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await deliveryZonesApi.getActiveZones();
+        const zones = res?.data || [];
+        if (!cancelled) setDeliveryZones(Array.isArray(zones) ? zones : []);
+      } catch (_) {
+        // Non-fatal — map just renders without the shading.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const deliveryZonesGeoJSON = useMemo(() => ({
+    type: 'FeatureCollection',
+    features: deliveryZones
+      .filter((zone) => Array.isArray(zone.boundary) && zone.boundary.length >= 3)
+      .map((zone, index) => ({
+        type: 'Feature',
+        properties: {
+          id: zone.id,
+          name: zone.name || '',
+          // Cycles through a fixed palette by index so adjacent/nested zones
+          // are visually distinguishable instead of one flat color.
+          color: ZONE_COLOR_PALETTE[index % ZONE_COLOR_PALETTE.length],
+        },
+        geometry: {
+          type: 'Polygon',
+          // GeoJSON is [lng, lat]; boundary is stored [{lat,lng}] — ring must
+          // close (first point repeated last) or Mapbox renders it wrong.
+          coordinates: [[
+            ...zone.boundary.map((p) => [Number(p.lng), Number(p.lat)]),
+            [Number(zone.boundary[0].lng), Number(zone.boundary[0].lat)],
+          ]],
+        },
+      })),
+  }), [deliveryZones]);
 
   const confirmEnter = useRef(new Animated.Value(0)).current;
 
@@ -223,14 +344,14 @@ export default function LocationPicker({
 
   // Fixed padding — independent of live sheet height so drag/snap never moves the map.
   const cameraPadding = useMemo(() => {
-    if (!immersive) return undefined;
+    if (!immersive || centeredPin) return undefined;
     return {
       paddingTop: 0,
       paddingRight: 0,
       paddingBottom: FIXED_CAMERA_SHEET_PAD + Math.abs(PIN_EXTRA_UP_Y) * 2,
       paddingLeft: 0,
     };
-  }, [immersive]);
+  }, [immersive, centeredPin]);
 
   const applyCamera = useCallback((latitude, longitude, {
     zoomLevel = DEFAULT_ZOOM,
@@ -383,6 +504,23 @@ export default function LocationPicker({
       const { latitude, longitude } = position.coords;
       // Auto-locate + recenter: fly in close on the pin.
       flyTo(latitude, longitude, true, LIVE_ZOOM);
+
+      // If that live position falls outside every delivery zone, the tight
+      // zoom shows nothing but empty ground — pull back out to the default
+      // zoom (same center) once the fly-in settles, so the zones themselves
+      // come into view and the user can see where to move the pin. Zones
+      // fetch async near mount, so the membership check reads the ref at
+      // fire-time rather than deciding upfront off a possibly-empty list.
+      if (zoneVisibilityTimerRef.current) clearTimeout(zoneVisibilityTimerRef.current);
+      zoneVisibilityTimerRef.current = setTimeout(() => {
+        zoneVisibilityTimerRef.current = null;
+        if (userMovedMapRef.current) return;
+        const zones = deliveryZonesRef.current;
+        if (zones.length > 0 && !isInsideAnyZone(latitude, longitude, zones)) {
+          flyTo(latitude, longitude, true, DEFAULT_ZOOM);
+        }
+      }, 1800);
+
       if (autoCommitRef.current) {
         // Live GPS pin = delivery location (no separate Confirm step).
         setPinActive(true);
@@ -506,7 +644,7 @@ export default function LocationPicker({
       longitude: Number(seed.longitude),
     };
     applyCamera(seed.latitude, seed.longitude, {
-      zoomLevel: DEFAULT_ZOOM,
+      zoomLevel: initialZoom,
       animated: false,
       duration: 0,
     });
@@ -514,7 +652,7 @@ export default function LocationPicker({
     const t1 = setTimeout(() => {
       if (liveZoomAppliedRef.current) return;
       applyCamera(seed.latitude, seed.longitude, {
-        zoomLevel: DEFAULT_ZOOM,
+        zoomLevel: initialZoom,
         animated: false,
         duration: 0,
       });
@@ -522,7 +660,7 @@ export default function LocationPicker({
     const t2 = setTimeout(() => {
       if (liveZoomAppliedRef.current) return;
       applyCamera(seed.latitude, seed.longitude, {
-        zoomLevel: DEFAULT_ZOOM,
+        zoomLevel: initialZoom,
         animated: false,
         duration: 0,
       });
@@ -533,6 +671,30 @@ export default function LocationPicker({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-shot seed on open only
   }, [inline, visible]);
+
+  // A close saved-location view is useful while checking out, but the MOMENT
+  // the pin lands outside the delivery area the customer needs to see the
+  // zones to choose a valid destination — checkout flips showZoneOverlay on
+  // from live pricing (showZoneOverlay={outOfRange}).
+  //
+  // Only the false -> true TRANSITION pulls the camera out. Reacting to the
+  // value itself would fire on mount for every caller that passes a constant
+  // `showZoneOverlay` (ChangeLocationModal), overriding the `initialZoom`
+  // the seed effect just applied and any live-GPS fly-in.
+  const prevShowZoneOverlayRef = useRef(showZoneOverlay);
+  useEffect(() => {
+    const wasShowing = prevShowZoneOverlayRef.current;
+    prevShowZoneOverlayRef.current = showZoneOverlay;
+
+    const mapActive = inline || visible;
+    if (!mapActive || !showZoneOverlay || wasShowing || !mapboxAvailable) return;
+    const center = lastMapCenterRef.current;
+    if (!Number.isFinite(center?.latitude) || !Number.isFinite(center?.longitude)) return;
+    applyCamera(center.latitude, center.longitude, {
+      zoomLevel: DEFAULT_ZOOM,
+      animated: true,
+    });
+  }, [inline, visible, showZoneOverlay, applyCamera]);
 
   // Intentionally NO effect on sheetReserve: dragging/snapping the sheet must
   // never call setCamera or re-bind centerCoordinate (that recentered to live GPS).
@@ -558,7 +720,7 @@ export default function LocationPicker({
    */
   const readPinCoordinate = useCallback(async () => {
     const layout = mapLayoutRef.current;
-    const isImmersive = immersiveRef.current;
+    const isImmersive = immersiveRef.current && !centeredPinRef.current;
     // Same fixed offset as render — not live sheet height (sheet drag must not move tip).
     const pinTranslateY = frozenPinOffsetRef.current != null
       ? frozenPinOffsetRef.current
@@ -567,6 +729,12 @@ export default function LocationPicker({
         : 0);
 
     // Preferred: screen point of the pin tip → geo (handles pitch + padding).
+    // PIN_TIP_OFFSET_Y is NOT added here: it already nudges the rendered pin
+    // graphic (pinIconOffset's own translateY, see below) so the tail tip
+    // lands exactly at height/2 + pinTranslateY. Adding it again here reads
+    // the coordinate ~17px above the visual tip — under the pin's head
+    // circle instead of its narrow point — which is what getCenter() (the
+    // fallback just below, and the map's actual camera center) always used.
     if (
       mapboxAvailable
       && mapRef.current?.getCoordinateFromView
@@ -574,7 +742,7 @@ export default function LocationPicker({
       && layout.height > 0
     ) {
       const x = layout.width / 2;
-      const y = layout.height / 2 + pinTranslateY + PIN_TIP_OFFSET_Y;
+      const y = layout.height / 2 + pinTranslateY;
       try {
         const c = await mapRef.current.getCoordinateFromView([x, y]);
         if (Array.isArray(c) && c.length >= 2) {
@@ -629,7 +797,7 @@ export default function LocationPicker({
         if (Number.isFinite(lat) && Number.isFinite(lng) && typeof onConfirmRef.current === 'function') {
           lastMapCenterRef.current = { latitude: lat, longitude: lng };
           // Freeze pin Y at the fixed free-map offset (independent of sheet height).
-          if (immersiveRef.current) {
+          if (immersiveRef.current && !centeredPinRef.current) {
             frozenPinOffsetRef.current =
               -Math.round(FIXED_CAMERA_SHEET_PAD * 0.5) + PIN_EXTRA_UP_Y;
           }
@@ -661,6 +829,7 @@ export default function LocationPicker({
       const lat = Number(c[1]);
       if (Number.isFinite(lat) && Number.isFinite(lng)) {
         lastMapCenterRef.current = { latitude: lat, longitude: lng };
+        onLiveCenterChangeRef.current?.(lat, lng);
         // Keep controlled Camera props in sync so sheet re-renders don't snap
         // back to the old live-GPS centerCoordinate.
         setCameraTarget((prev) => {
@@ -720,6 +889,7 @@ export default function LocationPicker({
   useEffect(() => () => {
     if (dropTimeoutRef.current) clearTimeout(dropTimeoutRef.current);
     if (commitTimerRef.current) clearTimeout(commitTimerRef.current);
+    if (zoneVisibilityTimerRef.current) clearTimeout(zoneVisibilityTimerRef.current);
     clearZoomRetries();
   }, [clearZoomRetries]);
 
@@ -734,17 +904,21 @@ export default function LocationPicker({
     }
   }, [commitPin, confirming, recentering]);
 
-  // Parent (checkout sheet) calls confirm / locate via mutable apiRef.
+  // Parent (checkout sheet, or a search-box result) calls confirm / locate /
+  // fly-to via mutable apiRef.
   useEffect(() => {
     if (!apiRef) return undefined;
     apiRef.current = {
       confirmLocation: handleConfirm,
       locateToLive: () => locateToLive({ fromUser: true }),
+      // Moves the pin to an arbitrary coordinate (e.g. a search result) —
+      // same as a manual pan: requires Confirm afterwards, never autoCommits.
+      flyToCoordinate: (latitude, longitude) => flyTo(latitude, longitude, true, 15),
     };
     return () => {
       apiRef.current = null;
     };
-  }, [apiRef, handleConfirm, locateToLive]);
+  }, [apiRef, handleConfirm, locateToLive, flyTo]);
 
   const fabBottom = immersive
     ? Math.max(sheetReserve + spacing.sm, spacing.sm + insets.bottom)
@@ -753,7 +927,7 @@ export default function LocationPicker({
   // Pin optical offset is FIXED (collapsed sheet size) so dragging the sheet
   // never slides the tip across the map / looks like a recenter.
   const pinTranslateY = (() => {
-    if (!immersive) return 0;
+    if (!immersive || centeredPin) return 0;
     if (frozenPinOffsetRef.current != null) return frozenPinOffsetRef.current;
     return -Math.round(FIXED_CAMERA_SHEET_PAD * 0.5) + PIN_EXTRA_UP_Y;
   })();
@@ -800,6 +974,10 @@ export default function LocationPicker({
               attributionEnabled={false}
               scaleBarEnabled={false}
               onMapIdle={handleMapIdle}
+              onDidFinishLoadingMap={() => {
+                setMapStyleLoaded(true);
+                onMapReadyRef.current?.();
+              }}
             >
               <Mapbox.Camera
                 ref={cameraRef}
@@ -822,6 +1000,18 @@ export default function LocationPicker({
                 pitch={55}
                 padding={cameraPadding}
               />
+              {showZoneOverlay && deliveryZonesGeoJSON.features.length > 0 ? (
+                <Mapbox.ShapeSource id="delivery-zones-source" shape={deliveryZonesGeoJSON}>
+                  <Mapbox.FillLayer
+                    id="delivery-zones-fill"
+                    style={{ fillColor: ['get', 'color'], fillOpacity: 0.14 }}
+                  />
+                  <Mapbox.LineLayer
+                    id="delivery-zones-outline"
+                    style={{ lineColor: ['get', 'color'], lineWidth: 1, lineOpacity: 0.9 }}
+                  />
+                </Mapbox.ShapeSource>
+              ) : null}
             </Mapbox.MapView>
           ) : (
             <View style={styles.fallback}>
@@ -831,6 +1021,13 @@ export default function LocationPicker({
               </Text>
             </View>
           )}
+
+          {mapboxAvailable && !mapStyleLoaded ? (
+            <View pointerEvents="none" style={styles.loadingOverlay}>
+              <ActivityIndicator size="small" color="#fff" />
+              <Text style={styles.loadingOverlayText}>Loading map… slow internet connection</Text>
+            </View>
+          ) : null}
 
           {mapboxAvailable ? (
             <View
@@ -1031,7 +1228,18 @@ export default function LocationPicker({
       ) : null}
 
       {!hideActions ? (
-        <View style={[styles.actions, inline && styles.actionsInline, fullBleed && styles.actionsFullBleed]}>
+        <View
+          style={[
+            styles.actions,
+            inline && styles.actionsInline,
+            fullBleed && styles.actionsFullBleed,
+            // Immersive has no surrounding sheet/screen chrome of its own to
+            // absorb the bottom safe area (the modal-sheet path already gets
+            // it from `sheet`'s paddingBottom) — without this the Confirm
+            // button sits under the Android nav bar / iOS home indicator.
+            immersive && { paddingBottom: insets.bottom + spacing.md },
+          ]}
+        >
           {showConfirmHint ? (
             <View style={styles.confirmHintLine} accessibilityLiveRegion="polite">
               <Text style={styles.confirmHintText}>Press this button to confirm</Text>
@@ -1063,53 +1271,31 @@ export default function LocationPicker({
                 showConfirmHint && styles.actionBtnHinted,
               ]}
               onPress={handleConfirm}
-              disabled={confirming}
-              scaleTo={0.96}
+              disabled={confirming || (mapboxAvailable && !mapStyleLoaded)}
+              scaleTo={0.97}
               accessibilityRole="button"
               accessibilityLabel="Confirm location"
               accessibilityState={{ selected: pinActive }}
             >
-              <View
-                style={[
-                  styles.actionIconWrap,
-                  pinActive ? styles.actionIconWrapPrimary : styles.actionIconWrapSecondary,
-                ]}
+              {confirming ? (
+                <ActivityIndicator
+                  size="small"
+                  color={pinActive ? (colors.textInverse || '#fff') : (colors.saffronDark || colors.primary)}
+                />
+              ) : (
+                <AppIcon
+                  name="check"
+                  size={18}
+                  strokeWidth={2.6}
+                  color={pinActive ? (colors.textInverse || '#fff') : (colors.saffronDark || colors.primary)}
+                />
+              )}
+              <Text
+                style={pinActive ? styles.actionTitlePrimary : styles.actionTitleSecondary}
+                numberOfLines={1}
               >
-                {confirming ? (
-                  <ActivityIndicator
-                    size="small"
-                    color={
-                      pinActive
-                        ? (colors.textInverse || '#fff')
-                        : (colors.saffronDark || colors.primary)
-                    }
-                  />
-                ) : (
-                  <AppIcon
-                    name="check"
-                    size={16}
-                    color={
-                      pinActive
-                        ? (colors.textInverse || '#fff')
-                        : (colors.saffronDark || colors.primary)
-                    }
-                  />
-                )}
-              </View>
-              <View style={styles.actionTextCol}>
-                <Text
-                  style={pinActive ? styles.actionTitlePrimary : styles.actionTitleSecondary}
-                  numberOfLines={1}
-                >
-                  {confirming ? 'Saving…' : 'Confirm location'}
-                </Text>
-                <Text
-                  style={pinActive ? styles.actionSubtitlePrimary : styles.actionSubtitle}
-                  numberOfLines={2}
-                >
-                  Press when you are pinned to delivery location
-                </Text>
-              </View>
+                {confirming ? 'Saving…' : pinActive ? 'Location confirmed' : 'Confirm location'}
+              </Text>
             </PressableScale>
           </Animated.View>
 
@@ -1286,6 +1472,19 @@ const styles = StyleSheet.create({
   map: {
     flex: 1,
   },
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#000000',
+    gap: spacing.xs,
+    zIndex: 4,
+  },
+  loadingOverlayText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.85)',
+  },
   zoomHintRow: {
     position: 'absolute',
     left: spacing.md,
@@ -1448,14 +1647,14 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   actionBtn: {
-    alignSelf: 'stretch',
-    minHeight: 58,
-    borderRadius: radius.lg,
+    alignSelf: 'center',
+    width: '65%',
+    height: 54,
+    borderRadius: radius.pill,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
+    justifyContent: 'center',
+    gap: spacing.xs,
   },
   actionBtnSecondary: {
     backgroundColor: colors.bgSurface,
@@ -1464,58 +1663,24 @@ const styles = StyleSheet.create({
     ...shadows.sm,
   },
   actionBtnPrimary: {
-    backgroundColor: colors.saffron || colors.primary,
-    borderWidth: 1.5,
-    borderColor: colors.saffronDark || colors.primaryDark || colors.primary,
+    backgroundColor: colors.success,
     ...shadows.md,
   },
   actionBtnHinted: {
     borderColor: colors.saffron || colors.primary,
     borderWidth: 2,
   },
-  actionIconWrap: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  actionIconWrapSecondary: {
-    backgroundColor: colors.saffronLight || colors.primaryLight || '#FFF2EB',
-    borderWidth: 1,
-    borderColor: (colors.saffron || colors.primary) + '40',
-  },
-  actionIconWrapPrimary: {
-    backgroundColor: 'rgba(255,255,255,0.22)',
-  },
-  actionTextCol: {
-    flex: 1,
-    minWidth: 0,
-    gap: 1,
-  },
   actionTitleSecondary: {
-    fontSize: 13,
-    lineHeight: 16,
+    fontSize: 16,
+    lineHeight: 20,
     fontWeight: '700',
     color: colors.textPrimary,
   },
   actionTitlePrimary: {
-    fontSize: 13,
-    lineHeight: 16,
+    fontSize: 16,
+    lineHeight: 20,
     fontWeight: '800',
     color: colors.textInverse || '#fff',
-  },
-  actionSubtitle: {
-    fontSize: 10,
-    lineHeight: 12,
-    fontWeight: '500',
-    color: colors.textSecondary,
-  },
-  actionSubtitlePrimary: {
-    fontSize: 10,
-    lineHeight: 12,
-    fontWeight: '500',
-    color: 'rgba(255,255,255,0.82)',
   },
   tertiaryBtn: {
     minHeight: 40,

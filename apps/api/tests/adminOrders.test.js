@@ -5,7 +5,7 @@ const { pool } = require('../src/db/mysql');
 const jwt = require('jsonwebtoken');
 
 jest.mock('../src/db/mysql', () => ({
-  pool: { query: jest.fn(), getConnection: jest.fn() }
+  pool: { query: jest.fn().mockResolvedValue([[]]), getConnection: jest.fn() }
 }));
 
 jest.mock('../src/utils/coupons', () => ({
@@ -106,6 +106,7 @@ describe('Admin-placed orders (order on behalf of a customer)', () => {
         .mockResolvedValueOnce([[{ id: 42, name: 'Jane Doe', phone: '9990001111', whatsapp_number: '9990001111', address: 'Saved address', blocked: 0 }]]) // user
         .mockResolvedValueOnce([[{ shop_open: 1, delivery_available: 1, delivery_charge: 10, night_charge: 0 }]]) // settings
         .mockResolvedValueOnce([[{ id: 1, name: 'Pizza', price: 100, available: 1 }]]) // products
+        .mockResolvedValueOnce([[]]) // exclusion zones
         .mockResolvedValueOnce([{ insertId: 5001 }]) // INSERT orders
         .mockResolvedValueOnce([{ affectedRows: 1 }]); // INSERT order_items
 

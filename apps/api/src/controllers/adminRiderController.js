@@ -118,7 +118,7 @@ const loadAssignmentExtrasBatch = async (orderRows) => {
     [orderIds]
   );
   const [itemRows] = await pool.query(
-    `SELECT id, order_id, product_name, quantity, variant_label, shop_id
+    `SELECT id, order_id, product_name, quantity, variant_label, shop_id, shop_line_total, shop_rejected_at
      FROM order_items WHERE order_id IN (?)`,
     [orderIds]
   );
@@ -147,13 +147,29 @@ const loadAssignmentExtrasBatch = async (orderRows) => {
       variant_label: row.variant_label,
       shopId: row.shop_id,
       shop_id: row.shop_id,
+      shopLineTotal: row.shop_line_total !== null ? Number(row.shop_line_total) : null,
+      shop_line_total: row.shop_line_total !== null ? Number(row.shop_line_total) : null,
+      shopRejectedAt: row.shop_rejected_at,
+      shop_rejected_at: row.shop_rejected_at,
     });
   }
 
   return orderRows.map((orderRow) => {
     const order = shapeOrderSummary(orderRow);
-    order.shops = shopsByOrder.get(orderRow.id) || [];
-    order.items = itemsByOrder.get(orderRow.id) || [];
+    const orderItems = itemsByOrder.get(orderRow.id) || [];
+    const orderCancelled = orderRow.status === 'Cancelled';
+    // What VillKro owes each pickup shop for this order — same rule as the
+    // shop-owner app and admin Orders drawer: a rejected line or a cancelled
+    // order never counts, and lines with no configured shop price (NULL)
+    // are silently excluded rather than treated as free. Surfaced here so a
+    // dispatcher can see it at pickup time without opening the order drawer.
+    order.shops = (shopsByOrder.get(orderRow.id) || []).map((shop) => {
+      const shopTotal = orderCancelled ? 0 : orderItems
+        .filter((it) => it.shop_id === shop.id && it.shop_rejected_at === null && it.shop_line_total !== null)
+        .reduce((sum, it) => sum + it.shop_line_total, 0);
+      return { ...shop, shopTotal, shop_total: shopTotal };
+    });
+    order.items = orderItems;
     return order;
   });
 };

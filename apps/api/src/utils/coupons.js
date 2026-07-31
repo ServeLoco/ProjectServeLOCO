@@ -217,6 +217,56 @@ const isUserTargeted = async (connection, coupon, userId) => {
   return rows.length > 0;
 };
 
+// Safety valve for the ancestor walk below — a corrupt parent_zone_id chain
+// must not spin forever. Nesting is villages inside villages; single digits.
+const MAX_ZONE_NESTING_DEPTH = 20;
+
+/**
+ * The matched zone plus every zone it is nested inside, innermost first.
+ *
+ * Zone matching resolves to the MOST nested zone containing the customer, so
+ * a coupon targeted at the big "village" zone would otherwise miss every
+ * customer standing in one of its sub-village children. Selecting a parent
+ * zone therefore covers its descendants too; to exclude a child, give the
+ * child its own coupon.
+ */
+const getZoneAndAncestorIds = async (connection, zoneId) => {
+  const ids = [];
+  let currentId = zoneId;
+  const seen = new Set();
+  while (currentId != null && !seen.has(currentId) && ids.length < MAX_ZONE_NESTING_DEPTH) {
+    seen.add(currentId);
+    ids.push(currentId);
+    const [rows] = await connection.query(
+      'SELECT parent_zone_id FROM delivery_zones WHERE id = ?',
+      [currentId]
+    );
+    currentId = rows[0]?.parent_zone_id ?? null;
+  }
+  return ids;
+};
+
+/**
+ * Checks whether a delivery zone is in the coupon's target zone list.
+ * - 'all' → always true (also true for orders with no matched zone — flat
+ *   pricing or radius pricing disabled — since an 'all' coupon should not
+ *   care about zones at all).
+ * - 'selected' → false when the order has no matched zone (nothing to match
+ *   against); otherwise true if coupon_zones names the matched zone OR any
+ *   zone it is nested inside (see getZoneAndAncestorIds).
+ */
+const isZoneTargeted = async (connection, coupon, zoneId) => {
+  if (!coupon || coupon.target_zones !== 'selected') return true;
+  if (!zoneId) return false;
+  const zoneIds = await getZoneAndAncestorIds(connection, zoneId);
+  if (zoneIds.length === 0) return false;
+  const [rows] = await connection.query(
+    'SELECT 1 FROM coupon_zones WHERE coupon_id = ? AND delivery_zone_id IN (?) LIMIT 1',
+    [coupon.id, zoneIds]
+  );
+  return rows.length > 0;
+};
+
 // ─────────────────────────────────────────────────────────────────────────
 // Core validation
 // ─────────────────────────────────────────────────────────────────────────
@@ -236,6 +286,7 @@ const checkEligibility = async ({
   standardDeliveryCharge = null, // standard fee when deliveryCharge is the fast fee
   storeType = null,
   userId = null,
+  zoneId = null, // matched delivery zone id (pricing.zone.id), null when unzoned
   now = new Date(),
   connection,
   skipUsageChecks = false, // when true, skips per-user/global/first-order checks (for listing)
@@ -291,6 +342,19 @@ const checkEligibility = async ({
   if (coupon.max_order_amount !== null && coupon.max_order_amount !== undefined) {
     if (sub > toMoney(coupon.max_order_amount)) {
       return { ok: false, reason: `This coupon is only valid for orders up to ₹${toMoney(coupon.max_order_amount)}` };
+    }
+  }
+
+  // 7a. Zone targeting — independent of user identity, so checked whenever a
+  // connection is available (not just when userId is present). Must NOT be
+  // gated by skipUsageChecks: that flag exists to skip per-user/global usage
+  // limits for listing/hint purposes, not zone eligibility — a hint query
+  // skipping this would surface zone-restricted coupons as reachable from
+  // any zone (only the real apply path enforces the zone, confusingly).
+  if (connection) {
+    const zoneTargeted = await isZoneTargeted(connection, coupon, zoneId);
+    if (!zoneTargeted) {
+      return { ok: false, reason: 'This coupon is not available for your delivery zone' };
     }
   }
 
@@ -372,6 +436,7 @@ const validateCoupon = async ({
   standardDeliveryCharge = null,
   storeType = null,
   userId = null,
+  zoneId = null,
   now = new Date(),
   connection = null,
   itemCount = null,
@@ -399,6 +464,7 @@ const validateCoupon = async ({
     standardDeliveryCharge,
     storeType,
     userId,
+    zoneId,
     now,
     connection: conn,
     itemCount,
@@ -423,6 +489,7 @@ const validateCouponById = async ({
   standardDeliveryCharge = null,
   storeType = null,
   userId = null,
+  zoneId = null,
   now = new Date(),
   connection = null,
   itemCount = null,
@@ -449,6 +516,7 @@ const validateCouponById = async ({
     standardDeliveryCharge,
     storeType,
     userId,
+    zoneId,
     now,
     connection: conn,
     itemCount,
@@ -484,6 +552,7 @@ const pickBestAutoApply = async ({
   standardDeliveryCharge = null,
   storeType = null,
   userId = null,
+  zoneId = null,
   now = new Date(),
   connection = null,
   itemCount = null,
@@ -511,6 +580,7 @@ const pickBestAutoApply = async ({
       standardDeliveryCharge,
       storeType,
       userId,
+      zoneId,
       now,
       connection: conn,
       itemCount,
@@ -567,6 +637,7 @@ const findApplicableCoupons = async ({
   standardDeliveryCharge = null,
   storeType = null,
   userId = null,
+  zoneId = null,
   now = new Date(),
   connection = null,
   itemCount = null,
@@ -613,6 +684,7 @@ const findApplicableCoupons = async ({
       standardDeliveryCharge: evalStandardDelivery,
       storeType,
       userId,
+      zoneId,
       now,
       connection: conn,
       skipUsageChecks: false,
@@ -649,6 +721,7 @@ const findApplicableCoupons = async ({
       requiresCode: Boolean(coupon.requires_code),
       autoApply: Boolean(coupon.auto_apply),
       targetAudience: coupon.target_audience,
+      targetZones: coupon.target_zones,
       firstOrderOnly: Boolean(coupon.first_order_only),
       firstNOrders: coupon.first_n_orders,
       startsAt: coupon.starts_at,
@@ -684,6 +757,7 @@ const findNearestEligibleThreshold = async ({
   subtotal,
   storeType,
   userId,
+  zoneId,
   now,
   connection,
   skipUsageChecks,
@@ -708,6 +782,7 @@ const findNearestEligibleThreshold = async ({
       deliveryCharge: 0,
       storeType,
       userId,
+      zoneId,
       now,
       connection,
       skipUsageChecks,
@@ -746,6 +821,7 @@ const getNextFreeDeliveryThreshold = async ({
   subtotal,
   storeType = null,
   userId = null,
+  zoneId = null,
   now = new Date(),
   connection = null,
   itemCount = 0,
@@ -767,6 +843,7 @@ const getNextFreeDeliveryThreshold = async ({
     subtotal,
     storeType,
     userId,
+    zoneId,
     now,
     connection: conn,
     skipUsageChecks: true,
@@ -804,6 +881,7 @@ const getNearestUnlockableCoupon = async ({
   subtotal,
   storeType = null,
   userId = null,
+  zoneId = null,
   now = new Date(),
   connection = null,
   excludeCouponId = null,
@@ -829,6 +907,7 @@ const getNearestUnlockableCoupon = async ({
     subtotal,
     storeType,
     userId,
+    zoneId,
     now,
     connection: conn,
     skipUsageChecks: false,
@@ -894,5 +973,6 @@ module.exports = {
   getUserRedemptionCount,
   getGlobalRedemptionCount,
   isUserTargeted,
+  isZoneTargeted,
   buildSavingsText,
 };

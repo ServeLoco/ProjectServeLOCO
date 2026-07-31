@@ -1,6 +1,6 @@
 const { pool } = require('../db/mysql');
 const { normalizeStoreType } = require('../utils/storeMode');
-const { validatePagination } = require('../validators');
+const { validatePagination, isNumericAmount } = require('../validators');
 const { cleanupOrphanedImage } = require('./imageController');
 const microCache = require('../utils/microCache');
 
@@ -124,7 +124,7 @@ const attachVariants = async (products = []) => {
   const variantsMap = {};
   if (productIds.length > 0) {
     const [rows] = await pool.query(
-      `SELECT id, product_id, label, price, original_price, available, is_default, display_order
+      `SELECT id, product_id, label, price, shop_price, original_price, available, is_default, display_order
        FROM product_variants
        WHERE product_id IN (?) AND deleted = 0
        ORDER BY display_order ASC, id ASC`,
@@ -143,6 +143,10 @@ const attachVariants = async (products = []) => {
       productId: v.product_id, product_id: v.product_id,
       label: v.label,
       price: Number(v.price),
+      // NULL stays NULL (not 0) — "no shop price configured" is a distinct
+      // state the admin grid renders as "—".
+      shopPrice: v.shop_price === null || v.shop_price === undefined ? null : Number(v.shop_price),
+      shop_price: v.shop_price === null || v.shop_price === undefined ? null : Number(v.shop_price),
       originalPrice: v.original_price, original_price: v.original_price,
       available: Boolean(v.available),
       isDefault: Boolean(v.is_default), is_default: Boolean(v.is_default),
@@ -179,17 +183,26 @@ const syncProductVariants = async (connection, productId, variants, variantPromp
   if (variants !== undefined) {
     const payloadIds = new Set();
     for (const v of variants) {
+      // shop_price is the one field that is NOT full-replace here: a payload
+      // that omits the key keeps whatever is stored. The product drawer and
+      // older clients don't send it, and silently nulling it would erase what
+      // we owe the shop. Sending an explicit null still clears it.
+      const sendsShopPrice = v.shop_price !== undefined;
       if (v.id) {
         payloadIds.add(Number(v.id));
         // AND product_id = ? prevents cross-product id abuse.
         await connection.query(
-          'UPDATE product_variants SET label = ?, price = ?, original_price = ?, available = ?, is_default = ?, display_order = ?, deleted = 0 WHERE id = ? AND product_id = ?',
-          [v.label, v.price, v.original_price, v.available ? 1 : 0, v.is_default ? 1 : 0, v.display_order, v.id, productId]
+          `UPDATE product_variants SET label = ?, price = ?, ${sendsShopPrice ? 'shop_price = ?, ' : ''}original_price = ?, available = ?, is_default = ?, display_order = ?, deleted = 0 WHERE id = ? AND product_id = ?`,
+          [
+            v.label, v.price,
+            ...(sendsShopPrice ? [v.shop_price] : []),
+            v.original_price, v.available ? 1 : 0, v.is_default ? 1 : 0, v.display_order, v.id, productId,
+          ]
         );
       } else {
         const [insertResult] = await connection.query(
-          'INSERT INTO product_variants (product_id, label, price, original_price, available, is_default, display_order) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [productId, v.label, v.price, v.original_price, v.available ? 1 : 0, v.is_default ? 1 : 0, v.display_order]
+          'INSERT INTO product_variants (product_id, label, price, shop_price, original_price, available, is_default, display_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          [productId, v.label, v.price, sendsShopPrice ? v.shop_price : null, v.original_price, v.available ? 1 : 0, v.is_default ? 1 : 0, v.display_order]
         );
         payloadIds.add(Number(insertResult.insertId));
       }
@@ -212,8 +225,30 @@ const syncProductVariants = async (connection, productId, variants, variantPromp
     if (variants.length > 0) {
       const defaultVariant = variants.find(v => v.is_default) || variants[0];
       await connection.query('UPDATE products SET price = ? WHERE id = ?', [defaultVariant.price, productId]);
+      // Same invariant for the shop-cost mirror, but re-read from the row
+      // instead of the payload — after the upsert above the DB holds the
+      // truth whether shop_price was sent, preserved, or explicitly cleared.
+      await syncProductFromDefaultVariant(connection, productId);
     }
   }
+};
+
+// products.{price,shop_price} := the default (or first) live variant's
+// values. Mirrors the products.price invariant so anything reading the
+// product row alone (reports, cart fallback) still sees numbers consistent
+// with what the variant actually charges / costs. Reads from the DB rather
+// than a payload so any caller that already wrote the variant row (variant
+// upsert above, or the standalone pricing endpoint) can call this after.
+const syncProductFromDefaultVariant = async (connection, productId) => {
+  const [rows] = await connection.query(
+    `SELECT price, shop_price FROM product_variants
+     WHERE product_id = ? AND deleted = 0
+     ORDER BY is_default DESC, display_order ASC, id ASC
+     LIMIT 1`,
+    [productId]
+  );
+  if (rows.length === 0) return;
+  await connection.query('UPDATE products SET price = ?, shop_price = ? WHERE id = ?', [rows[0].price, rows[0].shop_price, productId]);
 };
 
 const getProducts = async (req, res) => {
@@ -443,7 +478,7 @@ const getProductById = async (req, res) => {
 
 const createProduct = async (req, res) => {
   // Normal products require category. Combos are bundles and do not require category.
-  const { name, price, category_id, unit, description, image_id, available, featured, display_order, original_price, discount_label, available_from_time, available_until_time, variants, variant_prompt, shop_id } = req.validatedData;
+  const { name, price, shop_price, category_id, unit, description, image_id, available, featured, display_order, original_price, discount_label, available_from_time, available_until_time, variants, variant_prompt, shop_id } = req.validatedData;
 
   const finalDisplayOrder = display_order !== undefined ? display_order : 0;
   if (finalDisplayOrder > 0) {
@@ -468,9 +503,9 @@ const createProduct = async (req, res) => {
   try {
     await connection.beginTransaction();
     const [result] = await connection.query(
-      'INSERT INTO products (name, price, category_id, unit, description, image_id, available, is_combo, featured, display_order, original_price, discount_label, available_from_time, available_until_time, shop_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO products (name, price, shop_price, category_id, unit, description, image_id, available, is_combo, featured, display_order, original_price, discount_label, available_from_time, available_until_time, shop_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
-        name, price, category_id, unit, description, image_id,
+        name, price, shop_price === undefined ? null : shop_price, category_id, unit, description, image_id,
         available !== undefined ? available : true,
         false,
         featured !== undefined ? featured : false,
@@ -498,9 +533,9 @@ const createProduct = async (req, res) => {
 const updateProduct = async (req, res) => {
   // Normal products require category. Combos are bundles and do not require category.
   const { id } = req.params;
-  const { name, price, category_id, unit, description, image_id, available, featured, display_order, original_price, discount_label, available_from_time, available_until_time, variants, variant_prompt, shop_id } = req.validatedData;
+  const { name, price, shop_price, category_id, unit, description, image_id, available, featured, display_order, original_price, discount_label, available_from_time, available_until_time, variants, variant_prompt, shop_id } = req.validatedData;
 
-  const [existing] = await pool.query('SELECT id, image_id, shop_id FROM products WHERE id = ? AND deleted = 0', [id]);
+  const [existing] = await pool.query('SELECT id, image_id, shop_id, shop_price FROM products WHERE id = ? AND deleted = 0', [id]);
   if (existing.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Product not found' });
   }
@@ -509,6 +544,10 @@ const updateProduct = async (req, res) => {
   // caller that omits the key entirely (vs. sending shop_id: null to clear
   // it) must not silently wipe an existing assignment.
   const finalShopId = shop_id !== undefined ? shop_id : existing[0].shop_id;
+  // Same hazard for shop_price: the product edit drawer doesn't manage this
+  // field (the pricing grid does), so a plain PUT must not silently wipe a
+  // price the grid set. Omit the key to preserve; send null to clear.
+  const finalShopPrice = shop_price !== undefined ? shop_price : existing[0].shop_price;
 
   const finalDisplayOrder = display_order !== undefined ? display_order : 0;
   if (finalDisplayOrder > 0) {
@@ -534,9 +573,9 @@ const updateProduct = async (req, res) => {
   try {
     await connection.beginTransaction();
     await connection.query(
-      'UPDATE products SET name = ?, price = ?, category_id = ?, unit = ?, description = ?, image_id = ?, available = ?, is_combo = ?, featured = ?, display_order = ?, original_price = ?, discount_label = ?, available_from_time = ?, available_until_time = ?, shop_id = ? WHERE id = ?',
+      'UPDATE products SET name = ?, price = ?, shop_price = ?, category_id = ?, unit = ?, description = ?, image_id = ?, available = ?, is_combo = ?, featured = ?, display_order = ?, original_price = ?, discount_label = ?, available_from_time = ?, available_until_time = ?, shop_id = ? WHERE id = ?',
       [
-        name, price, category_id, unit, description, image_id, available,
+        name, price, finalShopPrice, category_id, unit, description, image_id, available,
         false,
         featured !== undefined ? featured : false,
         finalDisplayOrder,
@@ -715,6 +754,42 @@ const updateProductAvailability = async (req, res) => {
   res.status(200).json({ message: 'Product availability updated', product: updatedRows[0] });
 };
 
+// Mirrors updateProductAvailability but scoped to one variant row, so turning
+// a size/pack off only hides that variant (VariantSheet already renders
+// variant.available === false as an "Out" pill) instead of the whole product.
+const updateVariantAvailability = async (req, res) => {
+  const { id, variantId } = req.params;
+  const finalAvail = req.validatedData?.available;
+  if (finalAvail === undefined) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Availability status required' });
+  }
+
+  const normalizedAvailable = finalAvail === true || finalAvail === 'true' || finalAvail === 1 || finalAvail === '1';
+  const [result] = await pool.query(
+    'UPDATE product_variants SET available = ? WHERE id = ? AND product_id = ? AND deleted = 0',
+    [normalizedAvailable ? 1 : 0, variantId, id],
+  );
+  if (result.affectedRows === 0) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Variant not found' });
+  }
+
+  bustProductCaches();
+  try {
+    const { emitToAllCustomers } = require('../realtime/socket');
+    // Same event name product-availability listeners already invalidate the
+    // customer app's product/catalog caches on — no new subscription needed.
+    emitToAllCustomers('product.availability.updated', {
+      productId: Number(id),
+      id: Number(id),
+      variantId: Number(variantId),
+      available: Boolean(normalizedAvailable),
+    });
+  } catch (_) {
+    // Realtime is best-effort — availability is already persisted.
+  }
+  res.status(200).json({ message: 'Variant availability updated', variantId: Number(variantId), available: normalizedAvailable });
+};
+
 const updateProductImage = async (req, res) => {
   const { id } = req.params;
   const { imageId, image_id } = req.body;
@@ -749,6 +824,7 @@ module.exports = {
   getAdminProductById,
   deleteProduct,
   updateProductAvailability,
+  updateVariantAvailability,
   updateProductImage,
   attachVariants
 };
@@ -879,5 +955,130 @@ const bulkDeleteProducts = async (req, res) => {
   return res.status(200).json({ deleted, skipped, errors: [] });
 };
 
+// PATCH /api/admin/products/pricing — grid-style price editing (VARIANTS ARE
+// SEPARATE ROWS in the admin UI, per the "treat variants as different
+// products" requirement). Unlike PUT /products/:id (full replace of the
+// whole product) or PATCH /products/bulk (one value applied to many ids),
+// this takes one row per product-or-variant, each with its own price/shopPrice,
+// and touches only those two columns. Body: { rows: [{ productId, variantId?,
+// price?, shopPrice? }] }, max 200 rows per call (grid page size, not a hard
+// product limit). Omitted price/shopPrice on a row leaves that column
+// untouched; explicit null clears shopPrice.
+const updateProductPricing = async (req, res) => {
+  const { rows } = req.body;
+  if (!Array.isArray(rows) || rows.length === 0) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: '`rows` must be a non-empty array.' });
+  }
+  if (rows.length > 200) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'At most 200 rows per request.' });
+  }
+
+  const errors = [];
+  const cleanRows = [];
+  rows.forEach((row, index) => {
+    const productId = parseInt(row.productId ?? row.product_id, 10);
+    if (!Number.isFinite(productId) || productId <= 0) {
+      errors.push({ index, message: 'productId is required' });
+      return;
+    }
+    const rawVariantId = row.variantId ?? row.variant_id;
+    const variantId = rawVariantId !== undefined && rawVariantId !== null ? parseInt(rawVariantId, 10) : null;
+    if (rawVariantId !== undefined && rawVariantId !== null && (!Number.isFinite(variantId) || variantId <= 0)) {
+      errors.push({ index, productId, message: 'variantId must be a valid id' });
+      return;
+    }
+
+    const hasPrice = row.price !== undefined && row.price !== null && row.price !== '';
+    if (hasPrice && !isNumericAmount(row.price)) {
+      errors.push({ index, productId, message: 'price must be a valid amount' });
+      return;
+    }
+    const rawShopPrice = row.shopPrice !== undefined ? row.shopPrice : row.shop_price;
+    const clearsShopPrice = rawShopPrice === null || rawShopPrice === '';
+    const hasShopPrice = rawShopPrice !== undefined && !clearsShopPrice;
+    if (hasShopPrice && !isNumericAmount(rawShopPrice)) {
+      errors.push({ index, productId, message: 'shopPrice must be a valid amount' });
+      return;
+    }
+    if (!hasPrice && !hasShopPrice && !clearsShopPrice) {
+      errors.push({ index, productId, message: 'At least one of price or shopPrice is required' });
+      return;
+    }
+
+    cleanRows.push({
+      productId,
+      variantId,
+      price: hasPrice ? Number(row.price) : undefined,
+      shopPrice: hasShopPrice ? Number(rawShopPrice) : (clearsShopPrice ? null : undefined),
+    });
+  });
+
+  if (cleanRows.length === 0) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'No valid rows to update.', errors });
+  }
+
+  const connection = await pool.getConnection();
+  let updated = 0;
+  const touchedProductIds = new Set();
+  try {
+    await connection.beginTransaction();
+    for (const row of cleanRows) {
+      if (row.variantId) {
+        const sets = [];
+        const values = [];
+        if (row.price !== undefined) { sets.push('price = ?'); values.push(row.price); }
+        if (row.shopPrice !== undefined) { sets.push('shop_price = ?'); values.push(row.shopPrice); }
+        if (sets.length === 0) continue;
+        values.push(row.variantId, row.productId);
+        // AND product_id = ? prevents a variantId from one product silently
+        // repricing a different product (cross-product id abuse).
+        const [result] = await connection.query(
+          `UPDATE product_variants SET ${sets.join(', ')} WHERE id = ? AND product_id = ? AND deleted = 0`,
+          values
+        );
+        if (result.affectedRows === 0) {
+          errors.push({ productId: row.productId, variantId: row.variantId, message: 'Variant not found for this product' });
+          continue;
+        }
+        updated += 1;
+        touchedProductIds.add(row.productId);
+      } else {
+        const sets = [];
+        const values = [];
+        if (row.price !== undefined) { sets.push('price = ?'); values.push(row.price); }
+        if (row.shopPrice !== undefined) { sets.push('shop_price = ?'); values.push(row.shopPrice); }
+        if (sets.length === 0) continue;
+        values.push(row.productId);
+        const [result] = await connection.query(
+          `UPDATE products SET ${sets.join(', ')} WHERE id = ? AND deleted = 0`,
+          values
+        );
+        if (result.affectedRows === 0) {
+          errors.push({ productId: row.productId, message: 'Product not found' });
+          continue;
+        }
+        updated += 1;
+      }
+    }
+
+    // A variant row's price/shop_price may have just diverged from the
+    // products.price/shop_price mirror — re-sync each touched product from
+    // its (possibly still-default) variant, same invariant as syncProductVariants.
+    for (const productId of touchedProductIds) {
+      await syncProductFromDefaultVariant(connection, productId);
+    }
+
+    await connection.commit();
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    connection.release();
+  }
+
+  bustProductCaches();
+  res.status(200).json({ updated, skipped: cleanRows.length - updated, errors });
+};
+
 // Re-export with bulk additions
-Object.assign(module.exports, { bulkUpdateProducts, bulkDeleteProducts });
+Object.assign(module.exports, { bulkUpdateProducts, bulkDeleteProducts, updateProductPricing });

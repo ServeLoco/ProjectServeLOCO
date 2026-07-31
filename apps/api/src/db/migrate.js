@@ -2,6 +2,52 @@ const mysql = require('mysql2/promise');
 const config = require('../config/env');
 const { getMysqlSslOptions } = require('./mysqlSsl');
 
+// One-time backfill helpers: turn a legacy circle/square/rectangle zone
+// (defined around the old shared shop-center pin) into an equivalent polygon
+// boundary, so pre-existing zones survive the move to per-zone polygons.
+// Only used during the delivery_zones upgrade path below.
+const LEGACY_KM_PER_DEG_LAT = 110.574;
+const LEGACY_KM_PER_DEG_LNG_AT_EQUATOR = 111.320;
+
+function legacyOffsetPoint(lat, lng, dLatKm, dLngKm) {
+  return {
+    lat: lat + dLatKm / LEGACY_KM_PER_DEG_LAT,
+    lng: lng + dLngKm / (LEGACY_KM_PER_DEG_LNG_AT_EQUATOR * Math.cos(lat * Math.PI / 180)),
+  };
+}
+
+function legacyShapeToBoundary(zone, centerLat, centerLng) {
+  const shape = zone.shape || 'circle';
+  if (shape === 'square') {
+    const half = Number(zone.side_km) / 2 || 1;
+    return [
+      legacyOffsetPoint(centerLat, centerLng, -half, -half),
+      legacyOffsetPoint(centerLat, centerLng, -half, half),
+      legacyOffsetPoint(centerLat, centerLng, half, half),
+      legacyOffsetPoint(centerLat, centerLng, half, -half),
+    ];
+  }
+  if (shape === 'rectangle') {
+    const halfW = Number(zone.width_km) / 2 || 1;
+    const halfH = Number(zone.height_km) / 2 || 1;
+    return [
+      legacyOffsetPoint(centerLat, centerLng, -halfH, -halfW),
+      legacyOffsetPoint(centerLat, centerLng, -halfH, halfW),
+      legacyOffsetPoint(centerLat, centerLng, halfH, halfW),
+      legacyOffsetPoint(centerLat, centerLng, halfH, -halfW),
+    ];
+  }
+  // circle -> 24-sided polygon approximation
+  const radius = Number(zone.radius_km) || 1;
+  const sides = 24;
+  const points = [];
+  for (let i = 0; i < sides; i++) {
+    const angle = (2 * Math.PI * i) / sides;
+    points.push(legacyOffsetPoint(centerLat, centerLng, radius * Math.cos(angle), radius * Math.sin(angle)));
+  }
+  return points;
+}
+
 const migrate = async () => {
   let connection;
   try {
@@ -124,6 +170,13 @@ const migrate = async () => {
     // Pickup pin for rider map — set manually in admin Shops page.
     await ensureColumn('shops', 'latitude', 'latitude DECIMAL(10,7) NULL AFTER active');
     await ensureColumn('shops', 'longitude', 'longitude DECIMAL(10,7) NULL AFTER latitude');
+    // Optional daily auto-open/auto-close schedule. Both NULL (default) means
+    // no schedule — is_open stays purely manual, unchanged from today. Set
+    // together via PATCH /shop/me/schedule; the sweeper (shopScheduleSweeper)
+    // flips is_open the minute the clock matches either column, then leaves it
+    // alone until the next boundary — manual toggles in between are untouched.
+    await ensureColumn('shops', 'open_time', 'open_time TIME NULL AFTER longitude');
+    await ensureColumn('shops', 'close_time', 'close_time TIME NULL AFTER open_time');
 
     // Riders — delivery partners. Same Firebase OTP login as customers;
     // user_id points at a users row. active = admin kill switch; is_online =
@@ -309,6 +362,10 @@ const migrate = async () => {
     // Group linkage (shop owner's own grouping, e.g. "Starters"). NULL =
     // ungrouped. No FK, same rationale as shop_id above.
     await ensureColumn('products', 'group_id', 'group_id INT NULL AFTER shop_id');
+    // Cost price owed to the owning shop. NULL = not configured yet (renders
+    // as "—" in admin), deliberately distinct from 0.00 which means the shop
+    // supplies the item free. Commission = price - shop_price, always derived.
+    await ensureColumn('products', 'shop_price', 'shop_price DECIMAL(10, 2) NULL AFTER price');
     console.log('Products table ready.');
 
     // Product Variants Table — purchasable child rows (sizes/types) of a
@@ -333,6 +390,10 @@ const migrate = async () => {
         INDEX idx_variant_product (product_id, deleted, available)
       );
     `);
+    // Per-variant cost price owed to the shop. Same NULL semantics as
+    // products.shop_price, which mirrors the DEFAULT variant's value (see
+    // syncProductVariants) exactly like products.price already does.
+    await ensureColumn('product_variants', 'shop_price', 'shop_price DECIMAL(10, 2) NULL AFTER price');
     console.log('Product variants table ready.');
 
     await connection.query(`
@@ -487,6 +548,11 @@ const migrate = async () => {
     // Distinct from `note`, which is the customer's own checkout note.
     // Visible to admins and to the shop owner (getMyOrderHistory).
     await ensureColumn('orders', 'admin_remark', 'admin_remark TEXT DEFAULT NULL AFTER note');
+    // Zone-pricing snapshots: which delivery_zones row priced this order and the
+    // ETA promised for the chosen delivery type. No FK — snapshots must outlive
+    // zone rows (zones are hard-deleted).
+    await ensureColumn('orders', 'delivery_zone_id', 'delivery_zone_id INT NULL AFTER free_delivery_offer_snapshot');
+    await ensureColumn('orders', 'delivery_eta_minutes_snapshot', 'delivery_eta_minutes_snapshot INT NULL AFTER delivery_zone_id');
 
     // Performance indexes for common order filter queries
     const ensureIndex = async (tableName, indexName, columns) => {
@@ -603,6 +669,12 @@ const migrate = async () => {
       await connection.query(`ALTER TABLE order_items DROP FOREIGN KEY ${fk.CONSTRAINT_NAME}`);
     }
     await ensureIndex('order_items', 'idx_order_items_shop', 'shop_id, order_id');
+    // Shop-cost snapshot, same rationale as the unit_price/line_total
+    // snapshots above: what we owe a shop for a past order must never change
+    // when the catalog is re-priced. NULL = the item had no shop price at
+    // purchase time (unconfigured, or a combo, which never has a shop).
+    await ensureColumn('order_items', 'shop_unit_price', 'shop_unit_price DECIMAL(10, 2) NULL AFTER unit_price');
+    await ensureColumn('order_items', 'shop_line_total', 'shop_line_total DECIMAL(10, 2) NULL AFTER line_total');
     console.log('Order Items table ready.');
 
     // Rider order offers — sequential Accept/Reject attempts (one pending offer
@@ -678,6 +750,10 @@ const migrate = async () => {
     // window — just a flat amount added to the bill while enabled).
     await ensureColumn('settings', 'rain_charge_enabled', 'rain_charge_enabled BOOLEAN DEFAULT FALSE AFTER current_version');
     await ensureColumn('settings', 'rain_charge', 'rain_charge DECIMAL(10, 2) DEFAULT 0.00 AFTER rain_charge_enabled');
+    // Radius-based zone pricing master switch. Zone pricing applies only when
+    // this is on AND shop_latitude/shop_longitude are set AND at least one
+    // active delivery_zones row exists — otherwise flat pricing is used.
+    await ensureColumn('settings', 'radius_pricing_active', 'radius_pricing_active BOOLEAN DEFAULT FALSE AFTER rain_charge');
 
     // Drop free_delivery_above column if it exists (Task 1.1)
     try {
@@ -694,6 +770,134 @@ const migrate = async () => {
     }
     
     console.log('Settings table ready.');
+
+    // Delivery Zones — each zone is its own irregular polygon (`boundary`,
+    // an array of {lat,lng} vertices), independent of any shared center pin.
+    // Zones may nest: a small "sub-village" zone can carry a parent_zone_id
+    // pointing at the big "village" zone that geographically contains it —
+    // when a customer's point falls inside both, the child zone wins (see
+    // matchZone in deliveryPricing.js), letting the child carve a
+    // differently-priced hole out of its parent's coverage. Per-shape
+    // duplicate-size checks from the old shape system are gone — polygons
+    // aren't compared for "duplicate size"; validation lives in
+    // deliveryZonesController.js (min 3 vertices, parent must exist).
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS delivery_zones (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NULL,
+        boundary JSON NULL,
+        parent_zone_id INT NULL,
+        normal_charge DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        fast_charge DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        normal_eta_minutes INT NOT NULL DEFAULT 60,
+        fast_eta_minutes INT NOT NULL DEFAULT 30,
+        night_charge DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+        cod_enabled TINYINT(1) NOT NULL DEFAULT 1,
+        active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        CONSTRAINT fk_delivery_zones_parent FOREIGN KEY (parent_zone_id) REFERENCES delivery_zones(id) ON DELETE SET NULL
+      );
+    `);
+    // Older installs: add the new columns, backfill `boundary` for any
+    // pre-existing circle/square/rectangle rows using the legacy shared
+    // shop-center pin, then retire the old shape columns entirely.
+    await ensureColumn('delivery_zones', 'name', 'name VARCHAR(255) NULL AFTER id');
+    await ensureColumn('delivery_zones', 'boundary', 'boundary JSON NULL AFTER name');
+    await ensureColumn('delivery_zones', 'parent_zone_id', 'parent_zone_id INT NULL AFTER boundary');
+    try {
+      await connection.query(
+        'ALTER TABLE delivery_zones ADD CONSTRAINT fk_delivery_zones_parent FOREIGN KEY (parent_zone_id) REFERENCES delivery_zones(id) ON DELETE SET NULL'
+      );
+    } catch (e) {
+      // ER_DUP_KEYNAME / ER_FK_DUP_NAME just mean a previous run already added
+      // it. Anything else (engine mismatch, permissions) must NOT be silently
+      // swallowed — without this constraint, deleting a parent zone leaves
+      // children pointing at a row that no longer exists, and the delete
+      // handler's "children fall back to ON DELETE SET NULL" promise is a lie.
+      const alreadyExists = e.code === 'ER_DUP_KEYNAME' || e.code === 'ER_FK_DUP_NAME'
+        || e.errno === 1061 || e.errno === 1826;
+      if (!alreadyExists) throw e;
+    }
+
+    // Checked independently (not "does `shape` exist implies the rest do
+    // too") — a DROP COLUMN can fail silently mid-cleanup on a prior run
+    // (each drop below is its own best-effort try/catch), leaving some
+    // legacy columns gone and others still present. Building the SELECT from
+    // whichever of these actually exist keeps re-runs self-healing instead
+    // of crashing on a column that's already gone.
+    const LEGACY_SHAPE_COLUMNS = ['shape', 'radius_km', 'side_km', 'width_km', 'height_km'];
+    const [existingLegacyCols] = await connection.query(`
+      SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'delivery_zones' AND COLUMN_NAME IN (?)
+    `, [config.MYSQL_DATABASE, LEGACY_SHAPE_COLUMNS]);
+    const presentLegacyCols = LEGACY_SHAPE_COLUMNS.filter(
+      (col) => existingLegacyCols.some((row) => row.COLUMN_NAME === col)
+    );
+    if (presentLegacyCols.length > 0) {
+      const [legacyZones] = await connection.query(
+        `SELECT id, ${presentLegacyCols.join(', ')} FROM delivery_zones WHERE boundary IS NULL`
+      );
+      // The legacy shapes were all defined as offsets from the shared shop
+      // pin. Without a real pin there is no way to reconstruct where they
+      // were, and Number(null) === 0 would happily "succeed" by placing every
+      // zone at 0,0 in the Atlantic. Bail out of BOTH the backfill and the
+      // column drop in that case, so the original shape values survive for a
+      // later run (or a manual fix) instead of being destroyed.
+      let canDropLegacyColumns = true;
+      if (legacyZones.length > 0) {
+        const [settingsRows] = await connection.query('SELECT shop_latitude, shop_longitude FROM settings LIMIT 1');
+        const rawLat = settingsRows[0]?.shop_latitude;
+        const rawLng = settingsRows[0]?.shop_longitude;
+        const legacyCenterLat = Number(rawLat);
+        const legacyCenterLng = Number(rawLng);
+        const hasLegacyCenter = rawLat !== null && rawLat !== undefined && rawLat !== ''
+          && rawLng !== null && rawLng !== undefined && rawLng !== ''
+          && Number.isFinite(legacyCenterLat) && Number.isFinite(legacyCenterLng);
+
+        if (!hasLegacyCenter) {
+          canDropLegacyColumns = false;
+          console.warn(
+            `[migrate] ${legacyZones.length} legacy delivery zone(s) still need a polygon boundary, but ` +
+            'settings.shop_latitude/shop_longitude is not set — cannot reconstruct where those shapes were. ' +
+            'Keeping the legacy shape columns intact. Set the shop pin in Settings and restart, or redraw the zones by hand.'
+          );
+        } else {
+          for (const zone of legacyZones) {
+            const boundary = legacyShapeToBoundary(zone, legacyCenterLat, legacyCenterLng);
+            await connection.query('UPDATE delivery_zones SET boundary = ? WHERE id = ?', [JSON.stringify(boundary), zone.id]);
+          }
+        }
+      }
+      if (canDropLegacyColumns) {
+        try { await connection.query('ALTER TABLE delivery_zones DROP INDEX uq_delivery_zone_radius'); } catch (e) { /* already gone */ }
+        for (const col of presentLegacyCols) {
+          try { await connection.query(`ALTER TABLE delivery_zones DROP COLUMN ${col}`); } catch (e) { /* best-effort */ }
+        }
+      }
+    }
+    console.log('Delivery zones table ready.');
+
+    // Delivery exclusion zones — independent no-delivery squares (e.g. a govt
+    // building's compound) layered on top of the zone/flat pricing above.
+    // Each carries its own center pin, so it can sit anywhere regardless of
+    // which pricing zone contains it. Checked before zone matching in
+    // resolveDeliveryPricing — a hit blocks delivery outright, even inside
+    // an otherwise-deliverable zone. See utils/deliveryPricing.js.
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS delivery_exclusion_zones (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        label VARCHAR(255) NOT NULL,
+        center_lat DECIMAL(10,7) NOT NULL,
+        center_lng DECIMAL(10,7) NOT NULL,
+        side_km DECIMAL(6,2) NOT NULL,
+        message VARCHAR(255) NULL,
+        active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('Delivery exclusion zones table ready.');
 
     // Offers Table
     await connection.query(`
@@ -1224,6 +1428,28 @@ const migrate = async () => {
       );
     `);
     console.log('Coupon users table ready.');
+
+    // Zone targeting mirrors user targeting: 'all' (every zone, incl. flat/
+    // non-zone pricing) or 'selected' (coupon_zones rows gate eligibility).
+    // A cart/order with no matched zone (flat pricing, or radius pricing off)
+    // is only blocked by a 'selected' coupon if it actually requires a zone —
+    // see isZoneTargeted in utils/coupons.js for the exact semantics.
+    await ensureColumn('coupons', 'target_zones', "target_zones ENUM('all','selected') NOT NULL DEFAULT 'all' AFTER target_audience");
+
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS coupon_zones (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        coupon_id INT NOT NULL,
+        delivery_zone_id INT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uniq_coupon_zone (coupon_id, delivery_zone_id),
+        FOREIGN KEY (coupon_id) REFERENCES coupons(id) ON DELETE CASCADE,
+        FOREIGN KEY (delivery_zone_id) REFERENCES delivery_zones(id) ON DELETE CASCADE,
+        INDEX idx_coupon_zones_coupon (coupon_id),
+        INDEX idx_coupon_zones_zone (delivery_zone_id)
+      );
+    `);
+    console.log('Coupon zones table ready.');
 
     // Snapshot coupon details on the order so reports/refunds survive
     // even if the coupon is later edited or soft-deleted.

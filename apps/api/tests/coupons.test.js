@@ -21,7 +21,7 @@ const orderRoutes = require('../src/routes/orderRoutes');
 
 jest.mock('../src/db/mysql', () => ({
   pool: {
-    query: jest.fn(),
+    query: jest.fn().mockResolvedValue([[]]),
     getConnection: jest.fn(),
   },
 }));
@@ -438,6 +438,89 @@ describe('coupons.isUserTargeted', () => {
   });
 });
 
+describe('coupons.isZoneTargeted', () => {
+  it('returns true for target_zones="all" without hitting the DB', async () => {
+    const conn = { query: jest.fn() };
+    const result = await coupons.isZoneTargeted(conn, buildCoupon({ target_zones: 'all' }), 3);
+    expect(result).toBe(true);
+    expect(conn.query).not.toHaveBeenCalled();
+  });
+
+  it('returns true for target_zones="all" even with no matched zone (unzoned cart)', async () => {
+    const conn = { query: jest.fn() };
+    const result = await coupons.isZoneTargeted(conn, buildCoupon({ target_zones: 'all' }), null);
+    expect(result).toBe(true);
+    expect(conn.query).not.toHaveBeenCalled();
+  });
+
+  it('returns false for target_zones="selected" when there is no matched zone, without hitting the DB', async () => {
+    const conn = { query: jest.fn() };
+    const result = await coupons.isZoneTargeted(conn, buildCoupon({ target_zones: 'selected', id: 7 }), null);
+    expect(result).toBe(false);
+    expect(conn.query).not.toHaveBeenCalled();
+  });
+
+  it('returns true for target_zones="selected" when a coupon_zones row exists for the zone', async () => {
+    const conn = {
+      query: jest.fn()
+        .mockResolvedValueOnce([[{ parent_zone_id: null }]]) // zone 3 is top-level
+        .mockResolvedValueOnce([[{ '1': 1 }]]),
+    };
+    const result = await coupons.isZoneTargeted(conn, buildCoupon({ target_zones: 'selected', id: 7 }), 3);
+    expect(result).toBe(true);
+    expect(conn.query).toHaveBeenLastCalledWith(
+      'SELECT 1 FROM coupon_zones WHERE coupon_id = ? AND delivery_zone_id IN (?) LIMIT 1',
+      [7, [3]]
+    );
+  });
+
+  // Zone matching always resolves to the most nested zone, so a coupon aimed
+  // at a parent village would otherwise never fire for anyone standing in one
+  // of its sub-village children.
+  it('returns true for target_zones="selected" when the coupon targets an ANCESTOR of the matched zone', async () => {
+    const conn = {
+      query: jest.fn()
+        .mockResolvedValueOnce([[{ parent_zone_id: 2 }]])    // zone 5's parent is 2
+        .mockResolvedValueOnce([[{ parent_zone_id: null }]]) // zone 2 is top-level
+        .mockResolvedValueOnce([[{ '1': 1 }]]),              // coupon_zones has zone 2
+    };
+    const result = await coupons.isZoneTargeted(conn, buildCoupon({ target_zones: 'selected', id: 7 }), 5);
+    expect(result).toBe(true);
+    expect(conn.query).toHaveBeenLastCalledWith(
+      expect.stringContaining('delivery_zone_id IN (?)'),
+      [7, [5, 2]]
+    );
+  });
+
+  it('stops walking a cyclic parent chain instead of hanging', async () => {
+    const conn = {
+      query: jest.fn()
+        .mockResolvedValueOnce([[{ parent_zone_id: 2 }]])
+        .mockResolvedValueOnce([[{ parent_zone_id: 1 }]]) // points back at 1
+        .mockResolvedValueOnce([[]]),
+    };
+    const result = await coupons.isZoneTargeted(conn, buildCoupon({ target_zones: 'selected', id: 7 }), 1);
+    expect(result).toBe(false);
+    expect(conn.query).toHaveBeenLastCalledWith(
+      expect.stringContaining('delivery_zone_id IN (?)'),
+      [7, [1, 2]]
+    );
+  });
+
+  it('returns false for target_zones="selected" when no coupon_zones row matches the zone', async () => {
+    const conn = { query: jest.fn().mockResolvedValue([[]]) };
+    const result = await coupons.isZoneTargeted(conn, buildCoupon({ target_zones: 'selected', id: 7 }), 99);
+    expect(result).toBe(false);
+  });
+
+  it('returns true when coupon is null', async () => {
+    const conn = { query: jest.fn() };
+    const result = await coupons.isZoneTargeted(conn, null, 3);
+    expect(result).toBe(true);
+    expect(conn.query).not.toHaveBeenCalled();
+  });
+});
+
 describe('coupons.getUserOrderCount / getUserRedemptionCount / getGlobalRedemptionCount', () => {
   it('getUserOrderCount runs COUNT(*) excluding cancelled orders', async () => {
     const conn = { query: jest.fn().mockResolvedValue([[{ count: 3 }]]) };
@@ -709,6 +792,53 @@ describe('coupons.checkEligibility — DB-backed usage checks', () => {
     });
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/not available for your account/);
+  });
+
+  it('rejects when target_zones is "selected" and the cart has no matched zone (no DB hit)', async () => {
+    const conn = { query: jest.fn() };
+    const r = await coupons.checkEligibility({
+      coupon: buildCoupon({ target_zones: 'selected' }),
+      subtotal: 200,
+      connection: conn,
+      userId: 1,
+      zoneId: null,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/not available for your delivery zone/);
+    expect(conn.query).not.toHaveBeenCalled();
+  });
+
+  it('rejects when target_zones is "selected" and the matched zone is not in coupon_zones', async () => {
+    const conn = {
+      query: jest.fn()
+        .mockResolvedValueOnce([[{ parent_zone_id: null }]]) // ancestor walk — zone 5 is top-level
+        .mockResolvedValueOnce([[]])                          // coupon_zones lookup — no row
+    };
+    const r = await coupons.checkEligibility({
+      coupon: buildCoupon({ target_zones: 'selected' }),
+      subtotal: 200,
+      connection: conn,
+      userId: 1,
+      zoneId: 5,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/not available for your delivery zone/);
+  });
+
+  it('allows when target_zones is "selected" and the matched zone is in coupon_zones', async () => {
+    const conn = {
+      query: jest.fn()
+        .mockResolvedValueOnce([[{ parent_zone_id: null }]]) // ancestor walk — zone 5 is top-level
+        .mockResolvedValueOnce([[{ '1': 1 }]])                // coupon_zones lookup — row exists
+    };
+    const r = await coupons.checkEligibility({
+      coupon: buildCoupon({ target_zones: 'selected' }),
+      subtotal: 200,
+      connection: conn,
+      userId: 1,
+      zoneId: 5,
+    });
+    expect(r.ok).toBe(true);
   });
 });
 
@@ -1315,6 +1445,8 @@ describe('createOrder coupon race-safety', () => {
       }]])
       // 2. product lookup
       .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test' }]])
+      // 2b. exclusion zones (always loaded, before coupon validation)
+      .mockResolvedValueOnce([[]])
       // 3. validateCoupon: SELECT coupon row
       .mockResolvedValueOnce([[
         buildCoupon({
@@ -1421,6 +1553,8 @@ describe('createOrder coupon race-safety', () => {
         delivery_charge: 0, night_charge: 0,
       }]])
       .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'T' }]])
+      // exclusion zones
+      .mockResolvedValueOnce([[]])
       // validateCoupon: coupon row
       .mockResolvedValueOnce([[
         buildCoupon({ id: 21, code: 'ONCE', discount_type: 'flat', discount_value: 10, per_user_usage_limit: 1 })
@@ -1485,6 +1619,8 @@ describe('createOrder coupon race-safety', () => {
         delivery_charge: 0, night_charge: 0,
       }]])
       .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'T' }]])
+      // exclusion zones
+      .mockResolvedValueOnce([[]])
       // validateCoupon: coupon row
       .mockResolvedValueOnce([[
         buildCoupon({ id: 21, code: 'ONCE', discount_type: 'flat', discount_value: 10, per_user_usage_limit: 1 })
@@ -1528,6 +1664,7 @@ describe('createOrder coupon race-safety', () => {
         delivery_charge: 0, night_charge: 0,
       }]])
       .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'T' }]])
+      .mockResolvedValueOnce([[]]) // exclusion zones
       .mockResolvedValueOnce([[
         buildCoupon({ id: 31, code: 'GLOBAL', discount_type: 'flat', discount_value: 5, total_usage_limit: 100 })
       ]])
@@ -1590,7 +1727,9 @@ describe('createOrder auto-applied coupon lapse (coupon_auto_applied)', () => {
       // settings lookup
       .mockResolvedValueOnce([[{ shop_open: 1, delivery_available: 1, delivery_charge: 20, night_charge: 0 }]])
       // product lookup
-      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test' }]]);
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test' }]])
+      // exclusion zones
+      .mockResolvedValueOnce([[]]);
   };
 
   it('drops a vanished auto-applied coupon and places the order at full price', async () => {
@@ -2163,5 +2302,48 @@ describe('admin coupon routes — ER_DUP_ENTRY race handling', () => {
 
     expect(res.statusCode).toBe(409);
     expect(res.body.code).toBe('CONFLICT');
+  });
+
+  it('POST /admin/coupons creates a zone-targeted coupon and inserts coupon_zones rows', async () => {
+    pool.query
+      .mockResolvedValueOnce([[]]) // code uniqueness pre-check
+      .mockResolvedValueOnce([{ insertId: 55 }]) // INSERT coupons
+      .mockResolvedValueOnce([{}]); // INSERT IGNORE coupon_zones
+
+    const res = await request(adminApp)
+      .post('/api/admin/coupons')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        title: 'Zone Coupon', discount_type: 'flat', discount_value: 10, code: 'ZONE10',
+        target_zones: 'selected', targeted_zone_ids: [2, 3],
+      });
+
+    expect(res.statusCode).toBe(201);
+    expect(res.body.id).toBe(55);
+    const insertSql = pool.query.mock.calls[1][0];
+    expect(insertSql).toContain('target_zones');
+    const zonesSql = pool.query.mock.calls[2][0];
+    const zonesParams = pool.query.mock.calls[2][1];
+    expect(zonesSql).toContain('INSERT IGNORE INTO coupon_zones');
+    expect(zonesParams[0]).toEqual([[55, 2], [55, 3]]);
+  });
+
+  it('PUT /admin/coupons/:id replaces coupon_zones rows when targeted_zone_ids is sent', async () => {
+    pool.query
+      .mockResolvedValueOnce([[buildCoupon({ id: 1, target_zones: 'selected' })]]) // existing coupon lookup
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // UPDATE coupons (target_zones unchanged, no other fields)
+      .mockResolvedValueOnce([{}]) // DELETE FROM coupon_zones
+      .mockResolvedValueOnce([{}]); // INSERT IGNORE coupon_zones
+
+    const res = await request(adminApp)
+      .put('/api/admin/coupons/1')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ target_zones: 'selected', targeted_zone_ids: [4] });
+
+    expect(res.statusCode).toBe(200);
+    const deleteSql = pool.query.mock.calls[2][0];
+    expect(deleteSql).toContain('DELETE FROM coupon_zones');
+    const insertParams = pool.query.mock.calls[3][1];
+    expect(insertParams[0]).toEqual([[1, 4]]);
   });
 });

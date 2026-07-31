@@ -677,7 +677,12 @@ function RiderJobCard({ order, busy, onOutForDelivery, onDelivered }) {
       )}
 
       {shops.length > 0 && (
-        <p className="shop-order-meta">Shops: {shops.map((s) => s.name).join(', ')}</p>
+        <p className="shop-order-meta">
+          Shops: {shops.map((s) => {
+            const shopTotal = s.shopTotal ?? s.shop_total;
+            return shopTotal > 0 ? `${s.name} (₹${shopTotal} owed)` : s.name;
+          }).join(', ')}
+        </p>
       )}
 
       {items.length > 0 && (

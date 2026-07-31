@@ -9,7 +9,6 @@ VillKro (ProjectServeLoco) — a grocery / food delivery platform monorepo. Each
 - `apps/api` — Node.js + Express REST API with Socket.IO realtime (backend for everything)
 - `apps/customer-app` — React Native (Expo) iOS/Android customer app
 - `apps/admin` — React + Vite admin panel
-- `apps/web` — React + Vite iOS-style PWA (Zustand for state)
 - `apps/landing` — static landing page
 - `plans/` — design docs, audits, and the active work spec (`plans/bugs.md`)
 - `deploy/` — nginx configs and AWS deploy assets; `docker-compose.prod.yml` at root
@@ -27,9 +26,9 @@ npm run db:migrate:dev # run migrations against dev env
 npm run seed           # seed demo data
 ```
 
-### Admin (`apps/admin`) and Web (`apps/web`)
+### Admin (`apps/admin`)
 ```bash
-npm run dev      # vite dev server (admin :5173, web :5174)
+npm run dev      # vite dev server, :5173
 npm run build    # production build
 npm run lint
 ```
@@ -45,7 +44,7 @@ npm test         # jest
 ## Architecture
 
 - **Dual database**: the API uses **MySQL** (primary relational data — products, orders, users) and **MongoDB** together; `apps/api/src/db/index.js` initializes both and both must be healthy. Schema changes go through `src/db/migrate.js`, which runs automatically on `npm start`.
-- **API layering**: `routes/ → middleware/ → controllers/ → repositories/ + services/`, with shared logic in `utils/` and request validation in `validators/`. Realtime order events (auto-accept, status pushes) live in `src/realtime/` on Socket.IO; admin and web clients subscribe via `socket.io-client`.
+- **API layering**: `routes/ → middleware/ → controllers/ → repositories/ + services/`, with shared logic in `utils/` and request validation in `validators/`. Realtime order events (auto-accept, status pushes) live in `src/realtime/` on Socket.IO; admin subscribes via `socket.io-client`.
 - **Response shape is a contract**: many API responses intentionally duplicate fields in both camelCase and snake_case because different clients read different casings. Never remove one of the duplicates or rename response fields.
 - **Order integrity**: order creation uses `FOR UPDATE` row locking for coupon redemption and compare-and-set updates on order status/payment (server returns 409 on conflict). Don't weaken these.
 - **Coupon engine**: `apps/api/src/utils/coupons.js` is the single rule engine used by both cart preview and order creation; code-required coupons appearing in the offers list is intended behavior.
@@ -56,7 +55,7 @@ npm test         # jest
 
 ## CI
 
-GitHub Actions per app: `ci.yml` (API tests + lint), `ci-admin.yml`, `ci-web.yml`, `ci-customer-app.yml`, plus `deploy.yml` and `playstore.yml`. Deployment steps are documented in `plans/deploymentfinallast.md`.
+GitHub Actions per app: `ci.yml` (API tests + lint), `ci-admin.yml`, `ci-customer-app.yml`, plus `deploy.yml` and `playstore.yml`. Deployment steps are documented in `plans/deploymentfinallast.md`.
 
 ## Subagent routing (`.claude/agents/`)
 

@@ -132,6 +132,10 @@
   background-color: var(--surface-hover);
 }
 
+.shop-row {
+  cursor: pointer;
+}
+
 .shops-table tbody tr:nth-child(even) {
   background: rgba(148, 163, 184, 0.04);
 }

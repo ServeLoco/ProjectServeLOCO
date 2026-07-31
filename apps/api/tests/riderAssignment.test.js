@@ -241,7 +241,9 @@ describe('continueAssignment search window', () => {
       .mockResolvedValueOnce([[]]) // no pending
       .mockResolvedValueOnce([[]]) // excluded
       .mockResolvedValueOnce([[rider]]) // eligible
+      .mockResolvedValueOnce([[]]) // getOrderPickupPoints (no shop pins)
       .mockResolvedValueOnce([[]]) // countCompletedDeliveriesTodayBatch (none delivered)
+      .mockResolvedValueOnce([[]]) // countActiveOrdersBatch (carrying nothing)
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // markSearching
 
     const offerConn = makeConn([
@@ -282,7 +284,9 @@ describe('pushRiderOffer FCM/Expo branching', () => {
       .mockResolvedValueOnce([[]]) // no pending
       .mockResolvedValueOnce([[]]) // excluded
       .mockResolvedValueOnce([[rider]]) // eligible
+      .mockResolvedValueOnce([[]]) // getOrderPickupPoints
       .mockResolvedValueOnce([[]]) // countCompletedDeliveriesTodayBatch
+      .mockResolvedValueOnce([[]]) // countActiveOrdersBatch
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // markSearching
 
     const offerConn = makeConn([
@@ -483,6 +487,103 @@ describe('getExcludedRiderIdsForOrder', () => {
   it('lists rider ids with any offer row', async () => {
     pool.query.mockResolvedValueOnce([[{ rider_id: 1 }, { rider_id: 2 }]]);
     await expect(assignment.getExcludedRiderIdsForOrder(10)).resolves.toEqual([1, 2]);
+  });
+});
+
+describe('recoverStuckAssignments', () => {
+  beforeEach(resetPool);
+
+  it('returns [] without querying rider count when nothing is waiting', async () => {
+    pool.query.mockResolvedValueOnce([[]]); // stuck-orders SELECT
+    await expect(assignment.recoverStuckAssignments()).resolves.toEqual([]);
+    expect(pool.query).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-scans normally via continueAssignment when riders are online', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 10 }]]) // stuck-orders SELECT
+      .mockResolvedValueOnce([[{ cnt: 1 }]]) // countActiveRiders — someone online
+      // continueAssignment(10): loadOrder, pending check, excluded, eligible
+      .mockResolvedValueOnce([[{ id: 10, status: 'Accepted', rider_id: null }]])
+      .mockResolvedValueOnce([[]]) // no pending
+      .mockResolvedValueOnce([[]]) // excluded
+      .mockResolvedValueOnce([[]]) // eligible — none, so it waits
+      .mockResolvedValueOnce([[{ stamped: 1, open: 1 }]]); // isWithinSearchWindow
+
+    const [result] = await assignment.recoverStuckAssignments();
+    expect(result.continued).toBe(false);
+    expect(result.waiting).toBe(true);
+  });
+
+  it('skips the eligible-riders re-scan and only checks the window when nobody is online', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 10 }]]) // stuck-orders SELECT
+      .mockResolvedValueOnce([[{ cnt: 0 }]]) // countActiveRiders — nobody online
+      .mockResolvedValueOnce([[{ rider_id: 4 }]]) // getExcludedRiderIdsForOrder
+      // isWithinSearchWindow: stamped + still open
+      .mockResolvedValueOnce([[{ stamped: 1, open: 1 }]]);
+
+    const [result] = await assignment.recoverStuckAssignments();
+    expect(result.continued).toBe(false);
+    expect(result.waiting).toBe(true);
+    // The expensive listEligibleRiders JOIN must not run in this branch.
+    expect(pool.query).toHaveBeenCalledTimes(4);
+  });
+
+  it('still fails the order past its window with zero riders online', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 10 }]]) // stuck-orders SELECT
+      .mockResolvedValueOnce([[{ cnt: 0 }]]) // countActiveRiders
+      .mockResolvedValueOnce([[]]) // getExcludedRiderIdsForOrder — none ever offered
+      .mockResolvedValueOnce([[{ stamped: 1, open: 0 }]]) // isWithinSearchWindow — expired
+      // failAssignment: loadOrder, UPDATE orders, UPDATE offers, loadOrder (updated)
+      .mockResolvedValueOnce([[{ id: 10, status: 'Accepted', rider_id: null, order_number: 'O-10' }]])
+      .mockResolvedValueOnce([{ affectedRows: 1 }])
+      .mockResolvedValueOnce([{ affectedRows: 0 }])
+      .mockResolvedValueOnce([[{ id: 10, status: 'Accepted', rider_id: null, order_number: 'O-10', rider_assignment_status: 'failed' }]])
+      .mockResolvedValueOnce([[{ cnt: 0 }]]); // syncDeliveryAvailabilityFromRiders
+
+    const [result] = await assignment.recoverStuckAssignments();
+    expect(result.continued).toBe(false);
+    expect(result.failed).toBe(true);
+    expect(result.reason).toBe('No riders available');
+  });
+});
+
+describe('getOrderPickupPoints', () => {
+  beforeEach(resetPool);
+
+  it('returns a ring centre per pinned shop on a multi-shop order', async () => {
+    pool.query.mockResolvedValueOnce([[
+      { latitude: '12.9700000', longitude: '77.6000000' },
+      { latitude: '12.9800000', longitude: '77.6100000' },
+    ]]);
+    await expect(assignment.getOrderPickupPoints(10)).resolves.toEqual([
+      { lat: 12.97, lng: 77.6 },
+      { lat: 12.98, lng: 77.61 },
+    ]);
+    const sql = pool.query.mock.calls[0][0];
+    expect(sql).toContain('s.latitude IS NOT NULL');
+  });
+
+  it('returns [] for a house-only order so selection stays distance-blind', async () => {
+    pool.query.mockResolvedValueOnce([[]]);
+    await expect(assignment.getOrderPickupPoints(10)).resolves.toEqual([]);
+  });
+
+  it('drops unusable pins instead of placing a ring at 0,0', async () => {
+    pool.query.mockResolvedValueOnce([[
+      { latitude: null, longitude: null },
+      { latitude: '12.9700000', longitude: '77.6000000' },
+    ]]);
+    await expect(assignment.getOrderPickupPoints(10)).resolves.toEqual([
+      { lat: 12.97, lng: 77.6 },
+    ]);
+  });
+
+  it('degrades to distance-blind rather than throwing when the lookup fails', async () => {
+    pool.query.mockRejectedValueOnce(new Error('db down'));
+    await expect(assignment.getOrderPickupPoints(10)).resolves.toEqual([]);
   });
 });
 

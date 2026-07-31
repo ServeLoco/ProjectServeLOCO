@@ -73,8 +73,10 @@ function ProductCard({
   const resolvedDisabled = product.disabled ?? disabled ?? false;
   const resolvedAvailable = product.available ?? available ?? product.isAvailable ?? !resolvedDisabled;
   const isShopClosed = product.shopIsOpen === false || product.shop_is_open === false || product.shopIsOpen === 0 || product.shop_is_open === 0;
-  const isUnavailable = !resolvedAvailable;
-  const isGrayedOut = isShopClosed || isUnavailable;
+  // Shop-closed and out-of-stock are collapsed into one "unavailable" state —
+  // no separate label/behavior per cause, so the customer sees one
+  // unambiguous signal regardless of why the item can't be bought.
+  const isUnavailable = !resolvedAvailable || isShopClosed;
 
   // Multi-variant products (e.g. pizza sizes, burger types) show the plain
   // lowest variant price and open the VariantSheet on tap instead of a bare
@@ -127,18 +129,10 @@ function ProductCard({
   const iconSize = compact ? 10 : 12;
 
   const renderControl = () => {
-    if (isShopClosed) {
-      return (
-        <View key="closed" style={[styles.outPill, compact && styles.outPillCompact]}>
-          <Text style={[styles.outText, compact && styles.outTextCompact]}>Closed</Text>
-        </View>
-      );
-    }
-
     if (isUnavailable) {
       return (
-        <View key="out" style={[styles.outPill, compact && styles.outPillCompact]}>
-          <Text style={[styles.outText, compact && styles.outTextCompact]}>Out</Text>
+        <View key="unavailable" style={[styles.outPill, compact && styles.outPillCompact]}>
+          <Text style={[styles.outText, compact && styles.outTextCompact]}>Unavailable</Text>
         </View>
       );
     }
@@ -224,15 +218,15 @@ function ProductCard({
   return (
     <Animated.View style={[styles.card, compact && styles.cardCompact, style, { transform: [{ scale: cardScale }] }]}>
       <TouchableOpacity
-        activeOpacity={isShopClosed ? 1 : 1}
-        onPress={isShopClosed ? null : onPress}
-        onPressIn={isShopClosed ? null : handlePressIn}
-        onPressOut={isShopClosed ? null : handlePressOut}
-        disabled={isShopClosed}
+        activeOpacity={1}
+        onPress={isUnavailable ? null : onPress}
+        onPressIn={isUnavailable ? null : handlePressIn}
+        onPressOut={isUnavailable ? null : handlePressOut}
+        disabled={isUnavailable}
         style={styles.touchable}
         accessibilityRole="button"
         accessibilityLabel={resolvedName}
-        accessibilityState={{ disabled: isShopClosed }}
+        accessibilityState={{ disabled: isUnavailable }}
       >
         <View style={[styles.cardInner, compact && styles.cardInnerCompact]}>
           {/* Full-bleed image — grayscale when the product's shop is closed */}
@@ -242,25 +236,21 @@ function ProductCard({
             height="100%"
             resizeMode="cover"
             priority="high"
-            filter={isGrayedOut ? [{ grayscale: 1 }] : undefined}
+            filter={isUnavailable ? [{ grayscale: 1 }] : undefined}
             recyclingKey={product?.id != null ? String(product.id) : undefined}
           />
 
           {/* Closed-shop / product-off white wash (reinforces muted look, esp. on iOS) */}
-          {isGrayedOut ? (
+          {isUnavailable ? (
             <View style={styles.closedWash} pointerEvents="none">
               <View style={styles.closedWashInner} />
             </View>
           ) : null}
 
-          {/* "Shop closed" / "Temporarily Unavailable" label — centered horizontally, just above vertical center */}
-          {isShopClosed ? (
+          {/* Single unavailable label — centered horizontally, just above vertical center */}
+          {isUnavailable ? (
             <View style={styles.shopClosedLabel} pointerEvents="none">
-              <Text style={styles.shopClosedText}>Shop closed</Text>
-            </View>
-          ) : isUnavailable ? (
-            <View style={styles.shopClosedLabel} pointerEvents="none">
-              <Text style={styles.shopClosedText}>Temporarily Unavailable</Text>
+              <Text style={styles.shopClosedText}>Item Unavailable</Text>
             </View>
           ) : null}
 
@@ -290,7 +280,7 @@ function ProductCard({
           ) : null}
 
           {/* Corner-fold discount ribbon (top-right) */}
-          {resolvedDiscountLabel && !isUnavailable && !isShopClosed ? (
+          {resolvedDiscountLabel && !isUnavailable ? (
             <View style={[styles.ribbonMask, compact && styles.ribbonMaskCompact]} pointerEvents="none">
               <LinearGradient
                 colors={['#34D399', '#0F9D63']}

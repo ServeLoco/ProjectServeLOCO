@@ -59,16 +59,38 @@ const config = {
   AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
 
   // Rider assignment engine (optional overrides; defaults match product rules)
-  RIDER_OFFER_TIMEOUT_SEC: Number(process.env.RIDER_OFFER_TIMEOUT_SEC) || 300,
+  RIDER_OFFER_TIMEOUT_SEC: Number(process.env.RIDER_OFFER_TIMEOUT_SEC) || 150,
   // After shops confirm (or house Accepted): if no eligible riders, keep searching
-  // for this many seconds before failAssignment / admin cancel-request.
-  RIDER_SEARCH_WINDOW_SEC: Number(process.env.RIDER_SEARCH_WINDOW_SEC) || 600,
+  // for this many seconds (default 30 min) before failAssignment / admin cancel-request.
+  RIDER_SEARCH_WINDOW_SEC: Number(process.env.RIDER_SEARCH_WINDOW_SEC) || 1800,
   // Minimum seconds between re-scans while waiting for riders to come online.
   RIDER_SEARCH_SCAN_SEC: Number(process.env.RIDER_SEARCH_SCAN_SEC) || 30,
+  // Offer rings around the pickup shop(s), in km, tried smallest first. Only
+  // once a ring is exhausted (every rider in it rejected/timed out) does the
+  // next one open. After the last ring, distance is dropped entirely so a far
+  // rider can still save the order before the search window closes.
+  RIDER_SEARCH_RADIUS_TIERS_KM: String(process.env.RIDER_SEARCH_RADIUS_TIERS_KM || '1,2,3')
+    .split(',')
+    .map((v) => Number(String(v).trim()))
+    .filter((n) => Number.isFinite(n) && n > 0)
+    .sort((a, b) => a - b),
+  // A rider's last GPS ping must be newer than this to place them in a radius
+  // ring; staler than this counts as unknown position (last ring only).
+  RIDER_LOCATION_MAX_AGE_SEC: Number(process.env.RIDER_LOCATION_MAX_AGE_SEC) || 600,
   RIDER_SWEEPER_MS: Number(process.env.RIDER_SWEEPER_MS) || 5000,
   // Re-push pending delivery offers this often until accept/reject/expire.
-  RIDER_OFFER_REMIND_SEC: Number(process.env.RIDER_OFFER_REMIND_SEC) || 15,
+  // 30s against the 150s offer timer is ~5 alarms per offer, not 10 — still
+  // frequent enough that a rider can't miss it, less relentless than every 15s.
+  RIDER_OFFER_REMIND_SEC: Number(process.env.RIDER_OFFER_REMIND_SEC) || 30,
   RIDER_TODAY_TZ: process.env.RIDER_TODAY_TZ || '+05:30',
+
+  // Shop auto-open/auto-close schedule sweeper.
+  // Wall-clock zone the admin enters open_time/close_time in. The API
+  // container has no TZ set and runs on UTC, so the sweeper must convert
+  // rather than read server local time — an IANA name (not a fixed offset)
+  // because this is a wall-clock comparison, same as nightDelivery.js.
+  SHOP_SCHEDULE_TZ: process.env.SHOP_SCHEDULE_TZ || 'Asia/Kolkata',
+  SHOP_SCHEDULE_SWEEP_MS: Number(process.env.SHOP_SCHEDULE_SWEEP_MS) || 30000,
 };
 
 // Validation
