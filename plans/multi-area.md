@@ -459,9 +459,9 @@ bumpCatalogVersion(areaId)        // §3.10, called from inside bustAreaCaches
   `X-Area-Id` header, `'all'` where the endpoint allows it, or `null`.
 - `resolveCustomerArea` — runs on customer routes that need an area. Order of resolution, per §2.10:
   1. request pin (`latitude`/`longitude` in body or query) → zone → area,
-  2. the customer's saved delivery pin → zone → area,
-  3. `users.last_area_id`,
-  4. default area **only when no pin was supplied at all**.
+  2. `users.last_area_id` — backfilled from the user's most recent order, because the server stores
+     no saved customer pin of its own (H1),
+  3. default area **only when no pin was supplied at all**.
   A pin that resolves to no zone yields `null`, and the route returns the
   "we don't deliver here yet" shape — never the default area.
 
@@ -523,7 +523,13 @@ operate on that area, unchanged.
   exactly except for the new columns. Confirm `npm start`'s two-step boot (§6.1) completes clean on
   a **second run against the same already-migrated staging DB** — the whole point of `IF NOT EXISTS`
   / `ensureColumn` is idempotence, and this is the test that proves it before it's proving it in
-  production. Do not proceed to TASK 1 against production until this rehearsal is clean.
+  production.
+  Also in this task: measure `orders` (row count + `information_schema` data length) to size the
+  migration window (H12), and add a `npm run db:migrate` step to `.github/workflows/ci.yml` run
+  **twice** against the MySQL service container CI already provisions and never uses (H9) — close to
+  free, and the only automated protection this repo will have against a migration that fails on boot.
+  Read §9 and resolve the §9.4 open product decisions before Phase C begins.
+  Do not proceed to TASK 1 against production until this rehearsal is clean.
 
 ### Phase A — Foundations (no behaviour change)
 
@@ -559,7 +565,10 @@ operate on that area, unchanged.
   Rewrite the UNIQUE keys listed in §1.3, **dropping each old global UNIQUE before the new
   composite is added** (§6.2 rule 2 and rule 4 — this ordering is what makes TASK 11's per-area
   `packed`/`fast_food` seeding actually insert rows instead of silently no-op'ing).
-  Add `users.last_area_id INT NULL` (no FK cascade, cache only).
+  Add `users.last_area_id INT NULL` (no FK cascade, cache only), and **backfill it from each user's
+  most recent order's `latitude`/`longitude`** run through the zone matcher — the server has no saved
+  customer pin of its own (H1). Users with no orders stay NULL.
+  Update `src/db/seed_demo.js` in this task so dev machines stop producing area-less rows (H11).
   **`daily_order_counters` PK change to `(area_id, counter_date)` moves to TASK 13**, landing in the
   same commit as the order-number query change — see §6.3. Do not change this PK here.
   Run `npm test` — nothing should change yet. Re-run the row-count check from TASK 0 against this
@@ -809,6 +818,10 @@ violating it loses or corrupts production data.
 **Deploying this branch runs the migration unattended, on boot, against production.** There is no
 review step between merge and schema change.
 
+- **CI does not cover this.** `.github/workflows/ci.yml` provisions MySQL 8 and Mongo 7 service
+  containers, but every test mocks `src/db/mysql` and `db:migrate` is never invoked — the databases
+  are provisioned and unused. See H9 for the one-line fix that turns every PR into a migration smoke
+  test.
 - `migrate.js` has **no transaction wrapper**, and MySQL DDL is non-transactional anyway — a failure
   halfway through leaves the schema partly changed with no rollback. The file survives this today by
   being **re-runnable**: `CREATE TABLE IF NOT EXISTS`, `ensureColumn` existence checks, and
@@ -1000,3 +1013,136 @@ how tenancy migrations fail:
 - Deleting an area (deactivate only).
 - Hard-deleting a library item (archive only — §2.4).
 - Cross-area customer accounts merging or splitting.
+
+---
+
+## 9. KNOWN HURDLES — found by reading the code 2026-08-01
+
+Everything here is a real obstacle already present in the codebase, not a hypothetical. The three
+in §9.1 must be resolved **before TASK 1**, because they change the design rather than the schedule.
+
+### 9.1 Blockers — resolve before starting
+
+**H1. The server does not store the customer's pin. §4.2 step 2 was wrong.**
+`users` has `address` and `short_address` but **no latitude/longitude** (`migrate.js:103-118`). The
+delivery pin lives only in the app's AsyncStorage (`useDeliveryLocationStore`). So the server-side
+resolution chain in §4.2 has no "saved delivery pin" step to use — it is:
+
+```
+request pin  →  users.last_area_id  →  default area (only when no pin was sent at all)
+```
+
+Mitigation, folded into TASK 3: backfill `users.last_area_id` from each user's **most recent order's
+`latitude`/`longitude`** (orders do carry the pin), resolved through the zone matcher. Users who have
+never ordered stay NULL and fall through to the default area until their first pin arrives.
+**Do not add lat/lng columns to `users` for this** — that is a new product surface (saved addresses)
+and belongs in its own spec.
+
+**H2. Background jobs have no request context and therefore no `req.areaId`.**
+Five things run on timers, outside any HTTP request, and every one of them currently operates
+globally:
+
+| Job | Where | What breaks |
+|---|---|---|
+| `riderOfferSweeper` | `src/realtime/riderOfferSweeper.js` | expires offers across all areas — fine to stay global, but its **emits** must go to the right area room |
+| `shopScheduleSweeper` | `src/realtime/shopScheduleSweeper.js` | flips `is_open`; calls `syncGlobalShopOpenState`, which TASK 15 makes per-area — the sweeper must loop areas |
+| `purgeExpiredDeletions` | `src/server.js:96-98` | genuinely global (users are global) — leave it, but add it to the guardrail allowlist |
+| analytics rollup | `src/services/analytics/rollup.js:154` | writes one `analytics_daily` doc per date; must become one per `(areaId, date)` |
+| `emitLiveSnapshot` | `src/realtime/presence.js:134-145` | pushes `analytics.live` to the flat `admin` room **every 5s** — with per-area rooms this needs a per-area snapshot, or every area admin sees every area's live traffic |
+
+The rule from §3.1 ("area resolved once per request") has no meaning here. These jobs need an
+explicit `for (const area of await listAreas())` loop, or a documented decision to stay global.
+Decide per job in TASK 15 and TASK 17; do not leave it to the implementer to guess.
+
+**H3. 58 of 85 test files are coupled to SQL text or mocked query order.**
+Every test file does `jest.mock('../src/db/mysql')` and drives controllers with ordered
+`mockResolvedValueOnce` sequences, plus assertions like
+`expect(pool.query).toHaveBeenCalledWith(expect.stringContaining('active = 1'))`
+(`tests/deliveryZonesPublic.test.js:58`, `tests/coupons.test.js:490`).
+
+Adding an `area_id` predicate changes the SQL string. Adding a query changes the sequence position.
+Both break tests that are otherwise correct. This is the single biggest **schedule** risk in the
+project — expect test churn to exceed source churn in Phase C.
+
+Two things reduce it, both already in the design: resolving the area once in middleware (§3.1) means
+controllers gain **no new queries**, only new predicates; and keeping response shapes byte-identical
+(§5 Phase C preamble) means assertions on output survive. Budget the fixture updates explicitly —
+do not let a broken test get "fixed" by loosening an assertion that was catching something real.
+
+### 9.2 Structural friction — plan for it, it will not block
+
+**H4. `store_type` is a free-text VARCHAR pointing at `store_modes.slug`.**
+It appears on `categories`, `combos`, `offers`, `dashboard_sections`, `products` (via category) and
+`coupons.applies_to`. With per-area store modes, the same string `'fast_food'` is a *different row*
+in each area. Validation must be "does this slug exist and is it active **in this area**", not "is it
+in the global list". `utils/storeMode.js`'s `normalizeStoreType` is the chokepoint — fix it there,
+once (TASK 11).
+
+**H5. Combos exist twice.**
+There is a `combos` table *and* `products.is_combo`, with a one-time backfill copying between them
+(`migrate.js:461-462`), and `product_combo_items` linking products to products. Any area work on
+combos touches both representations. This is pre-existing debt; do not attempt to unify it inside
+this spec — scope `area_id` onto both and move on.
+
+**H6. Broadcast push cannot target an area precisely.**
+Customers are global (§2.2) and carry only `last_area_id`, a cache. "Notify every Area 2 customer"
+is therefore approximate — it reaches people whose last known area was 2, misses someone who has
+never ordered, and includes someone who has since moved. Acceptable for marketing pushes; state it
+in the admin UI so nobody assumes it is a precise audience. Order-related pushes are unaffected
+(they target a specific user about a specific order).
+
+**H7. Socket join races the pin.**
+`joinRoleRoom` (`socket.js:67-80`) runs at connect time, but the app may not have resolved its area
+yet on a cold start. The client must be able to **rejoin** after `/bootstrap` returns (already
+required by TASK 23/28) and the server must tolerate a customer socket that has joined no area room
+yet. Do not block the connection waiting for an area.
+
+**H8. `bulkImportController` writes products directly.**
+`bulkImportController.js:529` does a raw `INSERT INTO products (...)`. CSV import needs an area, and
+the natural UX is "import into the area I am currently switched to". Easy, but it is a 578-line file
+that the catalog sweep must not miss.
+
+### 9.3 Ops and tooling gaps
+
+**H9. CI provisions MySQL and Mongo but never runs the migration.**
+`.github/workflows/ci.yml` spins up `mysql:8.0` and `mongo:7.0` service containers and passes their
+credentials to `npm test` — but every test mocks `src/db/mysql`, so **nothing ever connects**, and
+`db:migrate` is never invoked. The databases are provisioned and unused.
+
+This makes the untested-migration problem of §6.1 worse than it looks: it is easy to assume CI covers
+schema changes because the services are right there in the workflow file. It does not.
+
+**Cheap, high-value fix — do it in TASK 0:** add a `npm run db:migrate` step to `ci.yml` against the
+MySQL service, then run it **twice** to assert idempotence. That turns every future PR into a
+migration smoke test for free, and it is the only automated protection this repo will have against
+a migration that fails on boot in production.
+
+**H10. `config/env.js` hard-requires `ADMIN_PASSWORD`.**
+`env.js:107,114-117` treats admin auth as env-only and validates it at boot (rejecting weak values
+in production). TASK 7 makes the `admins` table the source of truth with env as a fresh-install
+fallback — the validation contract has to change with it, or a deployment with a populated `admins`
+table and no `ADMIN_PASSWORD` env var will refuse to start.
+
+**H11. `seed_demo.js` predates areas.** It will produce area-less rows. Update it in TASK 3 or it
+becomes a source of NULL `area_id` rows that fail the NOT NULL step on any dev machine.
+
+**H12. The `orders` table's real size is unknown.** Every timing claim in §3.6 and §6 assumes it is
+large but not enormous. Measure it in TASK 0 (`SELECT COUNT(*) FROM orders`, plus
+`information_schema.TABLES` data length) before estimating the migration window.
+
+### 9.4 Open product decisions — answer before Phase C, not during
+
+These have no technically correct answer; they need the product owner. Leaving them open until the
+sweep is underway means a mid-sweep schema change.
+
+1. **A shop or rider near an area boundary.** `riders.area_id` and `shops.area_id` are single-valued
+   in this spec. If a rider genuinely serves two towns, the model needs a join table — a schema
+   change, not a tweak. Confirm single-area is acceptable.
+2. **A customer in Area 2's geography with order history from Area 1's config.** Their past orders
+   stay `area_id = 1` (that is where they were placed). Confirm that reorder/repeat-order flows are
+   allowed to fail gracefully when the product no longer exists in their current area.
+3. **Historical Mongo analytics have no area** and cannot be reconstructed. Recommendation: stamp all
+   pre-migration docs `areaId: 1` and accept that cross-area history starts at the migration date.
+4. **Does Area 2 launch with its own phone number, UPI ID and support contact?** These live in
+   `settings`, so per-area is free — but the customer app currently shows one support number, and
+   somebody has to actually staff a second one.
