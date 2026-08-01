@@ -175,8 +175,8 @@ export default function CheckoutScreen() {
   const setSettings = useSettingsStore(state => state.setSettings);
   const userProfile = useAuthStore(state => state.profile);
   // This is populated by the app-start sync and updated when Home's Change
-  // Location flow saves a manual pin. Checkout must use this shared value,
-  // never fetch a new live location on entry.
+  // Location flow saves a manual pin. Used as map fallback center only —
+  // the checkout map itself auto-locates to live GPS on open.
   const savedDeliveryLocation = useDeliveryLocationStore(state => state.coords);
   const savedDeliveryLocationSource = useDeliveryLocationStore(state => state.source);
 
@@ -1276,9 +1276,9 @@ export default function CheckoutScreen() {
             immersive
             hideActions
             fullBleed
-            // Start from the shared app/Home delivery location. Live GPS is
-            // only available through the explicit recenter action.
-            autoLocateOnMount={false}
+            // Checkout opens straight to live GPS so the pin lands on the
+            // user's current spot instantly, not the last saved manual pin.
+            autoLocateOnMount
             initialCenter={savedDeliveryLocation
               ? { latitude: savedDeliveryLocation.lat, longitude: savedDeliveryLocation.lng }
               : undefined}
