@@ -49,7 +49,11 @@ npm test         # jest
 - **Order integrity**: order creation uses `FOR UPDATE` row locking for coupon redemption and compare-and-set updates on order status/payment (server returns 409 on conflict). Don't weaken these.
 - **Coupon engine**: `apps/api/src/utils/coupons.js` is the single rule engine used by both cart preview and order creation; code-required coupons appearing in the offers list is intended behavior.
 
-## Active workflow: plans/bugs.md
+## Active workflow: plans/multi-area.md
+
+`plans/multi-area.md` is the contract for the multi-area (super admin) expansion — locked decisions, performance/DRY rules, data-safety rules (Area 1 is live in production), and known hurdles. `plans/multi-area-tasks.md` is the execution checklist (31 tasks, 236 subtasks). Read the spec's §2, §3, §4, §6 and §9 before working the checklist; tasks run in order, one commit each formatted `feat: AREA TASK <n> — <short title>`.
+
+## Older workflow: plans/bugs.md
 
 `plans/bugs.md` is an instruction spec of audited bug/security fixes written for an implementing AI. If working from it: follow its rules section literally (do exactly what the task says, run `npm test` in `apps/api` after each backend task, tick checkboxes with a one-line note, one commit per task formatted `fix: TASK <n> — <short title>`, tasks in order, and respect its DO-NOT-TOUCH sections).
 
