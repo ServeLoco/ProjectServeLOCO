@@ -4,6 +4,9 @@ const microCache = require('../utils/microCache');
 const { cleanupOrphanedImage } = require('./imageController');
 
 const CATEGORIES_TTL_MS = 30_000;
+// Hardcoded to area 1 for now (TASK 11 makes categories area-scoped); the
+// cache key/bust plumbing is area-shaped already.
+const CATEGORIES_AREA_ID_STOPGAP = 1;
 
 function slugify(value) {
   return String(value || '')
@@ -44,7 +47,7 @@ const getCategories = async (req, res) => {
   const normalizedType = type
     ? await normalizeStoreType(type, { allowAll: true })
     : 'all';
-  const cacheKey = `categories:public:${normalizedType}`;
+  const cacheKey = `categories:${CATEGORIES_AREA_ID_STOPGAP}:public:${normalizedType}`;
   const cached = microCache.get(cacheKey);
   if (cached) {
     return res.status(200).json(cached);
@@ -123,8 +126,8 @@ const createCategory = async (req, res) => {
     'INSERT INTO categories (name, slug, type, image_id, active, display_order) VALUES (?, ?, ?, ?, ?, ?)',
     [name, slug, type, image_id, active !== undefined ? active : true, displayOrder]
   );
-  microCache.bust('categories');
-  microCache.bust('dashboard');
+  microCache.bust('categories', CATEGORIES_AREA_ID_STOPGAP);
+  microCache.bust('dashboard', CATEGORIES_AREA_ID_STOPGAP);
   res.status(201).json({ message: 'Category created', id: result.insertId });
 };
 
@@ -157,8 +160,8 @@ const updateCategory = async (req, res) => {
     'UPDATE categories SET name = ?, slug = ?, type = ?, image_id = ?, active = ?, display_order = ? WHERE id = ?',
     [name, slug, type, image_id, active, displayOrder, id]
   );
-  microCache.bust('categories');
-  microCache.bust('dashboard');
+  microCache.bust('categories', CATEGORIES_AREA_ID_STOPGAP);
+  microCache.bust('dashboard', CATEGORIES_AREA_ID_STOPGAP);
   if (previousImageId && String(previousImageId) !== String(image_id)) {
     await cleanupOrphanedImage(previousImageId);
   }
@@ -198,8 +201,8 @@ const deleteCategory = async (req, res) => {
 
   await pool.query('UPDATE categories SET deleted = 1 WHERE id = ?', [id]);
   await cleanupOrphanedImage(currentRows[0].image_id);
-  microCache.bust('categories');
-  microCache.bust('dashboard');
+  microCache.bust('categories', CATEGORIES_AREA_ID_STOPGAP);
+  microCache.bust('dashboard', CATEGORIES_AREA_ID_STOPGAP);
   res.status(200).json({ message: 'Category soft deleted' });
 };
 

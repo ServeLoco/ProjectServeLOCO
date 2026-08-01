@@ -52,8 +52,9 @@ const applyScheduledChange = async (shopId, isOpen) => {
   const { syncGlobalShopOpenState } = require('../utils/shops');
   await syncGlobalShopOpenState();
   const microCache = require('../utils/microCache');
-  microCache.bust('dashboard');
-  microCache.bust('categories');
+  // Hardcoded to area 1 for now (TASK 15 makes the sweeper loop areas).
+  microCache.bust('dashboard', 1);
+  microCache.bust('categories', 1);
 };
 
 const tick = async () => {

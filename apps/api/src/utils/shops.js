@@ -280,8 +280,9 @@ const syncGlobalShopOpenState = async () => {
       const { bustSettingsCache } = require('../controllers/settingsController');
       bustSettingsCache();
       const microCache = require('./microCache');
-      microCache.bust('dashboard');
-      microCache.bust('categories');
+      // Hardcoded to area 1 for now (TASK 15 makes this area-scoped).
+      microCache.bust('dashboard', 1);
+      microCache.bust('categories', 1);
 
       // Let connected customer apps flip their "shop closed" banner
       // immediately instead of waiting for the next settings poll.

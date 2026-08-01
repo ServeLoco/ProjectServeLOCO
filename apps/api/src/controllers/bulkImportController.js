@@ -546,8 +546,9 @@ const commitBulkImport = async (req, res) => {
     }
 
     await connection.commit();
-    microCache.bust('dashboard');
-    microCache.bust('categories');
+    // Hardcoded to area 1 for now (TASK 11 makes bulk import area-scoped).
+    microCache.bust('dashboard', 1);
+    microCache.bust('categories', 1);
     connection.release();
 
     return res.status(201).json({

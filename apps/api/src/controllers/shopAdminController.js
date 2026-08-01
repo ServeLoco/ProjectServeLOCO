@@ -266,8 +266,8 @@ const updateShop = async (req, res) => {
     // Keep the global "Shop Status" banner in sync in both directions —
     // see syncGlobalShopOpenState.
     await syncGlobalShopOpenState();
-    require('../utils/microCache').bust('dashboard');
-    require('../utils/microCache').bust('categories');
+    require('../utils/microCache').bust('dashboard', 1);
+    require('../utils/microCache').bust('categories', 1);
   }
 
   // Admin kill-switch (active=false) → owner phone becomes customer mode.
@@ -384,8 +384,8 @@ const deleteShop = async (req, res) => {
     } catch (_) { /* best-effort */ }
   }
   await syncGlobalShopOpenState();
-  require('../utils/microCache').bust('dashboard');
-  require('../utils/microCache').bust('categories');
+  require('../utils/microCache').bust('dashboard', 1);
+  require('../utils/microCache').bust('categories', 1);
 
   res.status(200).json({
     message: 'Shop deleted',

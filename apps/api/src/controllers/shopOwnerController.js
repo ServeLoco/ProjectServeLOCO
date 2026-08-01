@@ -82,8 +82,8 @@ const toggleMyShop = async (req, res) => {
   await syncGlobalShopOpenState();
   // Products from this shop appear/disappear on dashboard even when global
   // shop_open is unchanged — bust micro-cache.
-  require('../utils/microCache').bust('dashboard');
-  require('../utils/microCache').bust('categories');
+  require('../utils/microCache').bust('dashboard', 1);
+  require('../utils/microCache').bust('categories', 1);
   res.status(200).json({ message: 'Shop updated', shop: shopShape(rows[0]) });
 };
 
@@ -190,8 +190,8 @@ const toggleMyProduct = async (req, res) => {
   // Bust the server-side dashboard/categories cache too — otherwise the socket
   // event tells clients to refetch, but they'd get the same stale (30s TTL)
   // cached response back until it naturally expires.
-  require('../utils/microCache').bust('dashboard');
-  require('../utils/microCache').bust('categories');
+  require('../utils/microCache').bust('dashboard', 1);
+  require('../utils/microCache').bust('categories', 1);
   res.status(200).json({
     message: 'Product updated',
     productId, product_id: productId,
@@ -227,8 +227,8 @@ const toggleMyProductVariant = async (req, res) => {
     available: isAvailable,
     shopId: req.shop.id,
   });
-  require('../utils/microCache').bust('dashboard');
-  require('../utils/microCache').bust('categories');
+  require('../utils/microCache').bust('dashboard', 1);
+  require('../utils/microCache').bust('categories', 1);
   res.status(200).json({
     message: 'Variant updated',
     productId, product_id: productId,

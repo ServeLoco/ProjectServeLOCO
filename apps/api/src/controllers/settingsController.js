@@ -6,11 +6,17 @@ const config = require('../config/env');
 const { cleanupOrphanedImage } = require('./imageController');
 const { syncGlobalShopOpenState } = require('../utils/shops');
 
-// Settings is a singleton (1 row), read by every app open and every public
-// endpoint. 15-second cache eliminates most SELECTs while keeping settings fresh.
-// Invalidated on PATCH.
+// Settings is a singleton (1 row) today, read by every app open and every
+// public endpoint. 15-second cache eliminates most SELECTs while keeping
+// settings fresh. Invalidated on PATCH.
+//
+// Key is already area-shaped (`settings:<areaId>`) even though `settings`
+// itself is still a single global row — TASK 9 makes it one row per area;
+// this plumbing means that swap only needs to replace the hardcoded `1`
+// below with a real req.areaId, not touch the cache key format.
 const settingsCache = createTtlCache({ ttlMs: 15_000 });
-const SETTINGS_KEY = 'settings';
+const SETTINGS_AREA_ID_STOPGAP = 1;
+const settingsKey = (areaId) => `settings:${areaId}`;
 
 const hasValue = (value) => value !== undefined && value !== null && value !== '';
 const getStoredImageUrl = (image) => image?.url ||
@@ -115,7 +121,7 @@ const attachOfferProductImageUrls = async (products) => {
 };
 
 const getSettings = async (req, res) => {
-  const settings = await settingsCache.wrap(SETTINGS_KEY, async () => {
+  const settings = await settingsCache.wrap(settingsKey(SETTINGS_AREA_ID_STOPGAP), async () => {
     const [rows] = await pool.query('SELECT * FROM settings LIMIT 1');
     const s = rows[0] || {
       shop_open: 1,
@@ -345,13 +351,13 @@ const updateSettings = async (req, res) => {
   }
 
   await pool.query(`UPDATE settings SET ${updates.join(', ')} WHERE id = ?`, [...params, settingsId]);
-  settingsCache.del(SETTINGS_KEY);
+  settingsCache.del(settingsKey(SETTINGS_AREA_ID_STOPGAP));
   // delivery_available just changed — re-derive shop_open from it (forces
   // closed if delivery just went off, or auto-opens if it just came back on
   // and some shop is open).
   if (body.delivery_available !== undefined) {
     await syncGlobalShopOpenState();
-    settingsCache.del(SETTINGS_KEY);
+    settingsCache.del(settingsKey(SETTINGS_AREA_ID_STOPGAP));
   }
   if (
     body.upi_qr_image_id !== undefined &&
@@ -372,7 +378,7 @@ const updateSettings = async (req, res) => {
     emitToAllCustomers('settings.shop_open.updated', { shopOpen: finalOpen, shop_open: finalOpen });
   }
 
-  microCache.bust('dashboard');
+  microCache.bust('dashboard', 1);
   res.status(200).json({ message: 'Settings updated successfully', data: updatedSettings });
 };
 
@@ -397,7 +403,7 @@ const createOffer = async (req, res) => {
     [title, description || '', isActive, finalImageId, finalStoreType, finalIsClickable]
   );
 
-  microCache.bust('dashboard');
+  microCache.bust('dashboard', 1);
   res.status(201).json({ message: 'Offer created', id: result.insertId });
 };
 
@@ -471,7 +477,7 @@ const updateOffer = async (req, res) => {
     await cleanupOrphanedImage(previousImageId);
   }
 
-  microCache.bust('dashboard');
+  microCache.bust('dashboard', 1);
   res.status(200).json({ message: 'Offer updated' });
 };
 
@@ -503,7 +509,7 @@ const deleteOffer = async (req, res) => {
   }
   await pool.query('UPDATE offers SET deleted = 1 WHERE id = ? AND deleted = 0', [id]);
   await cleanupOrphanedImage(rows[0].image_id);
-  microCache.bust('dashboard');
+  microCache.bust('dashboard', 1);
   res.status(200).json({ message: 'Offer soft deleted' });
 };
 
@@ -565,11 +571,11 @@ const addOfferProduct = async (req, res) => {
       'INSERT INTO offer_products (offer_id, product_id, display_order) VALUES (?, ?, ?)',
       [id, finalProductId, display_order || 0]
     );
-    microCache.bust('dashboard');
+    microCache.bust('dashboard', 1);
     res.status(201).json({ message: 'Product added to offer' });
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') {
-      microCache.bust('dashboard');
+      microCache.bust('dashboard', 1);
       res.status(200).json({ message: 'Product already attached' });
     } else {
       throw err;
@@ -580,7 +586,7 @@ const addOfferProduct = async (req, res) => {
 const removeOfferProduct = async (req, res) => {
   const { id, productId } = req.params;
   await pool.query('DELETE FROM offer_products WHERE offer_id = ? AND product_id = ?', [id, productId]);
-  microCache.bust('dashboard');
+  microCache.bust('dashboard', 1);
   res.status(200).json({ message: 'Product removed from offer' });
 };
 
@@ -596,7 +602,7 @@ const reorderOfferProducts = async (req, res) => {
     await pool.query('UPDATE offer_products SET display_order = ? WHERE offer_id = ? AND product_id = ?', [i, id, productIds[i]]);
   }
 
-  microCache.bust('dashboard');
+  microCache.bust('dashboard', 1);
   res.status(200).json({ message: 'Products reordered' });
 };
 
@@ -615,5 +621,5 @@ module.exports = {
   // For code that writes settings outside this controller (e.g.
   // syncGlobalShopOpenState flipping shop_open) — without this, public
   // /api/settings keeps serving the stale cached value for up to 15s.
-  bustSettingsCache: () => settingsCache.del(SETTINGS_KEY),
+  bustSettingsCache: () => settingsCache.del(settingsKey(SETTINGS_AREA_ID_STOPGAP)),
 };

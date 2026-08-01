@@ -5,8 +5,11 @@ const { normalizeStoreType } = require('../utils/storeMode');
 const { cleanupOrphanedImage } = require('./imageController');
 const microCache = require('../utils/microCache');
 
+// Hardcoded to area 1 for now (TASK 11 makes combos area-scoped); the
+// cache bust plumbing is area-shaped already.
+const COMBO_CACHE_AREA_ID_STOPGAP = 1;
 const bustDashboardCache = () => {
-  microCache.bust('dashboard');
+  microCache.bust('dashboard', COMBO_CACHE_AREA_ID_STOPGAP);
 };
 
 const resolveImageUrls = async (rows) => {

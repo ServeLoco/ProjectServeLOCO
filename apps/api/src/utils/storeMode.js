@@ -14,7 +14,15 @@ const LEGACY_ALIASES = {
   fast: 'fast_food'
 };
 
-const CACHE_KEY = 'active_slugs';
+// Key is already area-shaped (`active_slugs:<areaId>`) even though the
+// query below isn't scoped to an area yet — that's TASK 11 (H4: store_type
+// is a free string validated against a per-area list once store_modes
+// itself is per-area). This plumbing means that swap only needs to replace
+// the hardcoded STOPGAP below with a real areaId, not touch the cache key
+// format or the exported function signatures (still zero-arg — every
+// current caller stays untouched until TASK 11 threads areaId through).
+const STORE_MODE_AREA_ID_STOPGAP = 1;
+const cacheKeyForArea = (areaId) => `active_slugs:${areaId}`;
 const cache = createTtlCache({ ttlMs: 30_000 });
 
 /**
@@ -23,7 +31,7 @@ const cache = createTtlCache({ ttlMs: 30_000 });
  * unreachable (e.g. mid-migration) so validation never hard-fails startup.
  */
 const loadActiveSlugs = async () => {
-  return cache.wrap(CACHE_KEY, async () => {
+  return cache.wrap(cacheKeyForArea(STORE_MODE_AREA_ID_STOPGAP), async () => {
     try {
       const [rows] = await pool.query('SELECT slug FROM store_modes WHERE active = TRUE');
       const slugs = new Set(rows.map(r => r.slug));
@@ -36,7 +44,7 @@ const loadActiveSlugs = async () => {
 };
 
 /** Call after any admin store-mode create/update/deactivate so reads see it immediately. */
-const invalidateStoreModeCache = () => cache.del(CACHE_KEY);
+const invalidateStoreModeCache = () => cache.del(cacheKeyForArea(STORE_MODE_AREA_ID_STOPGAP));
 
 /** Returns the active store mode slugs (excludes the 'all' sentinel) as an array. */
 const getActiveStoreModeSlugs = async () => Array.from(await loadActiveSlugs());

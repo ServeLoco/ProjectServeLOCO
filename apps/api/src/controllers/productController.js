@@ -4,9 +4,12 @@ const { validatePagination, isNumericAmount } = require('../validators');
 const { cleanupOrphanedImage } = require('./imageController');
 const microCache = require('../utils/microCache');
 
+// Hardcoded to area 1 for now (TASK 11 makes products area-scoped); the
+// cache bust plumbing is area-shaped already.
+const PRODUCT_CACHE_AREA_ID_STOPGAP = 1;
 const bustProductCaches = () => {
-  microCache.bust('dashboard');
-  microCache.bust('categories');
+  microCache.bust('dashboard', PRODUCT_CACHE_AREA_ID_STOPGAP);
+  microCache.bust('categories', PRODUCT_CACHE_AREA_ID_STOPGAP);
 };
 
 const isWithinTimeWindow = (from, until) => {

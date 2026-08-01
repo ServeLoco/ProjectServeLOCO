@@ -4,6 +4,10 @@ const config = require('../config/env');
 const { attachVariants } = require('./productController');
 const microCache = require('../utils/microCache');
 const DASHBOARD_TTL_MS = 30_000;
+// Hardcoded to area 1 for now (TASK 12 makes the dashboard itself
+// area-scoped); the cache key/bust plumbing is area-shaped already, so
+// that swap only replaces this constant with req.areaId.
+const DASHBOARD_AREA_ID_STOPGAP = 1;
 
 const SECTION_TYPES = ['offer_banner', 'category_grid', 'product_block', 'combo_block'];
 const SECTION_ITEM_TYPES = {
@@ -416,7 +420,7 @@ const getDashboard = async (req, res) => {
     String(req.query.includeClosedShops ?? req.query.include_closed_shops ?? '').toLowerCase()
   );
   const expectedStoreType = await getExpectedStoreType(storeType);
-  const cacheKey = `dashboard:${expectedStoreType}:closed=${includeClosedShops ? 1 : 0}`;
+  const cacheKey = `dashboard:${DASHBOARD_AREA_ID_STOPGAP}:${expectedStoreType}:closed=${includeClosedShops ? 1 : 0}`;
   const cached = microCache.get(cacheKey);
   if (cached) {
     return res.status(200).json(cached);
@@ -932,7 +936,7 @@ const createAdminSection = async (req, res) => {
       ]
     );
 
-    microCache.bust('dashboard');
+    microCache.bust('dashboard', DASHBOARD_AREA_ID_STOPGAP);
     res.status(201).json({ message: 'Dashboard section created', id: result.insertId });
   } catch (error) {
     res.status(500).json({ code: 'SERVER_ERROR', message: error.message });
@@ -1023,7 +1027,7 @@ const updateAdminSection = async (req, res) => {
       ]
     );
 
-    microCache.bust('dashboard');
+    microCache.bust('dashboard', DASHBOARD_AREA_ID_STOPGAP);
     res.status(200).json({ message: 'Dashboard section updated', version: nextVersion });
   } catch (error) {
     res.status(500).json({ code: 'SERVER_ERROR', message: error.message });
@@ -1056,7 +1060,7 @@ const deleteAdminSection = async (req, res) => {
       [id]
     );
 
-    microCache.bust('dashboard');
+    microCache.bust('dashboard', DASHBOARD_AREA_ID_STOPGAP);
     res.status(200).json({ message: 'Dashboard section deleted' });
   } catch (error) {
     res.status(500).json({ code: 'SERVER_ERROR', message: error.message });
@@ -1144,7 +1148,7 @@ const addAdminSectionItem = async (req, res) => {
       ]
     );
 
-    microCache.bust('dashboard');
+    microCache.bust('dashboard', DASHBOARD_AREA_ID_STOPGAP);
 
     // Return the new item already hydrated with its product/category/combo/offer
     // details so the admin UI can append it locally instead of re-fetching (and
@@ -1227,7 +1231,7 @@ const updateAdminSectionItem = async (req, res) => {
       ]
     );
 
-    microCache.bust('dashboard');
+    microCache.bust('dashboard', DASHBOARD_AREA_ID_STOPGAP);
     res.status(200).json({ message: 'Section item updated' });
   } catch (error) {
     res.status(500).json({ code: 'SERVER_ERROR', message: error.message });
@@ -1252,7 +1256,7 @@ const deleteAdminSectionItem = async (req, res) => {
       'UPDATE dashboard_section_items SET deleted_at = NOW() WHERE id = ?',
       [itemId]
     );
-    microCache.bust('dashboard');
+    microCache.bust('dashboard', DASHBOARD_AREA_ID_STOPGAP);
     res.status(200).json({ message: 'Section item removed' });
   } catch (error) {
     res.status(500).json({ code: 'SERVER_ERROR', message: error.message });
@@ -1281,7 +1285,7 @@ const reorderAdminSections = async (req, res) => {
     }
     await connection.commit();
     connection.release();
-    microCache.bust('dashboard');
+    microCache.bust('dashboard', DASHBOARD_AREA_ID_STOPGAP);
     res.status(200).json({ message: 'Sections reordered successfully' });
   } catch (error) {
     await connection.rollback();
@@ -1313,7 +1317,7 @@ const reorderAdminSectionItems = async (req, res) => {
     }
     await connection.commit();
     connection.release();
-    microCache.bust('dashboard');
+    microCache.bust('dashboard', DASHBOARD_AREA_ID_STOPGAP);
     res.status(200).json({ message: 'Section items reordered successfully' });
   } catch (error) {
     await connection.rollback();

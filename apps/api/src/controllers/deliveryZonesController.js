@@ -158,11 +158,18 @@ const listZones = async (req, res) => {
 // Unauthenticated and hit by every app that opens the map, so it goes through
 // the micro-cache instead of a table scan per request. Busted by every zone
 // mutation below, so an admin edit still shows up immediately.
-const PUBLIC_ZONES_CACHE_KEY = 'delivery-zones:public';
+//
+// Key/bust calls are hardcoded to area 1 for now (TASK 10 makes this
+// area-scoped for real, loading only the resolved area's zones — see
+// plans/multi-area.md §3.2); the plumbing is in place so that swap only
+// changes the `1` below, not the key shape.
+const PUBLIC_ZONES_AREA_ID_STOPGAP = 1;
+const publicZonesCacheKey = (areaId) => `delivery-zones:${areaId}:public`;
 const PUBLIC_ZONES_CACHE_TTL_MS = 60 * 1000;
 
 const listActiveZonesPublic = async (req, res) => {
-  const cached = microCache.get(PUBLIC_ZONES_CACHE_KEY);
+  const cacheKey = publicZonesCacheKey(PUBLIC_ZONES_AREA_ID_STOPGAP);
+  const cached = microCache.get(cacheKey);
   if (cached) return res.status(200).json({ data: cached });
 
   const [rows] = await pool.query(
@@ -175,15 +182,15 @@ const listActiveZonesPublic = async (req, res) => {
     parentZoneId: row.parent_zone_id != null ? row.parent_zone_id : null,
     parent_zone_id: row.parent_zone_id != null ? row.parent_zone_id : null,
   }));
-  microCache.set(PUBLIC_ZONES_CACHE_KEY, zones, PUBLIC_ZONES_CACHE_TTL_MS);
+  microCache.set(cacheKey, zones, PUBLIC_ZONES_CACHE_TTL_MS);
   res.status(200).json({ data: zones });
 };
 
 // Every zone write goes through here so the admin cache bust, the public
 // geometry cache bust and the customer push stay in lockstep.
 const notifyZonesChanged = (reason, zoneId) => {
-  microCache.bust('dashboard');
-  microCache.bust('delivery-zones');
+  microCache.bust('dashboard', PUBLIC_ZONES_AREA_ID_STOPGAP);
+  microCache.bust('delivery-zones', PUBLIC_ZONES_AREA_ID_STOPGAP);
   // Push so any customer mid-checkout gets the new pricing without waiting
   // for their next pin move — see realtimeClient.js's delivery_zones.updated.
   emitToAllCustomers('delivery_zones.updated', { reason, zoneId });
