@@ -1,5 +1,6 @@
 const { verifyToken } = require('../utils/auth');
 const { pool } = require('../db/mysql');
+const { resolveAdminArea } = require('./areaMiddleware');
 
 const extractToken = (req) => {
   const authHeader = req.headers.authorization;
@@ -72,6 +73,15 @@ const requireAdmin = async (req, res, next) => {
 
   // Same reasoning as requireCustomer above: a DB failure is a server error,
   // not an invalid session.
+  //
+  // revoked_before is still read from the single admin_auth_state row
+  // (id=1) regardless of which admin is authenticating — it was never
+  // restructured into one row per admin (TASK 2 only added a nullable
+  // admin_id column to the existing singleton, for audit purposes; see
+  // adminController.js login and plans/multi-area-tasks.md TASK 7/8 notes).
+  // A real per-admin revocation store is a schema change beyond this
+  // task's scope; today's shared kill-switch still does its job (any token
+  // issued before a revoke stops working) for every admin, super or area.
   if (process.env.NODE_ENV !== 'test') {
     let rows;
     try {
@@ -85,11 +95,38 @@ const requireAdmin = async (req, res, next) => {
     }
   }
 
-  req.admin = { id: payload.sub || payload.id, role: payload.role };
+  // adminRole/areaId are undefined on tokens minted before this deploy
+  // (self-heals within ADMIN_JWT_EXPIRES_IN, 12h) and on mobile-admin
+  // tokens (a separate, unrelated admin concept — see utils/auth.js).
+  // resolveAdminArea below already no-ops when adminRole is unset, leaving
+  // req.areaId unset rather than guessing.
+  req.admin = {
+    id: payload.sub || payload.id,
+    role: payload.role,
+    adminRole: payload.adminRole,
+    areaId: payload.areaId !== undefined ? payload.areaId : null,
+  };
+
+  // Chained here, rather than mounted as router-level middleware, because
+  // requireAdmin itself is applied per-route (113 call sites in
+  // adminRoutes.js, not a single router.use()) — a router.use(resolveAdminArea)
+  // placed before those routes would run before req.admin exists, and one
+  // placed after would never run at all for a route that already sent a
+  // response. Chaining internally reaches every one of those 113 call
+  // sites from this single edit, with zero changes to adminRoutes.js.
+  return resolveAdminArea(req, res, next);
+};
+
+/** Mount AFTER requireAdmin. 403s anyone but a super_admin. */
+const requireSuperAdmin = (req, res, next) => {
+  if (!req.admin || req.admin.adminRole !== 'super_admin') {
+    return res.status(403).json({ code: 'FORBIDDEN', message: 'Super admin access required' });
+  }
   next();
 };
 
 module.exports = {
   requireCustomer,
-  requireAdmin
+  requireAdmin,
+  requireSuperAdmin,
 };
