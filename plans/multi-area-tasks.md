@@ -235,32 +235,61 @@ locally** 2026-08-01 — 437-violation baseline recorded above, matches §1.1's 
 it — this project has no `eslint-plugin-jest` configured).
 **Commit:** `feat: AREA TASK 5 — area scoping guardrail test`
 
-### [ ] TASK 6 — `areaScope.js` + resolution middleware
+### [x] TASK 6 — `areaScope.js` + resolution middleware
 **Spec:** §3.1, §3.2, §4.1, §4.2 · **Files:** `[api] src/utils/areaScope.js` (new),
 `src/middleware/areaMiddleware.js` (new), `tests/areaScope.test.js` (new)
 
-- [ ] 6.1 `resolveAreaForPoint(lat, lng)` — SQL bbox prefilter on `areas`, then the **existing**
-      `matchZone` from `deliveryPricing.js` on that area's zones only. Returns
-      `{ areaId, zoneId, zone }` or `null`. Never re-implement polygon matching.
-- [ ] 6.2 `getAreaById(areaId)` and `listAreas({activeOnly})` — 60s process cache (tens of areas, not
-      millions; §3.9).
-- [ ] 6.3 `requestAreaId(req)` — single source of truth for `req.areaId`.
-- [ ] 6.4 `assertAreaAccess(req, areaId)` — throws 403 unless `super_admin`, or `area_admin` whose
-      own area matches.
-- [ ] 6.5 `bustAreaCaches(areaId)` — fans out to microCache namespaces + settings + storeMode, and
-      calls `bumpCatalogVersion(areaId)` internally so no caller can forget the ETag (§4.3).
-- [ ] 6.6 `bumpCatalogVersion(areaId)` — `UPDATE areas SET catalog_version = catalog_version + 1`.
-- [ ] 6.7 `resolveAdminArea` middleware — `area_admin` → own area; `super_admin` → `X-Area-Id`
-      header, `'all'` where allowed, else `null`.
-- [ ] 6.8 `resolveCustomerArea` middleware — request pin → `users.last_area_id` → default area
-      **only when no pin was supplied at all**. A pin resolving to no zone yields `null`, never the
-      default (§2.4).
-- [ ] 6.9 Unit tests: point in one zone; point in a nested child zone (**child must win**); point in
-      an exclusion square; point outside every zone (**returns `null`, not the default area**);
-      missing/NaN coordinates; area with no zones yet.
-- [ ] 6.10 No controller uses any of this yet.
+- [x] 6.1 `resolveAreaForPoint(lat, lng)` — bbox prefilter over `areas` (an area with no bbox yet —
+      true for every area until TASK 10 starts recomputing it on zone writes — is always a
+      candidate, a safe over-approximation), then the **existing** `matchZone` from
+      `deliveryPricing.js`, imported and called unchanged, never reimplemented. Zones themselves are
+      loaded with a small dedicated `WHERE area_id = ?` query in `areaScope.js` — deliberately *not*
+      routed through `deliveryPricing.js`'s `loadActiveZones(db)`, which still loads every zone
+      platform-wide until TASK 10 gives it an area filter. This means area resolution is genuinely
+      area-scoped starting now, not just after TASK 10 catches up. Returns
+      `{ areaId, zoneId, zone }` or `null`.
+- [x] 6.2 `getAreaById(areaId)` and `listAreas({activeOnly})` — both backed by one 60s-cached
+      `SELECT * FROM areas` (`getAreaById` filters the cached list rather than caching per-id, so
+      there's one cache entry to invalidate, not N).
+- [x] 6.3 `requestAreaId(req)` — throws only when `req.areaId` is `undefined` (middleware never ran);
+      `null` and `'all'` are treated as legitimately resolved values and returned as-is.
+- [x] 6.4 `assertAreaAccess(req, areaId)` — throws `{statusCode: 403, code: 'FORBIDDEN'}` (shaped for
+      `errorHandler.js`, matching its `err.statusCode`/`err.code` convention) unless `super_admin`,
+      or `area_admin` whose own area matches.
+- [x] 6.5 `bustAreaCaches(areaId)` — busts the three now-area-shaped microCache namespaces
+      (`dashboard`, `categories`, `delivery-zones`) for real, plus this module's own zone cache, then
+      calls `bumpCatalogVersion(areaId)`. Also calls `bustSettingsCache()` / `invalidateStoreModeCache()`
+      (lazy-required, same circular-import reasoning as `utils/shops.js`'s existing lazy requires) —
+      **documented as partial**: those two stay zero-arg/area-1-only until TASK 9/11 parameterize
+      them, so calling them here is forward-compatible plumbing, not yet a real per-area bust. Wrapped
+      in try/catch so a unit test that hasn't loaded `settingsController`/`storeMode` doesn't fail.
+- [x] 6.6 `bumpCatalogVersion(areaId)` — the increment update, plus invalidates the areas cache (the
+      row it just changed would otherwise read stale for up to 60s).
+- [x] 6.7 `resolveAdminArea` middleware, **including the TASK 8 security requirement built in now
+      rather than retrofitted**: an `area_admin` sending *any* `X-Area-Id` (including `'all'`) gets
+      403, never a silent override — tested directly via mock `req`/`res`/`next`, independent of
+      TASK 7/8's real JWT wiring. `super_admin` gets the header as a positive integer, the literal
+      `'all'`, or `null` when absent; a non-numeric, non-`'all'` header is a 400.
+- [x] 6.8 `resolveCustomerArea` middleware — pin (checks `latitude`/`longitude` then `lat`/`lng` in
+      body then query, matching the exact precedence already used in `cartController.js`) → zone →
+      area; else `users.last_area_id`; else the default area **only when no pin was supplied at
+      all**. A pin resolving to no zone sets `req.areaId = null` and `req.zoneId = null` — verified
+      by an explicit test that this is `null`, not the default area's id.
+- [x] 6.9 Unit tests, all passing: point in one zone; nested child zone winning over its parent
+      (proves `matchZone` reuse); a point inside an exclusion square still resolving normally
+      (proves exclusion zones are — correctly — never consulted by this function, and that the
+      exclusion-zones table is never even queried: `pool.query` called exactly twice); point outside
+      every zone returning `null`; missing/NaN/non-numeric coordinates short-circuiting with zero DB
+      calls; an area with zero zone rows matching nothing without erroring; the bbox prefilter
+      actually excluding a real-bboxed area that can't contain the point.
+- [x] 6.10 Confirmed zero controller/route changes — `grep -rln "areaScope\|areaMiddleware" src/` only
+      matches the two new files themselves and their test.
 
-**Done when:** full unit coverage of the resolver, zero controller changes.
+**Done when:** full unit coverage of the resolver, zero controller changes. **Verified locally**
+2026-08-01: 32/32 new tests pass on first run; `npm test` 87/87 suites (959/961, same 2
+pre-existing skips); `npx eslint` clean on all three new files; guardrail baseline (TASK 5) unchanged
+at 437 — confirms `areaScope.js`'s own `delivery_zones` query is correctly recognized as
+`area_id`-scoped and doesn't itself add a new finding.
 **Commit:** `feat: AREA TASK 6 — areaScope module + resolution middleware`
 
 ---
@@ -767,7 +796,7 @@ Set up: area 2 with its own admin, shop, rider, zone and catalog.
 | Phase | Tasks | Status |
 |---|---|---|
 | 0 — Safety gate | 0 | ◐ (0.7 only — prod rehearsal 0.1-0.6/0.8-0.9 pending real access) |
-| A — Foundations | 1–6 | ◐ (1–3 done, verified locally; 4–6 pending) |
+| A — Foundations | 1–6 | ✅ done, verified locally |
 | B — Auth | 7–8 | ☐ |
 | C — Backend sweep | 9–17 | ☐ |
 | D — Libraries | 18–22 | ☐ |
