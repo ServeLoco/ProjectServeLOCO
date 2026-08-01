@@ -86,13 +86,18 @@ let lastSyncAt = 0;
 /**
  * One-shot: obtains the customer's delivery location — live GPS unless
  * they've dropped a manual pin (Home's "Change Location", which wins until
- * they change it again) — and checks it against the admin's delivery zones.
- * Feeds useDeliveryLocationStore, which Home reads for the outside-zone
- * banner and Cart/Checkout read for pricing. Exported so
+ * they change it again on a resume sync) — and checks it against the admin's
+ * delivery zones. Feeds useDeliveryLocationStore, which Home reads for the
+ * outside-zone banner and Cart/Checkout read for pricing. Exported so
  * LocationPermissionGate can fire it the instant permission is granted,
  * instead of waiting for the next foreground/background cycle.
+ *
+ * `coldStart`: true only for the mount-time call from a full app
+ * close+reopen — live GPS overrides even a saved manual pin as the default
+ * in that case. Foreground-resume calls omit it, keeping the manual pin's
+ * normal precedence.
  */
-async function syncDeliveryLocation() {
+async function syncDeliveryLocation({ coldStart = false } = {}) {
   lastSyncAt = Date.now();
   const {
     coords, source, zoneId: previousZoneId,
@@ -100,7 +105,10 @@ async function syncDeliveryLocation() {
   } = useDeliveryLocationStore.getState();
 
   const sync = async () => {
-    if (source === 'manual' && coords) {
+    // A full app close+reopen always defaults to live GPS, even over a saved
+    // manual pin — only a background/foreground resume respects the manual
+    // pin's normal precedence.
+    if (!coldStart && source === 'manual' && coords) {
       // Re-validate the saved pin (a zone may have since changed/been
       // removed) without moving it — only Home's Change Location does that.
       const result = await checkInsideZone(coords.lat, coords.lng);
@@ -156,6 +164,7 @@ async function syncDeliveryLocation() {
       result?.insideZone ?? null,
       result?.zoneName ?? null,
       result?.zoneId ?? null,
+      { force: coldStart },
     );
     if (result !== null && result.zoneId !== previousZoneId) {
       revalidateCartForZoneChange(latitude, longitude);
@@ -185,7 +194,7 @@ async function syncDeliveryLocation() {
  */
 function useDeliveryLocationSync() {
   useEffect(() => {
-    syncDeliveryLocation();
+    syncDeliveryLocation({ coldStart: true });
 
     const sub = AppState.addEventListener('change', (next) => {
       if (next !== 'active') return;

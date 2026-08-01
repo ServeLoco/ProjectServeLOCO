@@ -29,8 +29,10 @@ export const useDeliveryLocationStore = create(
       // waits for the current location check before Home reveals products.
       isInitialSyncComplete: false,
 
-      setGpsLocation: (lat, lng, insideZone, zoneName = null, zoneId = null) => {
-        if (get().source === 'manual') return; // manual pin wins until explicitly changed
+      // force=true bypasses the manual-pin-wins rule — used only on a cold
+      // app start, which must always default to live GPS.
+      setGpsLocation: (lat, lng, insideZone, zoneName = null, zoneId = null, { force = false } = {}) => {
+        if (get().source === 'manual' && !force) return; // manual pin wins until explicitly changed
         set({ coords: { lat, lng }, source: 'gps', insideZone, zoneName, zoneId });
       },
 

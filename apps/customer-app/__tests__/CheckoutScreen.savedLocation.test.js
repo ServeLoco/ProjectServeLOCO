@@ -7,10 +7,10 @@ const source = fs.readFileSync(
 );
 
 describe('CheckoutScreen saved delivery location', () => {
-  it('uses the shared saved location instead of auto-locating the device', () => {
+  it('falls back to the shared saved location as map centre, but auto-locates live GPS on open', () => {
     expect(source).toMatch(/useDeliveryLocationStore\(state => state\.coords\)/);
     expect(source).toMatch(/initialCenter=\{savedDeliveryLocation/);
-    expect(source).toMatch(/autoLocateOnMount=\{false\}/);
+    expect(source).toMatch(/autoLocateOnMount(?!=\{false\})/);
   });
 
   it('uses the moved pin for live pricing before confirmation', () => {
