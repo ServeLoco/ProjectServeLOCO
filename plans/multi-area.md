@@ -81,7 +81,7 @@ existing request path.** Every task below is written to keep per-request cost fl
 | Settings | `migrate.js:704` | **Singleton row.** 27 read sites do `LIMIT 1`. |
 | Settings cache | `settingsController.js:12` | `createTtlCache({ttlMs:15_000})`, single key `'settings'`. |
 | Zone load | `deliveryPricing.js:291` | `SELECT * FROM delivery_zones WHERE active = 1` — **loads every zone on the planet**, then does point-in-polygon in JS. Called on every cart preview and every order create. |
-| Zone matcher | `deliveryPricing.js` `matchZone` | Nested zones supported: deepest child wins, then smallest area. This is already the right resolution unit — see §2.10. |
+| Zone matcher | `deliveryPricing.js` `matchZone` | Nested zones supported: deepest child wins, then smallest area. This is already the right resolution unit — see §2.4. |
 | Public zone geometry | `deliveryZonesController.js:164` | Returns all polygons to every app that opens the map. |
 | Dashboard | `dashboardController.js:419` | Cache key `dashboard:${storeType}:closed=${0|1}`. 50 query sites in the file. |
 | **Product search** | `productController.js:377` and `:635` | **`AND p.name LIKE '%term%'`** — leading wildcard, so no index can ever be used. Full table scan of `products`, per keystroke-ish request. See §3.11. |
@@ -152,7 +152,7 @@ A client-sent `areaId` is accepted only as a *hint for cold start with no pin*, 
 An `area_admin`'s area comes from their JWT and cannot be overridden by any header or body field.
 Only a `super_admin` may target another area, and only via the `X-Area-Id` header (TASK 8).
 
-### 2.10 The pin decides everything — and the zone is the unit
+### 2.4 The pin decides everything — and the zone is the unit
 
 **The customer's live pin, resolved to a delivery zone drawn in the admin panel, decides the entire
 customer-facing surface:** which catalog loads, which dashboard renders, which store modes exist,
@@ -173,7 +173,7 @@ pin (lat,lng)  →  delivery zone (admin-drawn polygon, nested child wins)  → 
   product, even by name, even with an exact match. Search that leaks across areas is the most
   likely way a customer ends up looking at a price they cannot buy at. See §3.11 and TASK 22.
 - **Pin outside every zone** = no area = a "we don't deliver here yet" state. Not an empty catalog,
-  not the default area's catalog. The default area (§2.9) is a fallback for *old clients that send
+  not the default area's catalog. The default area (§2.12) is a fallback for *old clients that send
   no pin at all*, never for a pin that resolved to nothing.
 - **Pin moves across an area boundary mid-session** = the cart clears, catalog/dashboard/settings
   refetch, and the socket room is rejoined (TASK 29). A cart assembled at Area 1 prices must never
@@ -181,7 +181,7 @@ pin (lat,lng)  →  delivery zone (admin-drawn polygon, nested child wins)  → 
 - Cold start keeps the existing rule already shipped on `main`: live GPS wins over a saved manual
   pin. The area follows the pin that actually wins, not the stored one.
 
-### 2.4 Product library: identity is shared, commerce is per-area
+### 2.5 Product library: identity is shared, commerce is per-area
 
 **One product is authored once.** Its name, image, description, unit and variant *labels* live in a
 global library. Its **price, availability, category placement, shop linkage and display order are
@@ -225,7 +225,7 @@ Rules:
 - Deleting a library item never deletes area rows. It archives the library item and leaves the area
   products standing (they become local-only). Destructive fan-out across areas is not allowed.
 
-### 2.5 Images are global, deduplicated on *new* uploads only
+### 2.6 Images are global, deduplicated on *new* uploads only
 
 `images` is already global. Add `sha256 CHAR(64)` with a **non-unique** index. On upload, hash the
 bytes, look for an existing row, and return it instead of inserting. With N areas reusing one
@@ -238,7 +238,7 @@ to `images` (`products.image_id` is a bare `VARCHAR(255)`, `migrate.js:333`). On
 a permanently broken image with nothing to detect it. Report duplicates in the admin Images page;
 never auto-merge. See §6.5.
 
-### 2.11 What else gets the library treatment — and what does not
+### 2.7 What else gets the library treatment — and what does not
 
 The library pattern is **identity (global, synced) vs placement/commerce (per-area, independent)**.
 Applying it everywhere is not free: every synced entity is one more propagation path to test. The
@@ -249,7 +249,7 @@ towns should diverge, a one-time clone (TASK 24) is enough and cheaper.
 
 | Entity | Global identity | Per-area | Why |
 |---|---|---|---|
-| Products | name, image, description, unit, variant labels | price, availability, category, shop, order | §2.4 — the whole point |
+| Products | name, image, description, unit, variant labels | price, availability, category, shop, order | §2.5 — the whole point |
 | **Categories** | name, icon image, `type` | `active`, `display_order`, which products land in it | "Dairy", "Snacks" are the same everywhere. A rename should reach every town. High reuse, trivial propagation. |
 | **Store modes** | `slug`, `label`, icon image | `active`, `display_order`, `is_default` | `packed`/`fast_food` are already `is_system` rows. Area 3 may not run fast food at all — that is a per-area toggle, not a different mode. |
 | **Units** | the `unit` string itself | — | `products.unit` is free-text `VARCHAR(50)` today. Across N areas that becomes `kg`, `Kg`, `KG`, `kilogram` and the app renders all four. A tiny `units` lookup ends it. Folded into TASK 23. |
@@ -262,19 +262,46 @@ towns should diverge, a one-time clone (TASK 24) is enough and cheaper.
 | Offers / banners | Creative is seasonal and local. The *image* is already shared via the global `images` table, which is the part actually worth reusing. |
 | Combos | A combo's member products are per-area rows with per-area prices; a shared combo definition would need a per-area price anyway, and combos are far rarer than products. Clone covers it. |
 
-**Already global — leave alone:** `images` (§2.5), `notification_templates` (`event_key` UNIQUE),
+**Already global — leave alone:** `images` (§2.6), `notification_templates` (`event_key` UNIQUE),
 `cancelReasons` (constants in code). Do not "improve" these.
 
 **Explicitly not now:** coupon templates. A coupon carries 30+ rule columns plus redemption
 accounting, usage limits and `FOR UPDATE` locking. A shared template with per-area budgets is a
 real feature with its own audit requirements, not a column on an existing table. v2 — see §7.
 
-### 2.6 Two admin roles only
+### 2.8 Areas are operationally independent — the libraries are an authoring tool, not a link
+
+**Confirmed by the product owner 2026-08-01.** Area 2 is a completely new operation: its own shops,
+riders, offers, coupons, zones, settings, UPI ID, support phone, order history and admin. Nothing in
+Area 2's day-to-day running reads or depends on Area 1's data. Same code, same schema, same admin
+panel UI — separate data.
+
+This does **not** contradict the shared libraries of §2.5 and §2.7. Hold both facts:
+
+- The library is a **template source consulted at authoring time**, not a runtime dependency.
+  `materializeToArea` writes brand-new `products` / `product_variants` rows owned by Area 2. Every
+  read path at runtime touches only Area 2's own rows.
+- **Nothing Area 1 does to its products affects Area 2.** Area 1 changing a price, hiding an item,
+  assigning it to a shop, or deleting it entirely is invisible to Area 2. Those are area-owned
+  columns and they are never propagated (§2.5, §6.7).
+- The *only* cross-area effect that exists at all is a deliberate edit to a **library** entry, which
+  syncs identity (name, image, description, variant labels) to every area that opted in. That is the
+  feature the product owner asked for — author once, reuse everywhere — and it is the complete list
+  of cross-area coupling in this system.
+- Area 2 **opts in** to library items one at a time. It does not inherit Area 1's catalog by
+  default, and a library item Area 2 never adds simply does not exist for Area 2.
+- An area that wants no shared identity at all can run entirely on local-only products
+  (`library_product_id IS NULL`) and behave exactly like a standalone deployment.
+
+Practical consequence for TASK 30's isolation test: "Area 2 sees nothing of Area 1" must hold for
+every table **except** the deliberate library-identity sync, which gets its own explicit assertion.
+
+### 2.9 Two admin roles only
 
 `super_admin` (area_id NULL, sees everything, creates areas and admins, owns the libraries) and
 `area_admin` (bound to exactly one area). No per-page permission matrix in v1.
 
-### 2.7 Super admin operates every area's panel — and an all-areas view
+### 2.10 Super admin operates every area's panel — and an all-areas view
 
 - Every one of the 23 existing admin pages works for a super admin against **any** area, selected
   from one switcher in the shared layout. No parallel copy of any page.
@@ -284,17 +311,17 @@ real feature with its own audit requirements, not a column on an existing table.
   super admin to pick an area.
 - Super admin joins **every** area's admin socket room, so live order feeds work in all-areas mode.
 
-### 2.8 Area boundary = union of its delivery zones
+### 2.11 Area boundary = union of its delivery zones
 
 An area has no separate polygon to maintain. Its footprint is the union of its `delivery_zones`.
 For fast lookup, each area caches a **bounding box** (`min_lat, max_lat, min_lng, max_lng`)
 recomputed on every zone write. See §3.2.
 
-### 2.9 Backward compatibility for existing installs
+### 2.12 Backward compatibility for existing installs
 
 Existing data becomes area `id = 1`, code `A1`. A legacy client (old app build) that hits a public
 endpoint **with no pin at all** gets the default area (`areas.is_default = 1`). Nothing 404s during
-rollout. A pin that resolves to nothing is *not* covered by this fallback (§2.10). Existing products
+rollout. A pin that resolves to nothing is *not* covered by this fallback (§2.4). Existing products
 stay local-only until someone deliberately promotes them into the library (TASK 18).
 
 ---
@@ -366,7 +393,7 @@ Required (TASK 22):
   index is maintained once instead of N times.
 - Customer-side search stays area-scoped and hits `products` (it must reflect that area's
   availability and price), but now via `MATCH` behind the `area_id` predicate.
-- Assert in a test that a customer search in Area 2 returns zero Area 1 products (§2.10).
+- Assert in a test that a customer search in Area 2 returns zero Area 1 products (§2.4).
 
 ### 3.4 Caches are keyed by area and busted by area
 
@@ -423,7 +450,7 @@ it that way. Out of scope for this spec, but do not let it be discovered in prod
 The area name/code shown in admin lists comes from a single `areas` lookup joined once, or from a
 process-level `areas` map cached for 60s (there will be tens of areas, not millions). Never one
 `SELECT` per order row. Same for library names in the per-area product list — they are already
-denormalized into `products.name` (§2.4), so no join is needed at all.
+denormalized into `products.name` (§2.5), so no join is needed at all.
 
 ### 3.10 Public catalog reads become conditional
 
@@ -457,7 +484,7 @@ bumpCatalogVersion(areaId)        // §3.10, called from inside bustAreaCaches
 
 - `resolveAdminArea` — runs after `requireAdmin`. `area_admin` → own area. `super_admin` → the
   `X-Area-Id` header, `'all'` where the endpoint allows it, or `null`.
-- `resolveCustomerArea` — runs on customer routes that need an area. Order of resolution, per §2.10:
+- `resolveCustomerArea` — runs on customer routes that need an area. Order of resolution, per §2.4:
   1. request pin (`latitude`/`longitude` in body or query) → zone → area,
   2. `users.last_area_id` — backfilled from the user's most recent order, because the server stores
      no saved customer pin of its own (H1),
@@ -646,16 +673,19 @@ shapes byte-identical for a single-area install, run `npm test`.
   **Do not touch** the offer lifecycle.
 - [ ] **TASK 16 — Notifications, admin notifications, broadcast push** (14 sites). A broadcast is
   scoped to one area unless a super admin explicitly opts into "all areas".
-- [ ] **TASK 17 — Analytics + reports** (MySQL + Mongo). Mongo docs gain `areaId`; indexes become
-  `{areaId:1, date:1}` unique for `analytics_daily` and `{areaId:1, createdAt:-1}` compounds for
-  sessions/events. Report endpoints group by area; super admin gets the all-areas roll-up of §2.7.
+- [ ] **TASK 17 — Analytics + reports** (MySQL + Mongo). Follow §9.5 exactly: stamp `areaId` at
+  `insertEvents` / the session insert, `updateMany` only `analytics_daily` (sessions and events
+  self-expire in 30 days — **do not write a backfill for them**), rebuild the indexes listed there,
+  and **leave every TTL index single-field on `createdAt`** or expiry silently stops. Rollup groups
+  by `(areaId, date)`. Report endpoints group by area; super admin gets the all-areas roll-up
+  of §2.10.
 
 ### Phase D — Shared libraries
 
 - [ ] **TASK 18 — Library tables + image dedupe + backfill**
-  Create `product_library` and `library_variants` per §2.4. Add `products.library_product_id INT
+  Create `product_library` and `library_variants` per §2.5. Add `products.library_product_id INT
   NULL` and `product_variants.library_variant_id INT NULL` (both at end of row, both indexed).
-  Add `images.sha256 CHAR(64) NULL` + **non-unique** index (§2.5); compute the hash on upload and
+  Add `images.sha256 CHAR(64) NULL` + **non-unique** index (§2.6); compute the hash on upload and
   return the existing row on a duplicate. Backfill existing images' hashes in a batched sweep —
   this only populates the column, it never deletes or merges anything. Add the same "in this
   release, not later" rule as `getUsedImageIds` below: this task and TASK 21 must each extend
@@ -692,7 +722,7 @@ shapes byte-identical for a single-area install, run `npm test`.
   byte-identical.
 
 - [ ] **TASK 21 — Category + store-mode libraries**
-  Per §2.11. `category_library (id, name, slug, type, image_id, archived)` and
+  Per §2.7. `category_library (id, name, slug, type, image_id, archived)` and
   `store_mode_library (id, slug, label, icon_image_id, is_system, archived)`; `categories` and
   `store_modes` gain a nullable `library_*_id`. Identity (name/slug/icon) propagates via the same
   batched-UPDATE mechanism as TASK 20 — **reuse it, do not write a second one** (§4.5). `active`,
@@ -704,7 +734,7 @@ shapes byte-identical for a single-area install, run `npm test`.
   `MATCH … AGAINST` behind an `area_id` predicate, keeping `LIKE` only for sub-minimum-token terms.
   Add `FULLTEXT` to `products.name` and `product_library.name`. Admin "find a product to add"
   searches the **library** (one global index) and maps to area rows via `library_product_id`.
-  Add the `units` lookup table (§2.11) and point `product_library.unit_id` at it, backfilling
+  Add the `units` lookup table (§2.7) and point `product_library.unit_id` at it, backfilling
   distinct existing `products.unit` strings; `products.unit` keeps its current free-text column and
   value so no response shape changes.
   **Test: a customer search in Area 2 returns zero Area 1 products.**
@@ -723,11 +753,15 @@ shapes byte-identical for a single-area install, run `npm test`.
   `POST /admin/areas` (creates the area, its settings row and its system store_modes in one
   transaction), `GET /admin/areas`, `PATCH /admin/areas/:id`, `POST /admin/admins`,
   `GET /admin/admins`, `PATCH /admin/admins/:id`.
-  Plus `POST /admin/areas/:id/clone-from/:sourceId` — copies categories, store modes, dashboard
-  sections, offers and library-linked products (with a price multiplier or a flat copy) from an
-  existing area. **Never** copies orders, customers, riders, shops or coupons. This is what makes
-  launching area #3 a ten-minute job instead of a week of data entry, and it is the mechanism for
-  everything in the "clone once, then diverge" column of §2.11.
+  **A new area is created empty.** Per §2.8 it gets only its own `settings` row and its own system
+  store modes — no catalog, no shops, no riders, no offers. That is the default and the expected
+  path.
+  Cloning is a separate, explicitly-invoked convenience:
+  `POST /admin/areas/:id/clone-from/:sourceId` — copies categories, store modes, dashboard sections,
+  offers and library-linked products (with a price multiplier or a flat copy) from an existing area.
+  **Never** copies orders, customers, riders, shops or coupons. The copies are independent rows with
+  no ongoing link to the source (§2.8) — this is the mechanism for the "clone once, then diverge"
+  column of §2.7, and it is what makes launching area #4 fast once a template area exists.
   Clone **refuses with 409** against a target area that already has categories or products, so a
   double click cannot duplicate a catalog (§6.8).
   **Ship the §6.6 gate in this task, not as a follow-up:** `POST /admin/areas` returns 409 unless
@@ -740,7 +774,7 @@ shapes byte-identical for a single-area install, run `npm test`.
   `apps/admin/src/api/client.js`: attach `X-Area-Id` from a single store, one place (§4.4). Area
   dropdown in the existing layout, visible only to `super_admin`, including an "All areas" option
   that sends `X-Area-Id: all`. Switching areas clears client-side query caches. Pages that reject
-  `all` (§2.7) show an inline "pick an area" state instead of an error toast. `area_admin` sees no
+  `all` (§2.10) show an inline "pick an area" state instead of an error toast. `area_admin` sees no
   switcher, no Areas page, no Library editing.
 
 - [ ] **TASK 26 — Areas, Admins and Library pages**
@@ -750,7 +784,7 @@ shapes byte-identical for a single-area install, run `npm test`.
   visible list of which areas already carry each item. Tabs for Products / Categories / Store Modes
   libraries — one page, three tabs, not three pages. The existing Products page gains a
   "+ Add from Library" button next to "+ New Product", and shows library-managed fields as
-  read-only with a link to the library entry (§2.4).
+  read-only with a link to the library entry (§2.5).
 
 ### Phase G — Payload optimization + customer app
 
@@ -760,7 +794,9 @@ shapes byte-identical for a single-area install, run `npm test`.
   (§3.10).
   Add `GET /bootstrap?lat=&lng=` returning `{ area, zone, settings, storeModes, zoneGeometry,
   catalogVersion }` in one response, or the "we don't deliver here yet" shape when the pin resolves
-  to no zone (§2.10). Today the app cold-starts with `settingsApi.getSettings()` and
+  to no zone (§2.4). **`settings` here must carry the resolved area's `upi_id`, `upi_qr_image_id`,
+  `support_phone` and `whatsapp_number`** — each area has its own (§9.4 item 4), and the UPI target
+  in particular decides which bank account a customer's payment reaches. Today the app cold-starts with `settingsApi.getSettings()` and
   `dashboardApi.getDashboard()` as separate round trips (`HomeScreen.js:355,359`) plus store modes
   and zones elsewhere — on a rural 3G connection that is four sequential handshakes before the first
   pixel. Keep every existing endpoint working unchanged; `bootstrap` is additive.
@@ -769,7 +805,7 @@ shapes byte-identical for a single-area install, run `npm test`.
   On cold start and on every pin change, the app calls `/bootstrap` with the live pin and stores
   `areaId`, `zoneId`, `areaName`, `brandColor`, `catalogVersion` alongside the pin in
   `useDeliveryLocationStore`. Catalog, dashboard, store modes and search all key off the stored
-  `areaId` (§2.10). Respect the existing cold-start rule already on `main`: live GPS wins over a
+  `areaId` (§2.4). Respect the existing cold-start rule already on `main`: live GPS wins over a
   saved manual pin — the area follows the pin that actually wins. Send `If-None-Match` from the
   stored `catalogVersion` on subsequent catalog fetches.
 
@@ -794,7 +830,14 @@ shapes byte-identical for a single-area install, run `npm test`.
   name/image/variant labels and **different prices**; a library rename updates both areas and
   changes neither price; a category rename in the library reaches both areas but does not change
   either area's `display_order`; a super admin can load all 23 pages against either area and the
-  all-areas roll-up. Guardrail test green with no new allowlist entries.
+  all-areas roll-up.
+  **Money and contact routing (§9.4 item 4):** a pin in Area 2 shows Area 2's `support_phone` and
+  `whatsapp_number`, and the checkout UPI target is Area 2's `upi_id` / QR — not Area 1's. Assert
+  this explicitly; a wrong UPI ID sends real customer money to the wrong bank account.
+  **Independence (§2.8):** changing an Area 1 product's price, availability, shop or category
+  produces **zero** change in Area 2. The only permitted cross-area effect is a deliberate library
+  identity edit, which gets its own separate assertion.
+  Guardrail test green with no new allowlist entries.
   **Area 1's production data is unchanged throughout:** re-run the TASK 0 row-count comparison and
   spot-check that Area 1's prices, order history and order-number formats are exactly what they were
   before TASK 1. Only once every assertion above passes may you set the `areas_sweep_complete` flag
@@ -905,7 +948,7 @@ query lives in the settings controller.
   commit that creates each table**, deleting the last per-area product using an image deletes an
   image the library still needs — and every area that later adopts that library item gets a broken
   image, with no error anywhere.
-- Historical duplicate images are reported, never merged (§2.5).
+- Historical duplicate images are reported, never merged (§2.6).
 
 ### 6.6 Exactly one area exists until the sweep is finished
 
@@ -942,11 +985,11 @@ and display order is byte-identical afterwards.
 | Operation | Behaviour |
 |---|---|
 | Delete an area | Not supported. Deactivate only. |
-| Delete a library item | Archive only. Per-area products survive as local-only (§2.4). |
+| Delete a library item | Archive only. Per-area products survive as local-only (§2.5). |
 | Remove a library variant | Soft-delete per-area rows (`deleted = 1`). Live carts and order snapshots hold `product_variants.id` and must keep resolving. |
 | Clone an area | Refuses to run against an area that already has categories or products, so a double click cannot duplicate a catalog. |
 | Promote to library | Creates a library row and links the source product. Touches no other area's rows. |
-| Existing products | Stay local-only until an admin explicitly promotes them. No auto-promotion (§2.9). |
+| Existing products | Stay local-only until an admin explicitly promotes them. No auto-promotion (§2.12). |
 
 ### 6.9 Rollback posture per phase
 
@@ -964,7 +1007,7 @@ and display order is byte-identical afterwards.
 Phases A–B are additive: old code ignores `area_id`, old clients keep working. Phase C is the risky
 stretch — ship it domain by domain, each with `npm test` green and the guardrail test tightening.
 Phase D is additive again (nothing is forced into a library). Phase G requires an app release, so
-keep the API tolerant of area-unaware clients (§2.9) until adoption is high.
+keep the API tolerant of area-unaware clients (§2.12) until adoption is high.
 
 **Area 2 is not created until TASK 30 passes (§6.6).** Everything before that runs single-area,
 which means every deploy in Phases A–F is verifiable against production behaviour that must not
@@ -997,21 +1040,21 @@ how tenancy migrations fail:
 
 - **Coupon templates** — a shared rule definition with per-area activation and budgets. Coupons carry
   30+ rule columns, redemption accounting, usage limits and `FOR UPDATE` locking; a cross-area
-  template needs its own audit trail. (§2.11.)
+  template needs its own audit trail. (§2.7.)
 - Per-area price *rules* (e.g. "Area 3 = Area 1 + 8%") as a live formula rather than a copied number.
   The bulk price map in TASK 19 covers the practical need.
 - Scheduled price changes / time-boxed price lists.
-- Combo and offer libraries — clone covers them today (§2.11).
+- Combo and offer libraries — clone covers them today (§2.7).
 - Moving a shop, rider or order between areas.
 - Per-page or per-capability admin permissions beyond the two roles.
-- Customer-visible area switching in the app — the area always follows the delivery pin (§2.10).
+- Customer-visible area switching in the app — the area always follows the delivery pin (§2.4).
 - A separate database per area — revisit only if one area's write volume starves the others.
 - Shared caches in Redis — required *before* running more than one API container (§3.8).
 
 ## 8. OUT OF SCOPE (v1)
 
 - Deleting an area (deactivate only).
-- Hard-deleting a library item (archive only — §2.4).
+- Hard-deleting a library item (archive only — §2.5).
 - Cross-area customer accounts merging or splitting.
 
 ---
@@ -1130,19 +1173,59 @@ becomes a source of NULL `area_id` rows that fail the NOT NULL step on any dev m
 large but not enormous. Measure it in TASK 0 (`SELECT COUNT(*) FROM orders`, plus
 `information_schema.TABLES` data length) before estimating the migration window.
 
-### 9.4 Open product decisions — answer before Phase C, not during
+### 9.4 Product decisions — ANSWERED 2026-08-01, do not re-ask
 
-These have no technically correct answer; they need the product owner. Leaving them open until the
-sweep is underway means a mid-sweep schema change.
+1. **One rider serves exactly one area.** `riders.area_id` and `shops.area_id` stay single-valued.
+   No join table, no boundary-sharing model. A rider who needs to work a second area gets a second
+   rider record there (their `users` row is global, so the same phone still works — but
+   `riders.user_id` is UNIQUE, so this needs a deliberate decision if it ever comes up; it is out of
+   scope for v1).
+2. **Areas are operationally independent** — see §2.8, now a locked decision. Past orders keep the
+   `area_id` they were placed in. Reorder/repeat flows must **fail gracefully** when a product from
+   an old order does not exist in the customer's current area: show the order, disable the reorder
+   action, explain why. Never silently substitute a different area's product.
+3. **Mongo analytics** — handled per §9.5 below. No risky backfill required.
+4. **Area 2 launches with its own UPI ID, phone number and support contact.** All three already live
+   in `settings`, so per-area is free once TASK 9 lands. **But the customer app currently renders one
+   support number and one UPI target** — TASK 27 must serve them from the resolved area's settings
+   via `/bootstrap`, and TASK 28 must consume them. Verify in TASK 30 that a pin in Area 2 shows
+   Area 2's support number and pays to Area 2's UPI ID. Getting this wrong routes real money to the
+   wrong account.
 
-1. **A shop or rider near an area boundary.** `riders.area_id` and `shops.area_id` are single-valued
-   in this spec. If a rider genuinely serves two towns, the model needs a join table — a schema
-   change, not a tweak. Confirm single-area is acceptable.
-2. **A customer in Area 2's geography with order history from Area 1's config.** Their past orders
-   stay `area_id = 1` (that is where they were placed). Confirm that reorder/repeat-order flows are
-   allowed to fail gracefully when the product no longer exists in their current area.
-3. **Historical Mongo analytics have no area** and cannot be reconstructed. Recommendation: stamp all
-   pre-migration docs `areaId: 1` and accept that cross-area history starts at the migration date.
-4. **Does Area 2 launch with its own phone number, UPI ID and support contact?** These live in
-   `settings`, so per-area is free — but the customer app currently shows one support number, and
-   somebody has to actually staff a second one.
+### 9.5 Mongo analytics — the TTL does the migration for you
+
+The three analytics collections have very different lifetimes
+(`services/analytics/collections.js:9-11`), and that difference makes this far cheaper than a normal
+backfill:
+
+| Collection | TTL | Approach |
+|---|---|---|
+| `analytics_sessions` | **30 days** | **No backfill.** Stamp new docs with `areaId`; existing docs age out on their own within 30 days. |
+| `analytics_events` | **30 days** | Same — no backfill. |
+| `analytics_daily` | 365 days | One doc per date, so ~365 docs total. A single `updateMany({ areaId: { $exists: false } }, { $set: { areaId: 1 } })`. Cheap enough to need no batching. |
+
+Why stamping historical docs `areaId: 1` is correct rather than a fudge: Area 1 is the only area that
+has ever existed, and §6.6 forbids creating Area 2 until the sweep is complete. Every pre-migration
+document genuinely *is* Area 1 data. During the transition window, treat a missing `areaId` as area 1
+at query time.
+
+Index changes (TASK 17), following the same leftmost-prefix rule as §3.3:
+
+```
+analytics_daily     drop { date: 1 } unique   →  create { areaId: 1, date: 1 } unique
+analytics_events    add  { areaId: 1, createdAt: -1 }
+                    { type: 1, createdAt: -1 }              → { areaId: 1, type: 1, createdAt: -1 }
+                    { productId: 1, type: 1, createdAt: -1 } → { areaId: 1, productId: 1, type: 1, createdAt: -1 }
+analytics_sessions  add  { areaId: 1, createdAt: -1 }
+```
+
+**Leave every TTL index exactly as it is.** A MongoDB TTL index must be single-field on the date
+column — `{ createdAt: 1 }` with `expireAfterSeconds`. Making it compound silently stops expiry and
+the collections grow without bound. Backfill `analytics_daily.areaId` **before** creating its new
+unique index.
+
+Stamping points: `insertEvents` (`eventStore.js:70`) and the session insert (`sessionStore.js:15`)
+take an `areaId` from `resolveCustomerArea` on the ingest route. An event fired before the app knows
+its area (cold start, no pin) falls back to `users.last_area_id`, then to the default area — the
+same chain as §4.2. The rollup (`rollup.js`) groups by `(areaId, date)` and writes one daily doc per
+area.
