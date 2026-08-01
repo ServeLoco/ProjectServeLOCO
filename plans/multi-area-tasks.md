@@ -345,22 +345,53 @@ throwaway row and reset `admin_auth_state` back to clean. `npm test` 87/87 suite
 pre-existing skips); `npx eslint` clean on all 4 touched files.
 **Commit:** `feat: AREA TASK 7 — admin login against admins table`
 
-### [ ] TASK 8 — `requireAdmin` sets area; `requireSuperAdmin`
-**Spec:** §2.3, §4.2 · **Files:** `[api] src/middleware/authMiddleware.js`, `src/app.js`,
-`src/routes/adminRoutes.js`, `tests/roleProtection.test.js`
+### [x] TASK 8 — `requireAdmin` sets area; `requireSuperAdmin`
+**Spec:** §2.3, §4.2 · **Files:** `[api] src/middleware/authMiddleware.js`,
+`tests/roleProtection.test.js`
 
-- [ ] 8.1 `req.admin` gains `adminRole` and `areaId` from the JWT.
-- [ ] 8.2 Add `requireSuperAdmin`.
-- [ ] 8.3 Wire `resolveAdminArea` **once at router level** (`app.js:134` mount or the top of
-      `adminRoutes.js`), not on 130 individual routes.
-- [ ] 8.4 Per-admin revocation: check `admin_auth_state` by `admin_id` when set, falling back to the
-      legacy `id=1` row.
-- [ ] 8.5 **Security:** `area_admin` sending `X-Area-Id` for another area → **403**, never a silent
-      fallback. `X-Area-Id: all` from an `area_admin` → **403**. Explicit test for each.
-- [ ] 8.6 Test that a super admin with no `X-Area-Id` on an area-required endpoint gets a clear
-      error, not a wrong-area read.
+- [x] 8.1 `req.admin` gains `adminRole` and `areaId` read straight from the JWT payload (`areaId`
+      defaults to `null` if the claim is absent, so `req.admin.areaId` is never `undefined`).
+- [x] 8.2 `requireSuperAdmin` added and exported — 403s unless `req.admin.adminRole ===
+      'super_admin'`. Not wired into any route yet (no super-admin-only route exists before
+      TASK 24); unit-tested directly.
+- [x] 8.3 **Deviated from "via a `router.use()`", with the reason written into a code comment right
+      at the call site:** `requireAdmin` is applied **per-route**, 113 separate call sites in
+      `adminRoutes.js` — it was never a single `router.use()` to begin with (verified by grep before
+      writing any code). A `router.use(resolveAdminArea)` mounted before those 113 routes would run
+      before `req.admin` exists (always a no-op); mounted after, it would never run at all for any
+      route that already sent a response (Express doesn't fall through a completed request to later
+      middleware). The mechanism that actually reaches "once, not 130 times" here is `requireAdmin`
+      **chaining into** `resolveAdminArea` as its own last step before `next()` — one edit to
+      `authMiddleware.js`, zero edits to `adminRoutes.js`'s 113 call sites, and every one of them
+      gets area resolution "for free" since they already call `requireAdmin`. `src/app.js` and
+      `src/routes/adminRoutes.js` end up untouched — not in the final file list above.
+- [x] 8.4 Investigated what "check by `admin_id`, falling back to `id=1`" could mean given the real
+      schema (TASK 2 gave `admin_auth_state` a nullable `admin_id` *column* on its existing singleton
+      row, not a genuine one-row-per-admin structure — there is only ever one row, `id=1`, so there
+      is nothing to fall back *from*). Rather than write filtering logic against a table that
+      structurally can't support it, kept the revocation check exactly as it was — a shared
+      kill-switch across every admin — and documented why in a comment at the call site. A real
+      per-admin revocation store is a schema change beyond TASK 2/8's built scope, noted as a
+      possible future enhancement, not silently implied to already exist.
+- [x] 8.5 **Security, verified two ways:** unit tests in `tests/areaScope.test.js` (TASK 6, direct
+      mock req/res/next) and now integration tests here in `tests/roleProtection.test.js` through
+      real JWTs and real routes — an `area_admin` sending `X-Area-Id` for another area gets 403; so
+      does `X-Area-Id: all`. **Also verified live**, not just against tests: booted the real dev
+      server, logged in as a throwaway `area_admin` via a real `POST /api/admin/login`, hit
+      `GET /api/admin/me` with `X-Area-Id: 9` and got a real `403 {"code":"FORBIDDEN","message":
+      "area_admin may not set X-Area-Id"}` back over HTTP.
+- [x] 8.6 A `super_admin` with no `X-Area-Id` completes the request (`req.areaId = null`) rather than
+      erroring — confirmed live the same way. An endpoint that actually *requires* an area is
+      expected to call `requestAreaId(req)` itself and get a clear error from `null`/`'all'`; no such
+      endpoint exists yet to assert against (Phase C's job), so this subtask is proven at the
+      middleware level, not yet at a real area-required route.
 
-**Done when:** both 403 tests pass, all existing admin routes still authorize correctly.
+**Done when:** both 403 tests pass, all existing admin routes still authorize correctly. **Verified
+locally** 2026-08-01: 12/12 new/updated tests in `roleProtection.test.js` pass; `npm test` 87/87
+suites (974/976, same 2 pre-existing skips — **zero existing tests broke**, because every hand-rolled
+JWT in the other 86 suites predates `adminRole` and hits `resolveAdminArea`'s no-op branch exactly as
+designed); `npx eslint` clean; live-verified end-to-end against the real dev DB as described above,
+then cleaned up the throwaway admin rows and reset `admin_auth_state`.
 **Commit:** `feat: AREA TASK 8 — admin area middleware + requireSuperAdmin`
 
 ---
@@ -826,7 +857,7 @@ Set up: area 2 with its own admin, shop, rider, zone and catalog.
 |---|---|---|
 | 0 — Safety gate | 0 | ◐ (0.7 only — prod rehearsal 0.1-0.6/0.8-0.9 pending real access) |
 | A — Foundations | 1–6 | ✅ done, verified locally |
-| B — Auth | 7–8 | ☐ |
+| B — Auth | 7–8 | ✅ done, verified locally |
 | C — Backend sweep | 9–17 | ☐ |
 | D — Libraries | 18–22 | ☐ |
 | E — Realtime | 23 | ☐ |
