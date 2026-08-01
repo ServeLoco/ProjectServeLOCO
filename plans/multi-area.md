@@ -18,7 +18,9 @@ existing request path.** Every task below is written to keep per-request cost fl
 1. Read **BACKGROUND** (§1), **LOCKED DECISIONS** (§2), **PERFORMANCE CONTRACT** (§3) and
    **DRY CONTRACT** (§4) before writing any code. §1 was verified in code on 2026-08-01 — do not
    re-derive unless a path has moved.
-2. Execute tasks **in order** (TASK 1 → TASK 30). Later tasks assume earlier ones are done.
+2. Execute tasks **in order** (TASK 0 → TASK 30). Later tasks assume earlier ones are done.
+   **Area 1 is live in production. Read §6 (DATA SAFETY) before TASK 0 and obey its ordering rules
+   literally — several of them are the difference between a clean migration and losing data.**
 3. Surgical changes only. Additive API shapes: where a response already duplicates camelCase +
    snake_case, keep duplicating. One commit per task.
 4. Run `npm test` in `apps/api` after **every** backend task. Run `npx eslint <files>` on every file
@@ -223,11 +225,18 @@ Rules:
 - Deleting a library item never deletes area rows. It archives the library item and leaves the area
   products standing (they become local-only). Destructive fan-out across areas is not allowed.
 
-### 2.5 Images are global, deduplicated by content hash
+### 2.5 Images are global, deduplicated on *new* uploads only
 
-`images` is already global. Add `sha256 CHAR(64)` with a UNIQUE index: re-uploading the same file
-returns the existing row instead of writing a duplicate. With N areas reusing one library, this is
-the difference between one stored JPEG and N copies.
+`images` is already global. Add `sha256 CHAR(64)` with a **non-unique** index. On upload, hash the
+bytes, look for an existing row, and return it instead of inserting. With N areas reusing one
+library, this is the difference between one stored JPEG and N copies.
+
+**The index is non-unique on purpose, and historical duplicates are never merged.** Production
+already contains duplicate uploads; a UNIQUE index would make the migration fail outright, and
+"resolving" the duplicates means repointing `image_id` across six tables that have **no foreign key**
+to `images` (`products.image_id` is a bare `VARCHAR(255)`, `migrate.js:333`). One missed reference is
+a permanently broken image with nothing to detect it. Report duplicates in the admin Images page;
+never auto-merge. See §6.5.
 
 ### 2.11 What else gets the library treatment — and what does not
 
@@ -503,6 +512,19 @@ operate on that area, unchanged.
 
 ## 5. TASKS
 
+### Phase 0 — Safety gate (do this before any schema change)
+
+- [ ] **TASK 0 — Production snapshot + migration rehearsal**
+  Read §6 in full. Take a full DB snapshot (MySQL dump + Mongo dump) and confirm it restores on a
+  scratch instance. Restore that snapshot to a staging DB and run the **entire** TASK 1–3 migration
+  against it (not a synthetic empty database — production's actual row counts and edge cases:
+  NULL `shop_latitude`, legacy `products.image_id` values, existing duplicate images, whatever else
+  is really in there). Record row counts for every table in §1.1 before and after; they must match
+  exactly except for the new columns. Confirm `npm start`'s two-step boot (§6.1) completes clean on
+  a **second run against the same already-migrated staging DB** — the whole point of `IF NOT EXISTS`
+  / `ensureColumn` is idempotence, and this is the test that proves it before it's proving it in
+  production. Do not proceed to TASK 1 against production until this rehearsal is clean.
+
 ### Phase A — Foundations (no behaviour change)
 
 - [ ] **TASK 1 — `areas` table + seed Area 1**
@@ -529,12 +551,19 @@ operate on that area, unchanged.
   `shops, riders, mobile_admins, delivery_zones, delivery_exclusion_zones, settings, orders,
   order_items, coupons, offers, dashboard_sections, dashboard_section_items, categories, products,
   combos, product_groups, store_modes, admin_notifications, notification_batches`.
-  Backfill `= 1` in 5,000-row batches. Then `MODIFY ... NOT NULL`, add FKs, add the composite
-  indexes from §3.3, and drop the superseded single-column `orders` indexes.
-  Rewrite the UNIQUE keys listed in §1.3.
+  Backfill `= 1` in 5,000-row batches (§6.2 rule 6, resumable via `WHERE area_id IS NULL`). Verify
+  zero orphans (§6.2 rule 3) before each step below.
+  Then `MODIFY ... NOT NULL`, add FKs, add the composite indexes from §3.3. **Do not drop the
+  superseded single-column `orders` indexes in this task** — that is a separate, later deploy
+  per §6.2 rule 5.
+  Rewrite the UNIQUE keys listed in §1.3, **dropping each old global UNIQUE before the new
+  composite is added** (§6.2 rule 2 and rule 4 — this ordering is what makes TASK 11's per-area
+  `packed`/`fast_food` seeding actually insert rows instead of silently no-op'ing).
   Add `users.last_area_id INT NULL` (no FK cascade, cache only).
-  Change `daily_order_counters` PK to `(area_id, counter_date)`.
-  Run `npm test` — nothing should change yet.
+  **`daily_order_counters` PK change to `(area_id, counter_date)` moves to TASK 13**, landing in the
+  same commit as the order-number query change — see §6.3. Do not change this PK here.
+  Run `npm test` — nothing should change yet. Re-run the row-count check from TASK 0 against this
+  real migration before calling the task done.
 
 - [ ] **TASK 4 — Area-aware caches**
   `microCache.js`: enforce `<namespace>:<areaId>:<rest>` keys, add `bust(namespace, areaId)`, raise
@@ -575,7 +604,11 @@ Each task: add `area_id` to reads and writes, use `req.areaId`, key caches by ar
 shapes byte-identical for a single-area install, run `npm test`.
 
 - [ ] **TASK 9 — Settings** (27 sites). `settings` becomes one row per area; auto-create a settings
-  row when an area is created. Un-skip the guardrail test for `settings`.
+  row when an area is created. **Find all 27 sites by `grep -rn "FROM settings" src/`, not by
+  reading `settingsController.js` alone** — `imageController.js:20`'s `getUsedImageIds` reads
+  `settings.upi_qr_image_id` and is the concrete example in §6.4 of what breaks (an area's payment
+  QR code gets reported as orphaned and deleted) if a stray `LIMIT 1` survives the sweep. Un-skip
+  the guardrail test for `settings`.
 - [ ] **TASK 10 — Delivery zones + exclusion zones + pricing** (18 sites).
   `loadActiveZones(db, areaId)`, `loadActiveExclusionZones(db, areaId)`. Public geometry endpoint
   takes a resolved area and caches per area. Recompute `areas.min_lat/max_lat/min_lng/max_lng` in
@@ -587,8 +620,14 @@ shapes byte-identical for a single-area install, run `npm test`.
 - [ ] **TASK 12 — Dashboard sections + offers** (26 + 21 sites). Cache key becomes
   `dashboard:<areaId>:<storeType>:closed=<0|1>`.
 - [ ] **TASK 13 — Orders + order items + counters** (123 sites). Order create stamps `area_id` from
-  the resolved zone's area. `order_number` gets the `areas.code` prefix. Per-area daily counter.
-  **Do not touch** the idempotency or compare-and-set logic.
+  the resolved zone's area. **In the same commit** (§6.3, non-negotiable — splitting this across two
+  deploys breaks checkout): backfill `daily_order_counters.area_id = 1`, change its PK to
+  `(area_id, counter_date)`, and update `generateOrderNumber` to
+  `INSERT INTO daily_order_counters (area_id, counter_date, seq) VALUES (?, ?, LAST_INSERT_ID(1)) ON
+  DUPLICATE KEY UPDATE seq = LAST_INSERT_ID(seq + 1)` with format `OD-<date>-<AREACODE>-<seq>`.
+  Historical `order_number` values are never rewritten (§6.3). **Do not touch** the idempotency or
+  compare-and-set logic. Test: two areas placing an order on the same date get independent,
+  non-colliding sequences starting at 1 each.
 - [ ] **TASK 14 — Coupons** (22 sites). The area filter goes into the *inputs* of
   `utils/coupons.js`; the rule engine itself stays untouched. `coupon_zones` inherits the area from
   its zone — assert on write that the coupon and zone share an area.
@@ -607,8 +646,13 @@ shapes byte-identical for a single-area install, run `npm test`.
 - [ ] **TASK 18 — Library tables + image dedupe + backfill**
   Create `product_library` and `library_variants` per §2.4. Add `products.library_product_id INT
   NULL` and `product_variants.library_variant_id INT NULL` (both at end of row, both indexed).
-  Add `images.sha256 CHAR(64) NULL` + UNIQUE index; compute the hash on upload and return the
-  existing row on a duplicate (§2.5). Backfill existing images' hashes in a batched sweep.
+  Add `images.sha256 CHAR(64) NULL` + **non-unique** index (§2.5); compute the hash on upload and
+  return the existing row on a duplicate. Backfill existing images' hashes in a batched sweep —
+  this only populates the column, it never deletes or merges anything. Add the same "in this
+  release, not later" rule as `getUsedImageIds` below: this task and TASK 21 must each extend
+  `imageController.js`'s `getUsedImageIds` (`:15-43`) with their new table in the **same commit**
+  that creates it (`product_library.image_id` here; `category_library.image_id` and
+  `store_mode_library.icon_image_id` in TASK 21) — see §6.5.
   **Do not auto-promote existing products into the library** — they stay local-only until an admin
   promotes them (TASK 19). Auto-promotion would guess at which of 3 near-identical rows is canonical.
 
@@ -633,7 +677,10 @@ shapes byte-identical for a single-area install, run `npm test`.
   `suggested_price` and flagged `available = 0`, so a new size never goes on sale in an area at a
   price nobody chose. Variant *removals* soft-delete per-area rows (`deleted = 1`) so live carts and
   order snapshots keep resolving — never a hard delete.
-  Test that the `products.price` ⇄ default-variant mirror survives every propagation path.
+  Propagation writes an **explicit column list** and never touches commerce columns (§6.7).
+  Test that the `products.price` ⇄ default-variant mirror survives every propagation path, and that
+  editing a library item leaves every per-area price, `available` flag and `display_order`
+  byte-identical.
 
 - [ ] **TASK 21 — Category + store-mode libraries**
   Per §2.11. `category_library (id, name, slug, type, image_id, archived)` and
@@ -672,6 +719,11 @@ shapes byte-identical for a single-area install, run `npm test`.
   existing area. **Never** copies orders, customers, riders, shops or coupons. This is what makes
   launching area #3 a ten-minute job instead of a week of data entry, and it is the mechanism for
   everything in the "clone once, then diverge" column of §2.11.
+  Clone **refuses with 409** against a target area that already has categories or products, so a
+  double click cannot duplicate a catalog (§6.8).
+  **Ship the §6.6 gate in this task, not as a follow-up:** `POST /admin/areas` returns 409 unless
+  an `areas_sweep_complete` flag is set; only TASK 30 sets it. Until then the platform stays
+  single-area and every deploy is verifiable against unchanged production behaviour.
   Deleting an area is **not** supported in v1 — deactivate only; say so in the response of any
   delete attempt.
 
@@ -734,18 +786,176 @@ shapes byte-identical for a single-area install, run `npm test`.
   changes neither price; a category rename in the library reaches both areas but does not change
   either area's `display_order`; a super admin can load all 23 pages against either area and the
   all-areas roll-up. Guardrail test green with no new allowlist entries.
+  **Area 1's production data is unchanged throughout:** re-run the TASK 0 row-count comparison and
+  spot-check that Area 1's prices, order history and order-number formats are exactly what they were
+  before TASK 1. Only once every assertion above passes may you set the `areas_sweep_complete` flag
+  from TASK 24 (§6.6) — that flag is what unlocks creating a real second area.
 
 ---
 
-## 6. ROLLOUT
+## 6. DATA SAFETY & ROLLOUT — **Area 1 is live in production**
+
+Everything in this section is a hard requirement, not advice. Each rule below exists because
+violating it loses or corrupts production data.
+
+### 6.1 The migration runs itself on deploy — there is no manual gate
+
+`apps/api/package.json:7`:
+
+```
+"start": "node src/db/migrate.js && node src/server.js"
+```
+
+**Deploying this branch runs the migration unattended, on boot, against production.** There is no
+review step between merge and schema change.
+
+- `migrate.js` has **no transaction wrapper**, and MySQL DDL is non-transactional anyway — a failure
+  halfway through leaves the schema partly changed with no rollback. The file survives this today by
+  being **re-runnable**: `CREATE TABLE IF NOT EXISTS`, `ensureColumn` existence checks, and
+  try/catch blocks that swallow only "already exists". Every statement you add must keep that
+  property. Copy the pattern at `migrate.js:810-822`, which explicitly **rethrows** anything that is
+  not `ER_DUP_KEYNAME`/`ER_FK_DUP_NAME` instead of swallowing all errors.
+- **`npm test` cannot catch a migration bug.** The suite runs against `tests/__mocks__` and never
+  touches a real database. Migration correctness is proven only by TASK 0's snapshot rehearsal.
+
+### 6.2 Column and index ordering — each rule prevents a specific loss
+
+1. **Nullable → backfill → NOT NULL.** Never `ADD COLUMN area_id INT NOT NULL` directly: MySQL fills
+   existing rows with **`0`**, not `1`. `0` has no `areas` row, so the FK add then fails, or worse
+   succeeds against a table where every historical row points at a non-existent area.
+2. **Backfill before the composite UNIQUE.** `UNIQUE (area_id, slug)` while `area_id` is still NULL
+   enforces nothing — MySQL treats NULLs as distinct, so duplicate slugs slip straight through and
+   surface later as two "Dairy" categories in one area.
+3. **Verify zero orphans before each FK.**
+   `SELECT COUNT(*) FROM <t> WHERE area_id IS NULL OR area_id NOT IN (SELECT id FROM areas)` must
+   return 0. Abort the migration if not.
+4. **Drop the old global UNIQUE on `categories.slug` and `store_modes.slug` before seeding per-area
+   rows.** If the old key is still in place, TASK 11's `INSERT IGNORE` of Area 2's `packed` /
+   `fast_food` rows **silently does nothing** — no error, no log — and Area 2 launches with no store
+   modes and a blank app.
+5. **Add the new composite indexes before dropping the old single-column `orders` indexes, and drop
+   them in a separate, later deploy.** Dropping first leaves production running unindexed under
+   live load.
+6. **Backfills are batched (5,000 rows), outside any long transaction, and resumable** —
+   `WHERE area_id IS NULL` so a re-run skips what is already set.
+
+### 6.3 Order numbers — the failure that stops checkout
+
+`orderController.js:38` reserves sequences like this:
+
+```sql
+INSERT INTO daily_order_counters (counter_date, seq) VALUES (?, LAST_INSERT_ID(1))
+  ON DUPLICATE KEY UPDATE seq = LAST_INSERT_ID(seq + 1)
+```
+
+Its correctness depends **entirely** on colliding with today's row via the PRIMARY KEY.
+
+Change the PK to `(area_id, counter_date)` without changing this statement in the **same commit**,
+and the insert stops colliding with today's existing row. `seq` restarts at 1, the generated number
+duplicates one already issued today, `orders.order_number` UNIQUE fires, and **order creation fails
+in production**.
+
+Required:
+- Backfill `daily_order_counters SET area_id = 1` **before** the PK change.
+- PK change and the query change land in the same commit (TASK 13).
+- New format is `OD-<date>-<AREACODE>-<seq>` (e.g. `OD-20260801-A1-0042`). The extra segment makes
+  collision with a legacy `OD-20260801-0042` structurally impossible.
+- **No row in `orders` is ever rewritten.** Historical order numbers keep their existing format
+  forever. Nothing in this spec issues an `UPDATE orders SET order_number = …`.
+- Grep confirmed no client parses `order_number` — it is display-only — so the format change is
+  safe. Re-confirm before shipping if the apps have changed.
+
+### 6.4 `settings` is a singleton today, and `LIMIT 1` hides in other domains
+
+Making `settings` per-area (TASK 9) is not confined to `settingsController`. Concrete example already
+in the code — `imageController.js:20`, inside `getUsedImageIds`:
+
+```sql
+SELECT upi_qr_image_id FROM settings WHERE upi_qr_image_id IS NOT NULL LIMIT 1
+```
+
+Once there are N settings rows, only the **first** area's UPI QR image counts as "in use". Every
+other area's QR image is then reported as orphaned, and both `cleanupOrphanedImage` and the admin
+Images delete button will remove it — **N-1 areas silently lose their payment QR code.**
+
+TASK 9 must sweep **all 27 `FROM settings` sites by grep**, not by domain. Do not assume a settings
+query lives in the settings controller.
+
+### 6.5 Image deletion must know about the libraries
+
+- `products.image_id` is `VARCHAR(255)` with **no foreign key** to `images.id` (`migrate.js:333`).
+  Nothing at the database level prevents deleting an image row that live products still reference.
+- `getUsedImageIds` (`imageController.js:15-43`) protects against that by scanning a **hard-coded
+  list of six tables**: `products`, `categories`, `combos`, `offers`, `settings`, `store_modes`.
+- TASK 18 and TASK 21 introduce `product_library.image_id`, `category_library.image_id` and
+  `store_mode_library.icon_image_id`. **If those are not added to `getUsedImageIds` in the same
+  commit that creates each table**, deleting the last per-area product using an image deletes an
+  image the library still needs — and every area that later adopts that library item gets a broken
+  image, with no error anywhere.
+- Historical duplicate images are reported, never merged (§2.5).
+
+### 6.6 Exactly one area exists until the sweep is finished
+
+This is the single most important rule in the spec.
+
+Creating Area 2 while **any** controller still runs an unscoped query or a `LIMIT 1` means Area 2's
+rows can be served to Area 1 customers, and Area 1's admin can overwrite Area 2's data. The window
+between TASK 1 (the `areas` table exists) and TASK 30 (isolation proven) is exactly when that
+mistake is easiest to make.
+
+Hard gate: `POST /admin/areas` returns **409** with a clear message unless an
+`areas_sweep_complete` flag is set. Only TASK 30 sets it, and only after the isolation E2E passes.
+Ship the gate in TASK 24 with the endpoint itself — never as a follow-up.
+
+### 6.7 Library propagation must never touch commerce columns
+
+Propagation writes an **explicit column list**, always:
+
+```sql
+UPDATE products SET name = ?, description = ?, image_id = ?, unit = ?
+WHERE library_product_id = ?
+```
+
+Never a `SET` clause assembled from a spread of the request body. A propagation that reaches
+`price`, `shop_price`, `original_price`, `available`, `display_order`, `category_id` or `shop_id`
+silently overwrites every area's pricing in one statement, with no way to tell which values were
+lost.
+
+TASK 20 ships a test that edits a library item and asserts every per-area price, availability flag
+and display order is byte-identical afterwards.
+
+### 6.8 Nothing in this spec hard-deletes anything
+
+| Operation | Behaviour |
+|---|---|
+| Delete an area | Not supported. Deactivate only. |
+| Delete a library item | Archive only. Per-area products survive as local-only (§2.4). |
+| Remove a library variant | Soft-delete per-area rows (`deleted = 1`). Live carts and order snapshots hold `product_variants.id` and must keep resolving. |
+| Clone an area | Refuses to run against an area that already has categories or products, so a double click cannot duplicate a catalog. |
+| Promote to library | Creates a library row and links the source product. Touches no other area's rows. |
+| Existing products | Stay local-only until an admin explicitly promotes them. No auto-promotion (§2.9). |
+
+### 6.9 Rollback posture per phase
+
+| Phase | Reversible | How |
+|---|---|---|
+| A — columns, indexes | Mostly | Columns are additive. **The UNIQUE-key rewrites of §1.3 are the exception** — they rebuild indexes and are not free to undo. Snapshot first. |
+| B — auth | Yes | The env-password fallback stays live until `admins` is populated. Revert the deploy. |
+| C — sweep | Per domain | One commit per domain; revert that commit. The sweep only *adds* predicates — no data is rewritten. |
+| D — libraries | Yes | Library tables are additive, `library_*_id` links are nullable. Dropping the links returns every product to local-only. |
+| E–G | Yes | Behaviour only, no schema. |
+| **Order-number PK change (TASK 13)** | **No** | Numbers already issued cannot be reissued. This one must be right in rehearsal, not in production. |
+
+### 6.10 Rollout order
 
 Phases A–B are additive: old code ignores `area_id`, old clients keep working. Phase C is the risky
-stretch — ship it domain by domain, each with `npm test` green. Phase D is additive again (nothing
-is forced into a library). Phase G requires an app release, so keep the API tolerant of area-unaware
-clients (§2.9) until adoption is high.
+stretch — ship it domain by domain, each with `npm test` green and the guardrail test tightening.
+Phase D is additive again (nothing is forced into a library). Phase G requires an app release, so
+keep the API tolerant of area-unaware clients (§2.9) until adoption is high.
 
-**Before the TASK 3 migration runs against production: take a DB snapshot.** The column adds are
-INSTANT, but the UNIQUE-key rewrites in §1.3 rebuild indexes and are not free to reverse.
+**Area 2 is not created until TASK 30 passes (§6.6).** Everything before that runs single-area,
+which means every deploy in Phases A–F is verifiable against production behaviour that must not
+change at all: same catalog, same prices, same order flow, same dashboard.
 
 ---
 
