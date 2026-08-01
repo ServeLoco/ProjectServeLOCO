@@ -60,6 +60,43 @@ jobs:
     - name: Run Linter
       run: npm run lint
 
+    # CI already provisions MySQL/Mongo service containers but, until now,
+    # never actually ran the migration against them (every test mocks
+    # src/db/mysql). Running it here — twice — is the only automated check
+    # that migrate.js still boots cleanly and is still idempotent.
+    # See plans/multi-area.md §6.1 / §9.3 (H9).
+    - name: Run DB migration (first pass)
+      run: npm run db:migrate
+      env:
+        NODE_ENV: development
+        JWT_SECRET: ci_jwt_secret_that_is_long_enough
+        ADMIN_OWNER_ID: ci_admin
+        ADMIN_PASSWORD: ci_test_password_123
+        MYSQL_HOST: 127.0.0.1
+        MYSQL_PORT: 3306
+        MYSQL_DATABASE: serveloco_test
+        MYSQL_USER: root
+        MYSQL_PASSWORD: test
+        MYSQL_SSL: false
+        MONGODB_URI: mongodb://localhost:27017/
+        MONGODB_DATABASE: serveloco_images_test
+
+    - name: Run DB migration (second pass — must be idempotent)
+      run: npm run db:migrate
+      env:
+        NODE_ENV: development
+        JWT_SECRET: ci_jwt_secret_that_is_long_enough
+        ADMIN_OWNER_ID: ci_admin
+        ADMIN_PASSWORD: ci_test_password_123
+        MYSQL_HOST: 127.0.0.1
+        MYSQL_PORT: 3306
+        MYSQL_DATABASE: serveloco_test
+        MYSQL_USER: root
+        MYSQL_PASSWORD: test
+        MYSQL_SSL: false
+        MONGODB_URI: mongodb://localhost:27017/
+        MONGODB_DATABASE: serveloco_images_test
+
     - name: Run Tests
       run: npm test
       env:
