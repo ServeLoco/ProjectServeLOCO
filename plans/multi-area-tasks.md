@@ -25,8 +25,13 @@ Branch: `feat/multi-area-super-admin` · 31 tasks (0–30) · Status: **NOT STAR
 
 ## Phase 0 — Safety gate
 
-### [ ] TASK 0 — Production snapshot + migration rehearsal
+### [~] TASK 0 — Production snapshot + migration rehearsal
 **Spec:** §6.1, §6.2, §9 · **Files:** `[ci] .github/workflows/ci.yml`, staging only
+**Status note (2026-08-01):** 0.1–0.6, 0.8–0.9 need real production/staging access this session
+doesn't have — deferred to whoever runs the actual prod deploy. Only 0.7 (CI step) done here.
+Instead rehearsed TASK 1–3 twice against the **local dev DB** (`serveloco`, not synthetic-empty:
+9 products / 79 orders / 6 users / 1 shop) and took a `mysqldump` snapshot first. Row counts
+verified unchanged after both runs. This is not a substitute for 0.1–0.6 against production.
 
 - [ ] 0.1 Full MySQL dump of production + full Mongo dump. Verify each **restores** on a scratch
       instance — an unverified dump is not a backup.
@@ -41,9 +46,10 @@ Branch: `feat/multi-area-super-admin` · 31 tasks (0–30) · Status: **NOT STAR
 - [ ] 0.6 Run the migration a **second time** against the now-migrated staging DB. Must complete
       clean — this proves the `IF NOT EXISTS` / `ensureColumn` idempotence that production boot
       depends on (§6.1).
-- [ ] 0.7 `[ci]` Add to `.github/workflows/ci.yml`, after "Install dependencies" and before
-      "Run Tests": a `npm run db:migrate` step against the MySQL service container, then a second
-      identical step. CI already provisions `mysql:8.0` and never uses it (H9).
+- [x] 0.7 `[ci]` Added to `.github/workflows/ci.yml`, after "Install dependencies" and before
+      "Run Tests": two `npm run db:migrate` steps (first pass + idempotence pass) against the
+      MySQL service container, with the env vars `config/env.js` requires (`JWT_SECRET`,
+      `ADMIN_OWNER_ID`, `ADMIN_PASSWORD`) added since migrate.js now seeds a super_admin.
 - [ ] 0.8 Time the staging migration. If it exceeds the acceptable deploy window, plan a maintenance
       slot before TASK 3 rather than discovering it on boot.
 - [ ] 0.9 Record here: `orders` rows = ____, data length = ____, migration duration = ____.
@@ -56,80 +62,92 @@ CI runs migrate twice and is green.
 
 ## Phase A — Foundations (no behaviour change)
 
-### [ ] TASK 1 — `areas` table + seed Area 1
+### [x] TASK 1 — `areas` table + seed Area 1
 **Spec:** §2.1, §2.12 · **Files:** `[api] src/db/migrate.js`
 
-- [ ] 1.1 `CREATE TABLE IF NOT EXISTS areas` — `id`, `code VARCHAR(16) UNIQUE`, `name`,
+- [x] 1.1 `CREATE TABLE IF NOT EXISTS areas` — `id`, `code VARCHAR(16) UNIQUE`, `name`,
       `active TINYINT DEFAULT 1`, `is_default TINYINT DEFAULT 0`,
       `timezone VARCHAR(64) DEFAULT 'Asia/Kolkata'`, `min_lat/max_lat/min_lng/max_lng DECIMAL(10,7)
       NULL`, `catalog_version BIGINT NOT NULL DEFAULT 1`, `brand_color VARCHAR(9) NULL`,
       `logo_image_id INT NULL`, `features JSON NULL`, `created_at`, `updated_at`.
-- [ ] 1.2 Index `(active, min_lat, max_lat)` for the bbox prefilter (§3.2).
-- [ ] 1.3 `INSERT IGNORE` seed row: `id=1, code='A1', name='Area 1', is_default=1`.
-- [ ] 1.4 Confirm nothing reads the table yet — this task is purely additive.
+- [x] 1.2 Index `(active, min_lat, max_lat)` for the bbox prefilter (§3.2).
+- [x] 1.3 `INSERT IGNORE` seed row: `id=1, code='A1', name='Area 1', is_default=1`.
+- [x] 1.4 Confirmed nothing reads the table yet — purely additive.
 
 **Done when:** migrate runs twice clean, `SELECT * FROM areas` returns exactly one row, `npm test`
-green.
+green. **Verified locally** 2026-08-01 against `serveloco` dev DB — both true.
 **Commit:** `feat: AREA TASK 1 — areas table + seed Area 1`
 
-### [ ] TASK 2 — `admins` table + per-admin session state
+### [x] TASK 2 — `admins` table + per-admin session state
 **Spec:** §2.9 · **Files:** `[api] src/db/migrate.js`
 
-- [ ] 2.1 `CREATE TABLE IF NOT EXISTS admins` — `id`, `username VARCHAR(64) UNIQUE`,
+- [x] 2.1 `CREATE TABLE IF NOT EXISTS admins` — `id`, `username VARCHAR(64) UNIQUE`,
       `password_hash VARCHAR(255) NOT NULL`, `role ENUM('super_admin','area_admin') NOT NULL`,
       `area_id INT NULL`, `display_name`, `active TINYINT DEFAULT 1`, timestamps.
-- [ ] 2.2 FK `area_id → areas(id)`; index `(active, area_id)`.
-- [ ] 2.3 `ensureColumn('admin_auth_state', 'admin_id', 'admin_id INT NULL')`. Row `id=1` keeps
+- [x] 2.2 FK `area_id → areas(id)`; index `(active, area_id)`.
+- [x] 2.3 `ensureColumn('admin_auth_state', 'admin_id', 'admin_id INT NULL')`. Row `id=1` keeps
       working as the legacy global revoke.
-- [ ] 2.4 Seed one `super_admin` row from `ADMIN_PASSWORD_HASH` (or bcrypt `ADMIN_PASSWORD`) **only
-      when `admins` is empty**, so the current login keeps working after deploy.
-- [ ] 2.5 Application-level invariant (documented in a comment, enforced in TASK 24's endpoint):
-      `area_admin` ⇒ `area_id NOT NULL`; `super_admin` ⇒ `area_id IS NULL`.
+- [x] 2.4 Seed one `super_admin` row from `ADMIN_PASSWORD_HASH` (or bcrypt-hashed `ADMIN_PASSWORD`,
+      whichever is set) **only when `admins` is empty**. Verified locally: seeded on first run,
+      silently skipped on second run.
+- [x] 2.5 Application-level invariant documented as a comment above the `admins` seed insert
+      (`area_id: NULL` for the seeded `super_admin`); enforcement at the endpoint is TASK 24 — not
+      yet built, so nothing stops a hand-written INSERT from violating it today. Flagging this as a
+      real gap until TASK 24 lands, not just a checklist formality.
 
 **Done when:** migrate idempotent, one seeded super admin exists, existing admin login unaffected.
+**Verified locally** 2026-08-01 — `admins` has exactly one `super_admin` row (`area_id NULL`) after
+two runs; `adminController.js` login not yet touched (TASK 7) so existing login is provably
+unaffected — it doesn't read this table yet.
 **Commit:** `feat: AREA TASK 2 — admins table + per-admin session state`
 
-### [ ] TASK 3 — `area_id` columns, backfill, indexes, UNIQUE key rewrites
+### [x] TASK 3 — `area_id` columns, backfill, indexes, UNIQUE key rewrites
 **Spec:** §3.3, §3.6, §6.2, H1, H11 · **Files:** `[api] src/db/migrate.js`, `src/db/seed_demo.js`
 
 > The riskiest task in the project. Follow the order literally — each step exists because
 > reordering it loses data (§6.2).
 
-- [ ] 3.1 Add helper `ensureColumnAtEnd(table, name, definition)` — same existence check as
-      `ensureColumn` but **no `AFTER` clause**, so MySQL 8 can use `ALGORITHM=INSTANT` (§3.6).
-      Leave `ensureColumn` untouched; other migrations depend on its `AFTER` behaviour.
-- [ ] 3.2 Add nullable `area_id INT` **at end of row** to: `shops, riders, mobile_admins,
-      delivery_zones, delivery_exclusion_zones, settings, orders, order_items, coupons, offers,
-      dashboard_sections, dashboard_section_items, categories, products, combos, product_groups,
-      store_modes, admin_notifications, notification_batches`.
-- [ ] 3.3 Backfill each to `1` in **5,000-row batches** keyed on primary key, `WHERE area_id IS NULL`
-      so a re-run resumes. Outside any long transaction.
-- [ ] 3.4 Verify per table: `SELECT COUNT(*) WHERE area_id IS NULL OR area_id NOT IN
-      (SELECT id FROM areas)` must be `0`. **Abort the migration if not** — do not proceed to 3.5.
-- [ ] 3.5 `MODIFY area_id INT NOT NULL` on each. (Never add it as NOT NULL directly — MySQL fills
-      existing rows with `0`, not `1`.)
-- [ ] 3.6 Add FK `area_id → areas(id)` on each, wrapped in the rethrow-unless-duplicate pattern from
-      `migrate.js:810-822`.
-- [ ] 3.7 **Drop the old global UNIQUE keys first**, then add the composites (§6.2 rule 4 — if the
-      old key survives, TASK 11's per-area `packed`/`fast_food` seed silently no-ops):
-      `categories.slug` → `UNIQUE (area_id, slug)`;
-      `store_modes.slug` → `UNIQUE (area_id, slug)`;
-      `coupons uniq_live_coupon_code` → `(area_id, code, deleted)`;
-      `dashboard_sections idx_section_store_slug` → prepend `area_id`;
-      `admin_notifications uniq_admin_inbox_event` → prepend `area_id`.
-- [ ] 3.8 Add the composite indexes from §3.3 (all leading with `area_id`).
-- [ ] 3.9 **Do not drop** `orders.idx_status` / `idx_created_at` here — separate later deploy
-      (§6.2 rule 5).
-- [ ] 3.10 Add `users.last_area_id INT NULL` (no FK cascade — cache only).
-- [ ] 3.11 Backfill `users.last_area_id` from each user's **most recent order's `latitude`/
-      `longitude`** run through the zone matcher (H1 — the server has no saved customer pin).
-      Users with no orders stay NULL.
-- [ ] 3.12 Update `src/db/seed_demo.js` to stamp `area_id = 1` on everything it creates (H11).
-- [ ] 3.13 **Do not touch `daily_order_counters` here** — its PK change moves to TASK 13 (§6.3).
-- [ ] 3.14 Re-run the TASK 0 row-count comparison against the real migration.
+- [x] 3.1 Added `ensureColumnAtEnd(table, name, definition)` — same existence check as
+      `ensureColumn` but **no `AFTER` clause**. `ensureColumn` itself untouched.
+- [x] 3.2 Added nullable `area_id INT` **at end of row** to all 19 tables via a shared
+      `AREA_SCOPED_TABLES` list (single source of truth reused by every step below — avoids the
+      table list drifting between the column/backfill/NOT-NULL/FK loops).
+- [x] 3.3 Backfilled each to `1` in **5,000-row batches**, `ORDER BY id LIMIT 5000`,
+      `WHERE area_id IS NULL`, looped until `affectedRows === 0`. Outside any transaction.
+- [x] 3.4 Orphan check (`assertNoAreaOrphans`) run per table before NOT NULL — throws and aborts
+      the whole migration on any violation. Verified locally: 0 orphans on every scoped table.
+- [x] 3.5 `MODIFY area_id INT NOT NULL` only after the orphan check passes (checked
+      `IS_NULLABLE` first so re-running after it's already NOT NULL is a no-op, not an error).
+- [x] 3.6 FK `area_id → areas(id) ON DELETE RESTRICT` on all 19, via `ensureForeignKey` (same
+      rethrow-unless-duplicate pattern as the existing `delivery_zones` parent FK). Verified: 19
+      `fk_*_area` constraints present in `information_schema`.
+- [x] 3.7 Old global UNIQUE keys dropped **before** the new composite on all 5: `categories.slug`,
+      `store_modes.slug`, `coupons.uniq_live_coupon_code`, `dashboard_sections.idx_section_store_slug`,
+      `admin_notifications.uniq_admin_inbox_event`. Verified via `SHOW INDEX` — none of the old
+      global keys remain, all 5 new per-area composites present.
+- [x] 3.8 All 12 composite indexes from §3.3 added (`ensureIndex`, reused from the existing helper
+      already in scope in this function). Verified present via `SHOW INDEX`.
+- [x] 3.9 Confirmed `orders.idx_status` / `idx_created_at` **not** touched — grepped the diff.
+- [x] 3.10 Added `users.last_area_id INT NULL` via `ensureColumnAtEnd` — no FK (§2.2: cache only,
+      areas are deactivate-only per §6.8 so it can never dangle).
+- [x] 3.11 **Deviated from the literal wording, documented in a code comment why:** backfilled
+      `last_area_id = 1` for every user with ≥1 order, rather than actually running each user's
+      most recent order's lat/lng through a zone matcher. Reason: the polygon matcher
+      (`matchZone`/`areaScope.js`) doesn't exist until TASK 6, and — more fundamentally — the §6.6
+      gate means **only Area 1 can exist** at the point this backfill ever runs for real, so
+      "match against zones" and "= 1" produce an identical result. Real per-request resolution
+      takes over from TASK 6 onward; this is a one-time historical seed, not the resolution path.
+      Verified locally: 4/6 users (those with orders) got `last_area_id = 1`, 2 stayed `NULL`.
+- [x] 3.12 `seed_demo.js` — all 10 INSERT statements (`settings`, `offers`, `categories`×2,
+      `products`×3, `orders`, `order_items`×2, `coupons`) updated to stamp `area_id = 1`.
+- [x] 3.13 Confirmed `daily_order_counters` untouched in this task.
+- [x] 3.14 Row-count comparison re-run against the **local dev DB** (not production/staging — see
+      TASK 0 status note): `products=9, orders=79, users=6, shops=1` before and after, unchanged.
 
 **Done when:** migrate runs twice clean, zero NULL `area_id` anywhere, row counts unchanged,
-`npm test` green.
+`npm test` green. **All true, verified locally** 2026-08-01. `npm test`: 85 suites / 919 tests
+passed (mocked DB, so this proves application code is unaffected, not migration correctness —
+that's what the two live runs above proved). `npx eslint` clean on both touched files.
 **Commit:** `feat: AREA TASK 3 — area_id columns, backfill, indexes, unique key rewrites`
 
 ### [ ] TASK 4 — Area-aware caches
@@ -697,8 +715,8 @@ Set up: area 2 with its own admin, shop, rider, zone and catalog.
 
 | Phase | Tasks | Status |
 |---|---|---|
-| 0 — Safety gate | 0 | ☐ |
-| A — Foundations | 1–6 | ☐ |
+| 0 — Safety gate | 0 | ◐ (0.7 only — prod rehearsal 0.1-0.6/0.8-0.9 pending real access) |
+| A — Foundations | 1–6 | ◐ (1–3 done, verified locally; 4–6 pending) |
 | B — Auth | 7–8 | ☐ |
 | C — Backend sweep | 9–17 | ☐ |
 | D — Libraries | 18–22 | ☐ |
