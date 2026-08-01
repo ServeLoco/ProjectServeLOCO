@@ -189,21 +189,50 @@ and hit `/api/categories`, `/api/dashboard`, `/api/delivery-zones`, `/api/settin
 returned real cached data with no errors.
 **Commit:** `feat: AREA TASK 4 — area-aware caches`
 
-### [ ] TASK 5 — Guardrail test, before the sweep
+### [x] TASK 5 — Guardrail test, before the sweep
 **Spec:** §4.6 · **Files:** `[api] tests/areaScoping.test.js` (new)
 
-- [ ] 5.1 Static scan of `src/controllers`, `src/services`, `src/utils` for
-      `FROM|JOIN|UPDATE|DELETE FROM <scoped_table>`.
-- [ ] 5.2 Fail any statement lacking an `area_id` predicate.
-- [ ] 5.3 Allowlist with a **one-line justification comment per entry**: `users`, `images`,
-      `notification_templates`, `product_library`, `library_variants`, `category_library`,
-      `store_mode_library`, `units`, `purgeExpiredDeletions`, auth paths.
-- [ ] 5.4 Expect it to fail loudly for every un-swept table. `test.skip` with a TODO **only** if it
-      blocks TASK 6–8; un-skip in TASK 9 and keep green from then on.
-- [ ] 5.5 Document in the test header that loosening an assertion to make it pass is a review
-      failure — the point is to catch a missed table.
+- [x] 5.1 Static scan of `src/controllers`, `src/services`, `src/utils`. Implementation note: rather
+      than a bare text search, it finds every `.query(` call, captures its full (paren/bracket/
+      brace/string-aware) argument text, and checks that against a per-table
+      `\b(?:FROM|JOIN|UPDATE|INTO)\s+\`?table\`?\b` regex — precise enough that `orders` doesn't
+      false-positive on `order_items`, `combos` doesn't on `combo_items`, `products` doesn't on
+      `product_variants` (covered by its own test). When the query is passed as a bare variable
+      (`pool.query(query, params)`) rather than an inline literal, it widens the search to the
+      enclosing function body (found via brace-balance scanning from the nearest function-start
+      marker) since that's where the `let query = ...` / `query += ...` building actually lives —
+      falls back to the whole file if no enclosing function is found, a safe over-approximation.
+- [x] 5.2 Fails any `.query()` call referencing a `SCOPED_TABLES` entry whose search text contains
+      no `area_id` (case-insensitive).
+- [x] 5.3 Allowlist mechanism built (`{file, line, reason}`, checked before flagging) but **left
+      empty** — every table in the spec's suggested allowlist (`users`, `images`,
+      `notification_templates`, `product_library`, etc.) is a table that never enters
+      `SCOPED_TABLES` in the first place (they're not in migrate.js's `AREA_SCOPED_TABLES`), so they
+      can never be flagged and never need an entry. The allowlist exists for a different, real case:
+      a scoped-table query that's correctly global for some other reason, discovered during the
+      Phase C sweep — none exist yet.
+- [x] 5.4 Ran it standalone (jest globals stubbed) to get the real baseline before deciding to skip:
+      **437 violations across all 19 scoped tables** (orders 107, products 59, shops 46, order_items
+      48, categories 29, product_groups 23, dashboard_section_items 23, combos 22, delivery_zones 16,
+      settings 18, coupons 18, dashboard_sections 17, mobile_admins 14, offers 14, store_modes 12,
+      admin_notifications 8, notification_batches 6, riders 31, delivery_exclusion_zones 1). Order of
+      magnitude matches §1.1's per-table SQL-site counts (this scanner counts distinct `.query()`
+      call sites, not raw grep hits, so it's lower but tracks the same shape). Top offending files:
+      `adminController.js` (48), `dashboardController.js` (48), `productController.js` (31),
+      `riderController.js` (29), `adminRiderController.js` (27). **`it.skip`'d** with the TODO to
+      un-skip starting TASK 9, per §5.4 — this count is real, not a guess, and is what "the failure
+      list matches the Phase C task list" (below) is checked against.
+- [x] 5.5 Header comment states explicitly: loosening the scanner or padding the allowlist to make a
+      real finding disappear is a review failure, not a fix.
+      Two more tests guard the scanner itself (not skipped, run every `npm test`): it must find at
+      least one real violation right now (catches a scanner regression going silently vacuous), and
+      the word-boundary regex must not false-positive on the three collision cases above.
 
-**Done when:** the test exists and its failure list matches the Phase C task list.
+**Done when:** the test exists and its failure list matches the Phase C task list. **Verified
+locally** 2026-08-01 — 437-violation baseline recorded above, matches §1.1's table sizes in shape;
+`npm test` 86/86 suites (927/929, 2 skips: the new one + the pre-existing one); `npx eslint` clean
+(one `eslint-disable` comment for a non-existent rule was written then removed once eslint caught
+it — this project has no `eslint-plugin-jest` configured).
 **Commit:** `feat: AREA TASK 5 — area scoping guardrail test`
 
 ### [ ] TASK 6 — `areaScope.js` + resolution middleware
