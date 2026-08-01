@@ -150,21 +150,43 @@ passed (mocked DB, so this proves application code is unaffected, not migration 
 that's what the two live runs above proved). `npx eslint` clean on both touched files.
 **Commit:** `feat: AREA TASK 3 — area_id columns, backfill, indexes, unique key rewrites`
 
-### [ ] TASK 4 — Area-aware caches
+### [x] TASK 4 — Area-aware caches
 **Spec:** §3.4 · **Files:** `[api] src/utils/microCache.js`, `src/utils/storeMode.js`,
 `src/controllers/settingsController.js`, all current cache callers, `tests/microCache.test.js`
 
-- [ ] 4.1 `microCache.js`: enforce key format `<namespace>:<areaId>:<rest>`; throw in dev on a
-      malformed key so mistakes surface immediately.
-- [ ] 4.2 `bust(namespace, areaId)` clears one area's slice. Keep `bust(namespace)` (no areaId) for
-      genuinely global data only.
-- [ ] 4.3 Raise `MAX_ENTRIES` 100 → 600, exported as a named constant.
-- [ ] 4.4 `settingsController` cache key `settings` → `settings:<areaId>`.
-- [ ] 4.5 `storeMode.js` cache key `active_slugs` → `active_slugs:<areaId>`.
-- [ ] 4.6 Update every existing caller to pass area `1`. Behaviour identical; plumbing in place.
-- [ ] 4.7 Extend `tests/microCache.test.js`: per-area busting does not evict another area's entries.
+- [x] 4.1 `microCache.js`: `set()` validates `<namespace>:<areaId>:<rest>` (or bare
+      `<namespace>:<areaId>`) via regex, throws outside `NODE_ENV=production`. `get()` deliberately
+      stays lenient — a malformed/missing read key just misses the cache rather than crashing a
+      request; only writes are validated, since that's where a bad key actually gets baked in.
+- [x] 4.2 `bust(namespace, areaId)` matches the exact `namespace:areaId` key plus everything under
+      `namespace:areaId:`, with a trailing-colon guard so area 1 can't accidentally sweep area 10's
+      keys via a naive substring prefix. `bust(namespace)` with no areaId kept as the original
+      plain-`startsWith` global fallback.
+- [x] 4.3 `MAX_ENTRIES` 100 → 600, exported.
+- [x] 4.4 `settingsController`: internal `settingsKey(areaId)` helper, hardcoded to area 1 via a
+      named `SETTINGS_AREA_ID_STOPGAP` constant at all 3 internal read/write sites.
+      `bustSettingsCache` stays zero-arg (its 2 external callers — `shops.js`, `riders.js` — aren't
+      touched in this task; that's real DB scoping, deferred to TASK 15).
+- [x] 4.5 `storeMode.js`: internal `cacheKeyForArea(areaId)` helper, same stopgap pattern.
+      `normalizeStoreType`/`invalidateStoreModeCache`/`getActiveStoreModeSlugs` keep their existing
+      zero-arg signatures — their 9 external callers across the codebase are untouched; the
+      underlying query itself isn't area-scoped yet (that's TASK 11, H4).
+- [x] 4.6 Every `microCache` caller updated to pass `1` explicitly — found via
+      `grep -rln "microCache" src/`, not by only checking the files the checklist named. That grep
+      caught 2 files the plan missed (`shopAdminController.js`, `shopOwnerController.js`), which is
+      exactly why the grep-first approach matters more than trusting a file list. Final verification:
+      `grep -rn "\.bust(" src/ | grep -v microCache.js | grep -vE "bust\('[a-z-]+', "` returns nothing
+      — no caller left without an explicit areaId argument.
+- [x] 4.7 Rewrote `tests/microCache.test.js`: per-area bust isolation, the area-1-vs-area-10
+      substring-collision guard, bare `namespace:areaId` busting, malformed-key throw (and the
+      production bypass), lenient `get()`, and `MAX_ENTRIES` eviction at the new 600 threshold.
+      11 tests (was 5).
 
 **Done when:** single-area behaviour unchanged, cross-area bust isolation covered by a test.
+**Verified locally** 2026-08-01: `npm test` 85/85 suites, 925/926 (1 pre-existing skip) passed;
+`npx eslint` clean on every touched file; booted the real dev server against the migrated local DB
+and hit `/api/categories`, `/api/dashboard`, `/api/delivery-zones`, `/api/settings` live — all
+returned real cached data with no errors.
 **Commit:** `feat: AREA TASK 4 — area-aware caches`
 
 ### [ ] TASK 5 — Guardrail test, before the sweep
