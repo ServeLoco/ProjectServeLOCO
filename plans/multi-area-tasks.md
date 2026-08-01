@@ -296,24 +296,53 @@ at 437 — confirms `areaScope.js`'s own `delivery_zones` query is correctly rec
 
 ## Phase B — Auth (the gate)
 
-### [ ] TASK 7 — Admin login against `admins`
+### [x] TASK 7 — Admin login against `admins`
 **Spec:** §2.9, H10 · **Files:** `[api] src/controllers/adminController.js`, `src/config/env.js`,
 `tests/adminAuth.test.js`
 
-- [ ] 7.1 Look up `admins` by `username`, bcrypt-compare `password_hash`.
-- [ ] 7.2 Mint JWT with `sub`, `role: 'admin'`, `adminRole`, `areaId`.
-- [ ] 7.3 Keep the env-password path as a fallback **only when `admins` is empty**; `console.warn`
-      when it fires.
-- [ ] 7.4 Response gains `adminRole` and `areaId` in **both casings**.
-- [ ] 7.5 `env.js`: `ADMIN_PASSWORD`/`ADMIN_PASSWORD_HASH` becomes optional once `admins` is
-      populated — a deploy with a seeded admins table and no env password must still boot (H10).
-      Keep the weak-password rejection for the bootstrap path.
-- [ ] 7.6 Preserve the existing brute-force lockout (`admin_auth_state.failed_attempts` /
-      `locked_until`) — now per admin where `admin_id` is set.
-- [ ] 7.7 Tests: super admin login, area admin login, wrong password, empty-table env fallback,
-      lockout still trips.
+- [x] 7.1 `SELECT ... FROM admins WHERE username = ?`, `bcrypt.compare` against `password_hash`. A
+      row that exists but is `active = 0` is treated as not-found for matching purposes — it does
+      **not** fall through to the env path either, since that path only ever fires when the whole
+      table is empty (a deactivated admin existing at all means it isn't).
+- [x] 7.2 JWT via a small extension to `utils/auth.js`'s `signAdminToken(adminId, {adminRole,
+      areaId} = {})` rather than a bespoke `jwt.sign` call — the second argument defaults to `{}`,
+      so `mobileAdminController.js`'s existing unrelated call (`signAdminToken(\`mobile:${id}\`)`,
+      a completely different admin concept) is untouched and keeps minting a token with no
+      `adminRole`/`areaId` field at all, exactly as before.
+- [x] 7.3 Env fallback fires only when `SELECT COUNT(*) FROM admins` is `0` **and** the submitted
+      username matches `ADMIN_OWNER_ID`. `console.warn`'d when it fires, naming the fix (run
+      migrate, or create a real admin).
+- [x] 7.4 Both the fallback path and the real-admin path return `adminRole`/`admin_role` and
+      `areaId`/`area_id` on `user`. Bootstrap logins are always `super_admin` / `areaId: null`.
+- [x] 7.5 Removed `ADMIN_PASSWORD` from `env.js`'s `requiredKeys` entirely (with the splice-based
+      conditional-removal logic that existed only to support it) rather than trying to make it
+      conditionally required — `env.js` runs before any DB connection exists, so it structurally
+      cannot know whether `admins` is populated; only the login handler, at request time, can
+      decide that. The production weak-password check keeps validating *whichever* of
+      `ADMIN_PASSWORD`/`ADMIN_PASSWORD_HASH` is set, but the `else { throw }` that previously
+      required at least one to be set was removed — a real production deploy past the bootstrap
+      admin is expected to have neither.
+- [x] 7.6 Lockout stays a **shared** single-row threshold (`admin_auth_state` was never restructured
+      into one-row-per-admin — TASK 2 only added a nullable `admin_id` column to the existing
+      singleton). `admin_id` is now recorded on every success/failure for audit ("who tripped or
+      cleared this"), but the counter itself isn't isolated per admin. Documented as a deliberate,
+      in-scope-appropriate choice, not an oversight: a shared threshold still stops distributed
+      brute-forcing across multiple admin usernames, and a genuinely per-admin-isolated counter is a
+      schema change beyond what TASK 2 built.
+- [x] 7.7 `tests/adminAuth.test.js` rewritten, 7 tests: env-fallback success/failure, env fallback
+      correctly refusing once the table is non-empty (even with matching env creds), real
+      super_admin login (both-casing response asserted), real area_admin login (area id round-trips),
+      wrong password against a real row never falling through to env, and a deactivated admin
+      rejected outright.
 
-**Done when:** existing credentials still work, JWT carries area, `npm test` green.
+**Done when:** existing credentials still work, JWT carries area, `npm test` green. **Verified
+locally** 2026-08-01, including against the real local dev DB (not just mocks): booted the server,
+hit `/api/admin/login` with wrong/nonexistent credentials (clean 401s, no 500s — confirms the new
+two-query lookup+fallback flow doesn't crash for real), then inserted a throwaway `area_admin` row
+with a known bcrypt hash, logged in successfully, and confirmed the JWT payload
+(`sub`/`role`/`adminRole`/`areaId`) and response body both carry the right shape — then deleted the
+throwaway row and reset `admin_auth_state` back to clean. `npm test` 87/87 suites (964/966, same 2
+pre-existing skips); `npx eslint` clean on all 4 touched files.
 **Commit:** `feat: AREA TASK 7 — admin login against admins table`
 
 ### [ ] TASK 8 — `requireAdmin` sets area; `requireSuperAdmin`
