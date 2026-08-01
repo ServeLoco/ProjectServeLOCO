@@ -9,9 +9,16 @@ const signCustomerToken = (userId) => {
   );
 };
 
-const signAdminToken = (adminId) => {
+// adminRole/areaId are optional so existing callers (mobileAdminController's
+// mobile-admin session mint) keep working unchanged — they don't carry a
+// super_admin/area_admin role at all, that's a separate concept from the
+// `admins` table. See plans/multi-area.md §2.9.
+const signAdminToken = (adminId, { adminRole, areaId } = {}) => {
+  const payload = { sub: adminId, role: 'admin' };
+  if (adminRole !== undefined) payload.adminRole = adminRole;
+  if (adminRole !== undefined) payload.areaId = areaId ?? null;
   return jwt.sign(
-    { sub: adminId, role: 'admin' },
+    payload,
     config.JWT_SECRET,
     { expiresIn: process.env.ADMIN_JWT_EXPIRES_IN || '12h' }
   );

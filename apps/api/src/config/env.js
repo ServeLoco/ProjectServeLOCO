@@ -94,6 +94,16 @@ const config = {
 };
 
 // Validation
+//
+// ADMIN_PASSWORD / ADMIN_PASSWORD_HASH are deliberately NOT in this list.
+// Admin auth is DB-backed (the `admins` table) once a real admin row
+// exists — seeded by migrate.js on first run, or created via the admin
+// API — and a legitimate production deploy past that point has neither
+// env var set at all. This module runs before any DB connection exists,
+// so it structurally cannot know whether `admins` is populated; the only
+// place that can decide "is a bootstrap admin actually needed" is
+// adminController.js's login handler at request time. See
+// plans/multi-area.md H10.
 const requiredKeys = [
   'JWT_SECRET',
   'MYSQL_HOST',
@@ -104,18 +114,12 @@ const requiredKeys = [
   'MONGODB_URI',
   'MONGODB_DATABASE',
   'ADMIN_OWNER_ID',
-  'ADMIN_PASSWORD'
 ];
 
 const missing = requiredKeys.filter((key) => {
   if (key === 'MYSQL_PASSWORD' && !isProd) return config[key] === undefined;
   return !config[key];
 });
-// Allow either ADMIN_PASSWORD (plain) or ADMIN_PASSWORD_HASH (bcrypt) to be set
-const hasAdminAuth = config.ADMIN_PASSWORD || config.ADMIN_PASSWORD_HASH;
-if (missing.includes('ADMIN_PASSWORD') && hasAdminAuth) {
-  missing.splice(missing.indexOf('ADMIN_PASSWORD'), 1);
-}
 if (missing.length > 0) {
   throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
 }
@@ -136,8 +140,12 @@ if (isProd) {
   if (!config.CORS_ORIGIN || config.CORS_ORIGIN === '*' || config.CORS_ORIGIN.includes('*')) {
     throw new Error('CORS_ORIGIN must be explicitly defined in production (no wildcards).');
   }
-  // Admin login: ADMIN_PASSWORD_HASH (bcrypt) is preferred; plaintext
-  // ADMIN_PASSWORD is accepted as long as it isn't a known-weak default.
+  // Admin login is DB-backed (the `admins` table) once a real admin row
+  // exists, so neither env var is required here anymore (H10) — but IF an
+  // operator has kept one set (e.g. as the fresh-install bootstrap
+  // credential), it's still validated for strength. ADMIN_PASSWORD_HASH
+  // (bcrypt) is preferred; plaintext ADMIN_PASSWORD is accepted as long as
+  // it isn't a known-weak default.
   if (config.ADMIN_PASSWORD_HASH) {
     if (!config.ADMIN_PASSWORD_HASH.startsWith('$2b$') && !config.ADMIN_PASSWORD_HASH.startsWith('$2a$')) {
       throw new Error('ADMIN_PASSWORD_HASH must be a valid bcrypt hash in production.');
@@ -146,8 +154,6 @@ if (isProd) {
     if (config.ADMIN_PASSWORD === 'admin143' || config.ADMIN_PASSWORD === 'test_pass' || config.ADMIN_PASSWORD.length < 8) {
       throw new Error('ADMIN_PASSWORD is too weak for production. Use a longer password or ADMIN_PASSWORD_HASH.');
     }
-  } else {
-    throw new Error('Either ADMIN_PASSWORD_HASH or ADMIN_PASSWORD must be set.');
   }
   if (process.env.DEBUG === 'true') throw new Error('DEBUG must not be enabled in production.');
 }

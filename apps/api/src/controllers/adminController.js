@@ -41,11 +41,7 @@ const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
 const skipLockoutCheck = () => process.env.NODE_ENV === 'test';
 
 const login = async (req, res) => {
-  const { id, password } = req.validatedData;
-
-  const ownerId = process.env.ADMIN_OWNER_ID || config.ADMIN_OWNER_ID;
-  const ownerPasswordHash = process.env.ADMIN_PASSWORD_HASH || config.ADMIN_PASSWORD_HASH;
-  const ownerPassword = process.env.ADMIN_PASSWORD || config.ADMIN_PASSWORD;
+  const { id: username, password } = req.validatedData;
 
   if (!skipLockoutCheck()) {
     const [[state]] = await pool.query('SELECT locked_until FROM admin_auth_state WHERE id = 1');
@@ -57,28 +53,86 @@ const login = async (req, res) => {
     }
   }
 
+  // Primary path: a real row in `admins` (super_admin | area_admin).
+  const [adminRows] = await pool.query(
+    'SELECT id, username, password_hash, role, area_id, active FROM admins WHERE username = ?',
+    [username]
+  );
+  const adminRow = adminRows[0] && adminRows[0].active ? adminRows[0] : null;
+
   let isMatch = false;
-  if (id === ownerId) {
-    // Prefer ADMIN_PASSWORD_HASH (bcrypt) when set; otherwise fall back to
-    // a constant-time plaintext comparison against ADMIN_PASSWORD.
-    if (ownerPasswordHash) {
-      isMatch = await bcrypt.compare(password, ownerPasswordHash);
-    } else if (ownerPassword) {
-      const a = Buffer.from(String(password));
-      const b = Buffer.from(String(ownerPassword));
-      isMatch = a.length === b.length && crypto.timingSafeEqual(a, b);
+  let matchedAdmin = null;
+  let usedEnvFallback = false;
+
+  if (adminRow) {
+    isMatch = await bcrypt.compare(password, adminRow.password_hash);
+    if (isMatch) matchedAdmin = adminRow;
+  } else {
+    // Legacy env-password bootstrap — ONLY while `admins` has zero rows at
+    // all (a fresh install before migrate.js's seed has run, or a wiped
+    // table). Once any admin row exists — the seed, or one created via the
+    // admin API — this path can never fire again for that installation.
+    // See plans/multi-area.md H10.
+    const [[{ cnt: adminCount }]] = await pool.query('SELECT COUNT(*) AS cnt FROM admins');
+    if (Number(adminCount) === 0) {
+      const ownerId = process.env.ADMIN_OWNER_ID || config.ADMIN_OWNER_ID;
+      const ownerPasswordHash = process.env.ADMIN_PASSWORD_HASH || config.ADMIN_PASSWORD_HASH;
+      const ownerPassword = process.env.ADMIN_PASSWORD || config.ADMIN_PASSWORD;
+
+      if (username === ownerId) {
+        // Prefer ADMIN_PASSWORD_HASH (bcrypt) when set; otherwise fall back
+        // to a constant-time plaintext comparison against ADMIN_PASSWORD.
+        if (ownerPasswordHash) {
+          isMatch = await bcrypt.compare(password, ownerPasswordHash);
+        } else if (ownerPassword) {
+          const a = Buffer.from(String(password));
+          const b = Buffer.from(String(ownerPassword));
+          isMatch = a.length === b.length && crypto.timingSafeEqual(a, b);
+        }
+        if (isMatch) {
+          usedEnvFallback = true;
+          matchedAdmin = { id: ownerId, role: 'super_admin', area_id: null };
+        }
+      }
     }
   }
 
-  if (isMatch) {
-    if (!skipLockoutCheck()) {
-      await pool.query('UPDATE admin_auth_state SET failed_attempts = 0, locked_until = NULL WHERE id = 1');
+  if (isMatch && matchedAdmin) {
+    if (usedEnvFallback) {
+      console.warn(
+        '[adminController] Logged in via the legacy ADMIN_PASSWORD/ADMIN_PASSWORD_HASH env ' +
+        'fallback — the admins table has no rows yet. Run the migration (it seeds one automatically) ' +
+        'or create a real admin via the admin API.'
+      );
     }
-    const token = signAdminToken(id);
+    if (!skipLockoutCheck()) {
+      // admin_id is recorded for audit/debugging ("who last succeeded/
+      // failed here") — the lockout counter itself stays a single shared
+      // threshold (admin_auth_state remains the one row it always was).
+      // A genuinely per-admin-isolated counter would need admin_auth_state
+      // to become a real one-row-per-admin table, which is a schema change
+      // beyond this task's scope; a shared threshold is not a weaker
+      // posture in the meantime — it still stops distributed brute-forcing
+      // across multiple admin usernames.
+      await pool.query(
+        'UPDATE admin_auth_state SET failed_attempts = 0, locked_until = NULL, admin_id = ? WHERE id = 1',
+        [usedEnvFallback ? null : matchedAdmin.id]
+      );
+    }
+    const adminRole = usedEnvFallback ? 'super_admin' : matchedAdmin.role;
+    const areaId = usedEnvFallback ? null : matchedAdmin.area_id;
+    const token = signAdminToken(matchedAdmin.id, { adminRole, areaId });
     return res.status(200).json({
       message: 'Admin login successful',
       token,
-      user: { id, role: 'admin' }
+      user: {
+        id: matchedAdmin.id,
+        role: 'admin',
+        adminRole,
+        admin_role: adminRole,
+        areaId,
+        area_id: areaId,
+      }
     });
   }
 
@@ -97,9 +151,10 @@ const login = async (req, res) => {
     await pool.query(
       `UPDATE admin_auth_state
          SET locked_until = CASE WHEN failed_attempts + 1 >= ? THEN ? ELSE locked_until END,
-             failed_attempts = CASE WHEN failed_attempts + 1 >= ? THEN 0 ELSE failed_attempts + 1 END
+             failed_attempts = CASE WHEN failed_attempts + 1 >= ? THEN 0 ELSE failed_attempts + 1 END,
+             admin_id = ?
        WHERE id = 1`,
-      [LOCKOUT_THRESHOLD, new Date(Date.now() + LOCKOUT_DURATION_MS), LOCKOUT_THRESHOLD]
+      [LOCKOUT_THRESHOLD, new Date(Date.now() + LOCKOUT_DURATION_MS), LOCKOUT_THRESHOLD, adminRow ? adminRow.id : null]
     );
   }
 
