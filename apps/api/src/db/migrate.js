@@ -1,4 +1,5 @@
 const mysql = require('mysql2/promise');
+const bcrypt = require('bcrypt');
 const config = require('../config/env');
 const { getMysqlSslOptions } = require('./mysqlSsl');
 
@@ -1637,6 +1638,277 @@ const migrate = async () => {
     await convertImageIdColumnToInt('offers', 'image_id');
     await convertImageIdColumnToInt('settings', 'upi_qr_image_id');
     console.log('Image reference columns ready.');
+
+    // ============================================================
+    // MULTI-AREA EXPANSION — see plans/multi-area.md for the full design.
+    // Area 1 is the existing single-tenant install; nothing below changes
+    // its behavior until later tasks (TASK 7+) start reading area_id.
+    // ============================================================
+
+    // ---- TASK 1 — areas table + seed Area 1 --------------------------
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS areas (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        code VARCHAR(16) NOT NULL UNIQUE,
+        name VARCHAR(255) NOT NULL,
+        active TINYINT(1) NOT NULL DEFAULT 1,
+        is_default TINYINT(1) NOT NULL DEFAULT 0,
+        timezone VARCHAR(64) NOT NULL DEFAULT 'Asia/Kolkata',
+        min_lat DECIMAL(10,7) NULL,
+        max_lat DECIMAL(10,7) NULL,
+        min_lng DECIMAL(10,7) NULL,
+        max_lng DECIMAL(10,7) NULL,
+        catalog_version BIGINT NOT NULL DEFAULT 1,
+        brand_color VARCHAR(9) NULL,
+        logo_image_id INT NULL,
+        features JSON NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_areas_active_bbox (active, min_lat, max_lat)
+      );
+    `);
+    await connection.query(`
+      INSERT IGNORE INTO areas (id, code, name, is_default) VALUES (1, 'A1', 'Area 1', 1)
+    `);
+    console.log('Areas table ready.');
+
+    // ---- TASK 2 — admins table + per-admin session state -------------
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS admins (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(64) NOT NULL UNIQUE,
+        password_hash VARCHAR(255) NOT NULL,
+        role ENUM('super_admin', 'area_admin') NOT NULL,
+        area_id INT NULL,
+        display_name VARCHAR(255) NULL,
+        active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (area_id) REFERENCES areas(id) ON DELETE RESTRICT,
+        INDEX idx_admins_active_area (active, area_id)
+      );
+    `);
+    console.log('Admins table ready.');
+
+    await ensureColumn('admin_auth_state', 'admin_id', 'admin_id INT NULL DEFAULT NULL');
+
+    // Bootstrap: seed one super_admin from the legacy env password so the
+    // existing login keeps working immediately after this deploy. Fires
+    // only while `admins` is empty — adminController.js's login (TASK 7)
+    // falls back to the env password under the same condition, and logs a
+    // warning when it does. Once any admin row exists (this seed, or one
+    // created via the admin API), the env-password path stops being used.
+    const [adminCountRows] = await connection.query('SELECT COUNT(*) AS cnt FROM admins');
+    if (Number(adminCountRows[0].cnt) === 0) {
+      const bootstrapHash = config.ADMIN_PASSWORD_HASH
+        || (config.ADMIN_PASSWORD ? await bcrypt.hash(config.ADMIN_PASSWORD, 10) : null);
+      if (bootstrapHash) {
+        await connection.query(
+          `INSERT INTO admins (username, password_hash, role, area_id, display_name)
+           VALUES (?, ?, 'super_admin', NULL, 'Super Admin')`,
+          [config.ADMIN_OWNER_ID || 'admin', bootstrapHash]
+        );
+        console.log('[migrate] Seeded initial super_admin from ADMIN_PASSWORD_HASH/ADMIN_PASSWORD env.');
+      } else {
+        console.warn('[migrate] No admins exist and no ADMIN_PASSWORD_HASH/ADMIN_PASSWORD set — admin login will fail until an admin is seeded.');
+      }
+    }
+
+    // ---- TASK 3 — area_id columns, backfill, indexes, unique keys ----
+    //
+    // Order matters throughout this block (plans/multi-area.md §6.2):
+    //   nullable column -> batched backfill -> verify zero orphans ->
+    //   NOT NULL -> foreign key -> composite indexes -> unique key rewrites
+    // Skipping the orphan check, or adding NOT NULL before backfill
+    // completes, silently produces area_id = 0 rows with no matching area.
+
+    // MySQL 8 only grants ALGORITHM=INSTANT to a column add when it has no
+    // AFTER clause (appended at the end of the row). ensureColumn (above)
+    // always accepts an AFTER-qualified definition for other migrations —
+    // area_id must never use one, or adding it to a large table like
+    // `orders` becomes a multi-minute rebuild on deploy. See §3.6.
+    const ensureColumnAtEnd = async (tableName, columnName, columnDefinition) => {
+      const [columns] = await connection.query(`
+        SELECT COLUMN_NAME
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?
+      `, [config.MYSQL_DATABASE, tableName, columnName]);
+      if (columns.length === 0) {
+        await connection.query(`ALTER TABLE ${tableName} ADD COLUMN ${columnDefinition}`);
+      }
+    };
+
+    // Batched + resumable: WHERE area_id IS NULL means a re-run after a
+    // crash mid-backfill picks up exactly where it left off and never
+    // re-touches already-set rows.
+    const AREA_BACKFILL_BATCH_SIZE = 5000;
+    const backfillAreaIdToDefault = async (tableName, pkColumn = 'id') => {
+      for (;;) {
+        const [result] = await connection.query(
+          `UPDATE ${tableName} SET area_id = 1
+           WHERE area_id IS NULL
+           ORDER BY ${pkColumn}
+           LIMIT ${AREA_BACKFILL_BATCH_SIZE}`
+        );
+        if (result.affectedRows === 0) break;
+      }
+    };
+
+    // Hard gate: refuse to proceed to NOT NULL/FK if any row still has no
+    // area_id, or points at an area that doesn't exist. An orphan here
+    // becomes a customer seeing "no delivery" or an admin silently losing
+    // a row from every scoped query — discovered only in production.
+    const assertNoAreaOrphans = async (tableName) => {
+      const [rows] = await connection.query(
+        `SELECT COUNT(*) AS cnt FROM ${tableName}
+         WHERE area_id IS NULL OR area_id NOT IN (SELECT id FROM areas)`
+      );
+      const cnt = Number(rows[0].cnt);
+      if (cnt > 0) {
+        throw new Error(`[migrate] ${tableName} has ${cnt} row(s) with an invalid area_id after backfill — aborting before NOT NULL/FK.`);
+      }
+    };
+
+    const ensureForeignKey = async (tableName, fkName, ddl) => {
+      try {
+        await connection.query(`ALTER TABLE ${tableName} ADD CONSTRAINT ${fkName} ${ddl}`);
+      } catch (e) {
+        // ER_DUP_KEYNAME / ER_FK_DUP_NAME / errno 1061 (dup index) / 1826
+        // (dup FK) just mean a previous run already added it. Anything
+        // else must not be silently swallowed — see the delivery_zones
+        // parent FK above for the same reasoning.
+        const alreadyExists = e.code === 'ER_DUP_KEYNAME' || e.code === 'ER_FK_DUP_NAME'
+          || e.errno === 1061 || e.errno === 1826;
+        if (!alreadyExists) throw e;
+      }
+    };
+
+    const dropIndexIfExists = async (tableName, indexName) => {
+      const [rows] = await connection.query(
+        `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ? LIMIT 1`,
+        [config.MYSQL_DATABASE, tableName, indexName]
+      );
+      if (rows.length > 0) {
+        await connection.query(`ALTER TABLE ${tableName} DROP INDEX ${indexName}`);
+      }
+    };
+
+    const ensureUniqueIndex = async (tableName, indexName, columns) => {
+      const [rows] = await connection.query(
+        `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ? LIMIT 1`,
+        [config.MYSQL_DATABASE, tableName, indexName]
+      );
+      if (rows.length === 0) {
+        await connection.query(`ALTER TABLE ${tableName} ADD UNIQUE INDEX ${indexName} (${columns})`);
+      }
+    };
+
+    // Every table §1.1/§3.3 scopes to an area. `users` is deliberately
+    // absent — customers are global (§2.2). `daily_order_counters`'
+    // PRIMARY KEY change is deliberately deferred to TASK 13, where it
+    // lands in the same commit as the order-number generator query it
+    // must stay in lockstep with (§6.3) — do not add it here.
+    const AREA_SCOPED_TABLES = [
+      'shops', 'riders', 'mobile_admins', 'delivery_zones', 'delivery_exclusion_zones',
+      'settings', 'orders', 'order_items', 'coupons', 'offers',
+      'dashboard_sections', 'dashboard_section_items', 'categories', 'products', 'combos',
+      'product_groups', 'store_modes', 'admin_notifications', 'notification_batches',
+    ];
+
+    for (const tableName of AREA_SCOPED_TABLES) {
+      await ensureColumnAtEnd(tableName, 'area_id', 'area_id INT NULL');
+    }
+    console.log('[migrate] area_id column present (nullable) on all scoped tables.');
+
+    for (const tableName of AREA_SCOPED_TABLES) {
+      await backfillAreaIdToDefault(tableName, 'id');
+    }
+    console.log('[migrate] area_id backfilled to Area 1 on all scoped tables.');
+
+    for (const tableName of AREA_SCOPED_TABLES) {
+      await assertNoAreaOrphans(tableName);
+    }
+    console.log('[migrate] area_id orphan check passed on all scoped tables.');
+
+    for (const tableName of AREA_SCOPED_TABLES) {
+      const [col] = await connection.query(`
+        SELECT IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND COLUMN_NAME = 'area_id'
+      `, [config.MYSQL_DATABASE, tableName]);
+      if (col[0] && col[0].IS_NULLABLE === 'YES') {
+        await connection.query(`ALTER TABLE ${tableName} MODIFY COLUMN area_id INT NOT NULL`);
+      }
+    }
+    console.log('[migrate] area_id set NOT NULL on all scoped tables.');
+
+    for (const tableName of AREA_SCOPED_TABLES) {
+      await ensureForeignKey(tableName, `fk_${tableName}_area`, 'FOREIGN KEY (area_id) REFERENCES areas(id) ON DELETE RESTRICT');
+    }
+    console.log('[migrate] area_id foreign keys added on all scoped tables.');
+
+    // Composite indexes leading with area_id (§3.3). The single-column
+    // orders.idx_status / idx_created_at these partially supersede are
+    // deliberately NOT dropped here — that is a separate, later deploy
+    // (§6.2 rule 5), so production never runs a window unindexed.
+    await ensureIndex('orders', 'idx_orders_area_status_created', 'area_id, status, created_at');
+    await ensureIndex('orders', 'idx_orders_area_created', 'area_id, created_at');
+    await ensureIndex('orders', 'idx_orders_area_customer_created', 'area_id, customer_id, created_at');
+    await ensureIndex('products', 'idx_products_area_category_available_order', 'area_id, category_id, available, display_order');
+    await ensureIndex('products', 'idx_products_area_deleted_available', 'area_id, deleted, available');
+    await ensureIndex('categories', 'idx_categories_area_active_order', 'area_id, active, display_order');
+    await ensureIndex('dashboard_sections', 'idx_dashboard_sections_area_store_active_order', 'area_id, store_type, active, display_order');
+    await ensureIndex('delivery_zones', 'idx_delivery_zones_area_active', 'area_id, active');
+    await ensureIndex('shops', 'idx_shops_area_active_open', 'area_id, active, is_open');
+    await ensureIndex('riders', 'idx_riders_area_active_online', 'area_id, active, is_online');
+    await ensureIndex('coupons', 'idx_coupons_area_deleted_active', 'area_id, deleted, active');
+    await ensureIndex('offers', 'idx_offers_area_active_deleted', 'area_id, active, deleted');
+    console.log('[migrate] area_id composite indexes added.');
+
+    // Per-area UNIQUE key rewrites (§1.3). The OLD global key is dropped
+    // BEFORE the new composite is added (§6.2 rule 4) — if it survived,
+    // a later per-area INSERT IGNORE (e.g. TASK 11 seeding packed/
+    // fast_food store_modes into a new area) would silently insert
+    // nothing, because the stale global key still considers the slug taken.
+    await dropIndexIfExists('categories', 'slug');
+    await ensureUniqueIndex('categories', 'uniq_categories_area_slug', 'area_id, slug');
+
+    await dropIndexIfExists('store_modes', 'slug');
+    await ensureUniqueIndex('store_modes', 'uniq_store_modes_area_slug', 'area_id, slug');
+
+    await dropIndexIfExists('coupons', 'uniq_live_coupon_code');
+    await ensureUniqueIndex('coupons', 'uniq_coupons_area_code_deleted', 'area_id, code, deleted');
+
+    await dropIndexIfExists('dashboard_sections', 'idx_section_store_slug');
+    await ensureUniqueIndex('dashboard_sections', 'idx_section_area_store_slug', 'area_id, store_type, slug, deleted_at');
+
+    await dropIndexIfExists('admin_notifications', 'uniq_admin_inbox_event');
+    await ensureUniqueIndex('admin_notifications', 'uniq_admin_inbox_area_event', 'area_id, type, related_id');
+    console.log('[migrate] per-area unique keys in place.');
+
+    // users.last_area_id — a cold-start cache (§2.2), NOT an authorization
+    // input, and deliberately NO foreign key (a stale/wrong cached area is
+    // harmless; areas are deactivate-only per §6.8 so it could never
+    // dangle anyway). Backfilled from order history: a user who has
+    // ordered before transacted within Area 1, the only area that can
+    // exist at this point in the rollout — the §6.6 gate blocks a second
+    // area from being created before TASK 30's isolation sweep passes.
+    // Real per-request point-in-zone resolution (areaScope.js, TASK 6)
+    // takes over going forward; this backfill only seeds history.
+    await ensureColumnAtEnd('users', 'last_area_id', 'last_area_id INT NULL DEFAULT NULL');
+    for (;;) {
+      const [result] = await connection.query(`
+        UPDATE users u
+        SET last_area_id = 1
+        WHERE u.last_area_id IS NULL
+          AND EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = u.id)
+        ORDER BY u.id
+        LIMIT ${AREA_BACKFILL_BATCH_SIZE}
+      `);
+      if (result.affectedRows === 0) break;
+    }
+    console.log('[migrate] users.last_area_id backfilled from order history.');
 
     console.log('Migration and seeding completed successfully!');
   } catch (error) {

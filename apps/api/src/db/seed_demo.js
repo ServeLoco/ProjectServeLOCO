@@ -13,10 +13,11 @@ async function seedDemoData() {
 
   try {
     await connect();
-    // 1. Settings and Offers
-    await pool.query('INSERT IGNORE INTO settings (id, shop_open, delivery_charge) VALUES (1, 1, 10)');
+    // 1. Settings and Offers — area_id = 1 (Area 1): this script only ever
+    // seeds the default area (see plans/multi-area.md §2.12).
+    await pool.query('INSERT IGNORE INTO settings (id, area_id, shop_open, delivery_charge) VALUES (1, 1, 1, 10)');
     await pool.query('DELETE FROM offers WHERE title = "Weekend Snack Combo"');
-    await pool.query('INSERT INTO offers (title, description, active) VALUES ("Weekend Snack Combo", "Get 20% extra on all snacks this weekend!", 1)');
+    await pool.query('INSERT INTO offers (area_id, title, description, active) VALUES (1, "Weekend Snack Combo", "Get 20% extra on all snacks this weekend!", 1)');
 
     // 2. Customers — OTP-only, no password
     await pool.query(
@@ -53,8 +54,8 @@ async function seedDemoData() {
     await pool.query('DELETE FROM orders WHERE order_number LIKE "SL-DEMO-%"');
 
     // 3. Categories — insert if they don't exist
-    await pool.query('INSERT IGNORE INTO categories (name, slug, type, active) VALUES ("Fast Food", "fast-food", "fast_food", 1)');
-    await pool.query('INSERT IGNORE INTO categories (name, slug, type, active) VALUES ("Packed Items", "packed-items", "packed", 1)');
+    await pool.query('INSERT IGNORE INTO categories (area_id, name, slug, type, active) VALUES (1, "Fast Food", "fast-food", "fast_food", 1)');
+    await pool.query('INSERT IGNORE INTO categories (area_id, name, slug, type, active) VALUES (1, "Packed Items", "packed-items", "packed", 1)');
 
     const [fastFoodCat] = await pool.query('SELECT id FROM categories WHERE slug = "fast-food"');
     const [packedCat] = await pool.query('SELECT id FROM categories WHERE slug = "packed-items"');
@@ -79,28 +80,28 @@ async function seedDemoData() {
     // 4. Products
     // Fast Food — with image
     await pool.query(
-      `INSERT INTO products (name, category_id, price, unit, available, image_id)
-       SELECT ?, ?, ?, ?, ?, ? FROM DUAL
+      `INSERT INTO products (area_id, name, category_id, price, unit, available, image_id)
+       SELECT ?, ?, ?, ?, ?, ?, ? FROM DUAL
        WHERE NOT EXISTS (SELECT 1 FROM products WHERE name = ?)`,
-      ['Demo Burger', fastFoodCat[0].id, 150, 'piece', 1, imageId, 'Demo Burger']
+      [1, 'Demo Burger', fastFoodCat[0].id, 150, 'piece', 1, imageId, 'Demo Burger']
     );
     const [demoBurgerRows] = await pool.query('SELECT id FROM products WHERE name = ?', ['Demo Burger']);
 
     // Packed Item — no image
     await pool.query(
-      `INSERT INTO products (name, category_id, price, unit, available)
-       SELECT ?, ?, ?, ?, ? FROM DUAL
+      `INSERT INTO products (area_id, name, category_id, price, unit, available)
+       SELECT ?, ?, ?, ?, ?, ? FROM DUAL
        WHERE NOT EXISTS (SELECT 1 FROM products WHERE name = ?)`,
-      ['Demo Chips', packedCat[0].id, 20, 'packet', 1, 'Demo Chips']
+      [1, 'Demo Chips', packedCat[0].id, 20, 'packet', 1, 'Demo Chips']
     );
     const [demoChipsRows] = await pool.query('SELECT id FROM products WHERE name = ?', ['Demo Chips']);
 
     // Unavailable product
     await pool.query(
-      `INSERT INTO products (name, category_id, price, unit, available)
-       SELECT ?, ?, ?, ?, ? FROM DUAL
+      `INSERT INTO products (area_id, name, category_id, price, unit, available)
+       SELECT ?, ?, ?, ?, ?, ? FROM DUAL
        WHERE NOT EXISTS (SELECT 1 FROM products WHERE name = ?)`,
-      ['Out of Stock Item', packedCat[0].id, 50, 'packet', 0, 'Out of Stock Item']
+      [1, 'Out of Stock Item', packedCat[0].id, 50, 'packet', 0, 'Out of Stock Item']
     );
 
     const demoBurgerId = demoBurgerRows[0].id;
@@ -115,17 +116,17 @@ async function seedDemoData() {
       const paymentStatus = (status === 'Delivered') ? 'Paid' : 'Pending';
 
       const [orderRes] = await pool.query(
-        'INSERT INTO orders (order_number, customer_id, customer_name, phone, address, subtotal, delivery_charge, night_charge, total, status, payment_method, payment_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [orderNumber, customerId, 'Demo User', '9999999999', '123 Demo Street', 160, 10, 0, 170, status, 'Cash', paymentStatus]
+        'INSERT INTO orders (area_id, order_number, customer_id, customer_name, phone, address, subtotal, delivery_charge, night_charge, total, status, payment_method, payment_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [1, orderNumber, customerId, 'Demo User', '9999999999', '123 Demo Street', 160, 10, 0, 170, status, 'Cash', paymentStatus]
       );
 
       await pool.query(
-        'INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price, line_total) VALUES (?, ?, ?, ?, ?, ?)',
-        [orderRes.insertId, demoBurgerId, 'Demo Burger', 1, 150, 150]
+        'INSERT INTO order_items (area_id, order_id, product_id, product_name, quantity, unit_price, line_total) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [1, orderRes.insertId, demoBurgerId, 'Demo Burger', 1, 150, 150]
       );
       await pool.query(
-        'INSERT INTO order_items (order_id, product_id, product_name, quantity, unit_price, line_total) VALUES (?, ?, ?, ?, ?, ?)',
-        [orderRes.insertId, demoChipsId, 'Demo Chips', 1, 20, 20]
+        'INSERT INTO order_items (area_id, order_id, product_id, product_name, quantity, unit_price, line_total) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [1, orderRes.insertId, demoChipsId, 'Demo Chips', 1, 20, 20]
       );
     }
 
@@ -136,23 +137,23 @@ async function seedDemoData() {
     );
     await pool.query(
       `INSERT INTO coupons (
-        code, title, description,
+        area_id, code, title, description,
         discount_type, discount_value, max_discount_amount,
         min_order_amount, min_item_count, max_order_amount, applies_to,
         total_usage_limit, per_user_usage_limit, first_order_only,
         auto_apply, requires_code, priority, active
       ) VALUES
-        ('WELCOME50', 'Welcome Offer', 'Flat 50% off up to ₹100 on your first order',
+        (1, 'WELCOME50', 'Welcome Offer', 'Flat 50% off up to ₹100 on your first order',
           'percent', 50, 100, 0, NULL, NULL, 'all', NULL, 1, 1, 0, 1, 10, 1),
-        ('FREEDEL', 'Free Delivery', 'Free delivery on orders above ₹199',
+        (1, 'FREEDEL', 'Free Delivery', 'Free delivery on orders above ₹199',
           'free_delivery', 0, NULL, 199, NULL, NULL, 'all', NULL, NULL, 0, 1, 0, 5, 1),
-        ('SAVE20', 'Flat 20% Off', 'Flat 20% off, no minimum order value',
+        (1, 'SAVE20', 'Flat 20% Off', 'Flat 20% off, no minimum order value',
           'percent', 20, 150, 0, NULL, NULL, 'all', NULL, 5, 0, 0, 1, 1, 1),
-        ('COMBO30', 'Combo Meal Deal', '30% off on combo meals over ₹300',
+        (1, 'COMBO30', 'Combo Meal Deal', '30% off on combo meals over ₹300',
           'percent', 30, 200, 300, NULL, NULL, 'fast_food', 500, 3, 0, 0, 1, 3, 1),
-        ('FREEDEL3', 'Free Delivery (3 items)', 'Free delivery when you add 3 or more items',
+        (1, 'FREEDEL3', 'Free Delivery (3 items)', 'Free delivery when you add 3 or more items',
           'free_delivery', 0, NULL, 0, 3, NULL, 'all', NULL, NULL, 0, 1, 0, 6, 1),
-        ('ORDER299', '₹50 off + 2 items', '₹50 off when order is ₹299+ and has 2+ items',
+        (1, 'ORDER299', '₹50 off + 2 items', '₹50 off when order is ₹299+ and has 2+ items',
           'flat', 50, NULL, 299, 2, NULL, 'all', NULL, NULL, 0, 0, 1, 4, 1)`
     );
 
