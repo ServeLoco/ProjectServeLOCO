@@ -880,23 +880,104 @@ outside this task's file list — TASK 15/17's turf). Remaining informational vi
 
 **Commit:** `feat: AREA TASK 14 — per-area coupons`
 
-### [ ] TASK 15 — Shops, riders, rider assignment, sweepers (96 sites)
+### [x] TASK 15 — Shops, riders, rider assignment, sweepers (96 sites)
 **Spec:** H2 · **Files:** `[api] src/utils/shops.js`, `src/utils/riders.js`,
 `src/services/riderAssignment.js`, `src/controllers/shopAdminController.js`, `riderController.js`,
 `adminRiderController.js`, `src/realtime/shopScheduleSweeper.js`, `src/realtime/riderOfferSweeper.js`
 
-- [ ] 15.1 `shops` (63) and `riders` (33) scoped.
-- [ ] 15.2 `utils/riders.js:95` eligible-rider query gains `r.area_id = ?` — an area 2 order must
-      never offer to an area 1 rider.
-- [ ] 15.3 `syncGlobalShopOpenState` → `syncAreaShopOpenState(areaId)`; stops scanning the whole
-      `shops` table; writes that area's `settings.shop_open`.
-- [ ] 15.4 `shopScheduleSweeper` loops areas (H2) and emits into the right area room.
-- [ ] 15.5 `riderOfferSweeper` — decide and **write down in a comment**: stays global for expiry, but
-      its emits target the offer's area room.
-- [ ] 15.6 `purgeExpiredDeletions` stays global (users are global) — add to the guardrail allowlist
-      with that justification.
-- [ ] 15.7 **Do not touch** the offer/accept/expiry state machine.
-- [ ] 15.8 Test: area 2 order offers only to area 2 riders.
+- [x] 15.1 `shops` and `riders` scoped across every file in this task's list. `shopAdminController.js`:
+      `listShops`/`createShop`/`updateShop`/`updateShopSchedule`/`deleteShop`/`listShopOrders` all gained
+      `requireOneArea` + `AND area_id = ?`; `loadShopOr404(shopId, areaId)` signature changed (all 6 call
+      sites updated, including the 2 TASK-11-era product-group functions that still called the old 1-arg
+      form). `shopOwnerController.js`: `toggleMyShop`/`updateMyShopSchedule`/`toggleMyProduct` scoped via
+      `req.shop.area_id` (available since TASK 11 added `area_id` to `requireShopOwner`'s SELECT);
+      `getMyProducts`/`getMyOrders`/`getMyOrderHistory`/confirm-reject-ready and the group functions
+      left unscoped by area — all keyed by `req.shop.id`, a trusted, already-owned shop id, same
+      reasoning as `product_variants`/`combo_items` in TASK 11/12. `adminRiderController.js`: gained the
+      same `requireOneArea` pattern as shops — `listRiders`/`createRider`/`updateRider`/`deleteRider`/
+      `getRiderDispatch`/`adminSetRiderOnline`/`adminAcceptOffer`/`adminRejectOffer` all scoped;
+      `adminMarkPickedUp`/`adminUpdateAssignmentStatus` scope their order lookup by `area_id` too (the
+      one place in this file where `orders` is read by raw `orderId` from an admin, not via an
+      already-scoped `rider_id`). `riderController.js`'s own order/offer queries are all keyed by
+      `req.rider.id` (the rider's own identity) — deliberately left unscoped, matching the "identity
+      already IS the boundary" reasoning used for `getMyOrders` above. `loadRiderOr404(id, areaId)`
+      gained an optional area param (undefined = unscoped, for the one legitimate identity-only caller).
+- [x] 15.2 `utils/riders.js`'s `listEligibleRiders({ excludeIds, areaId })` gains `AND r.area_id = ?`;
+      `countActiveRiders(areaId)` likewise. Threaded through both call sites in `riderAssignment.js`
+      (`continueAssignment`, `startAssignment`) from the order's own already-stamped `area_id` (TASK 13) —
+      the state machine itself untouched, only which rows the eligibility query considers changed.
+- [x] 15.3 `syncGlobalShopOpenState` → `syncAreaShopOpenState(areaId)` in `utils/shops.js`: scopes the
+      `settings` read/write and the `shops` aggregate query by `area_id = ?`; cache busts use
+      `microCache.bust(ns, areaId)` instead of a hardcoded `1`. Every caller updated:
+      `shopAdminController.js`, `shopOwnerController.js`, `settingsController.js`, `utils/riders.js`
+      (`syncDeliveryAvailabilityFromRiders` now also takes `areaId`), `shopScheduleSweeper.js`.
+      `notifyShopsForOrder`/`notifyShopsOrderCancelled`/`notifyShopsRiderAssigned`/
+      `notifyShopsOrderStatusChanged`/`notifyShopsRiderAssignmentFailed`/
+      `maybeAutoCancelOrderWhenAllShopsRejected` in `utils/shops.js` need no changes — all keyed by an
+      already-known `order.id`, joining to `shops` by trusted ids only.
+      **Also fixed, beyond the checklist's own scope:** `settingsController.js`'s exported
+      `bustSettingsCache` was still hardcoded to bust area 1's cache key regardless of caller
+      (`SETTINGS_AREA_ID_STOPGAP`, a leftover TASK-9-era stopgap) — now takes `areaId` for real; its 2
+      call sites (`utils/shops.js`, `utils/areaScope.js`'s `bustAreaCaches`) updated to pass it through.
+      Without this fix, a delivery-gate flip in area 2 would have kept serving area 1's stale cached
+      settings response for up to 15s (or vice versa) — a real bug, not just unfinished plumbing.
+- [x] 15.4 `shopScheduleSweeper.js`'s `tick()` now selects `area_id` alongside `id` in both the
+      open-time and close-time queries (one query across every area's shops, not a per-area loop — the
+      table itself already carries `area_id`, so a single `WHERE` naturally covers every area at once)
+      and threads it through `applyScheduledChange(shopId, areaId, isOpen)`, which now scopes its
+      `UPDATE shops`/re-select by `area_id` and calls `syncAreaShopOpenState(areaId)` +
+      `bustAreaCaches(areaId)` instead of the hardcoded-area-1 pair it had before.
+- [x] 15.5 `riderOfferSweeper.js` — decision documented in a comment atop the file: stays global for
+      expiry/rehydrate. `expireDueOffers`/`remindPendingOffers` operate on already-known offer/order
+      rows (trusted-id pattern); `recoverStuckAssignments` was rewritten to check `countActiveRiders`
+      **per distinct area** among its stuck orders (previously one global check gated every area's
+      re-scan, which would have wrongly skipped an area with zero online riders just because a
+      *different* area had some, or vice versa — fixed as part of this task, not left as a known gap).
+      The one real remaining gap, documented rather than silently accepted: `admin.*` socket emits from
+      the rider-assignment engine still go to every connected admin regardless of area (`emitToAdmins`),
+      same as every other realtime emit in the codebase until per-area rooms land in TASK 23.
+- [x] 15.6 `purgeExpiredDeletions` (`src/server.js`) — confirmed it only ever queries `users` and
+      `password_reset_requests`, both genuinely global tables (§2.2), and `src/server.js` isn't even
+      inside the guardrail's scanned directories (`controllers`/`services`/`utils`). **No ALLOWLIST
+      entry was needed** — there is nothing here for the guardrail to flag in the first place, unlike
+      the `imageController.js`/`deliveryZonesController.js`/`utils/coupons.js` entries added in earlier
+      tasks, which all query a genuinely `SCOPED_TABLES` table cross-area on purpose.
+- [x] 15.7 Confirmed: `createOffer`/`acceptOffer`/`rejectOffer`/`expireOffer` and every `rider_order_offers`
+      status transition in `riderAssignment.js` are byte-for-byte unchanged — the only edits in that file
+      are the `areaId` argument threaded into 2 `listEligibleRiders` calls, 1 `syncDeliveryAvailabilityFromRiders`
+      call, and the per-area regrouping inside `recoverStuckAssignments`'s pre-scan optimization (15.5).
+- [x] 15.8 New test `tests/riderAreaIsolation.test.js` drives the real `continueAssignment` code path
+      with a synthetic area-2 order and asserts the actual SQL/params sent for the eligible-rider query
+      carry `area_id = 2` (never `1`), plus a mirror-image area-1 case — same "assert the real SQL, not
+      just the mocked response" style as `dashboardAreaIsolation.test.js` (TASK 12.4), needed because no
+      real area 2 exists yet (§6.6 gate). Additionally live-verified against the real local MySQL: created
+      a temporary area 2 + one rider per area, ran `listEligibleRiders`/`countActiveRiders` for real, and
+      confirmed each area's query returns only its own rider — cleaned up afterward.
+
+**Test churn:** 8 test files broke, all from the same 2 now-familiar root causes. (1) Pre-TASK-7 admin
+JWTs missing `adminRole`/`areaId` — `adminRiders.test.js`, `ridersAdminDelete.test.js`,
+`adminShopSchedule.test.js`, `shopsAdmin.test.js`, `shopGlobalStatusSync.test.js`'s admin describe block.
+(2) `syncGlobalShopOpenState` → `syncAreaShopOpenState` rename plus the now-bound `area_id = ?` param
+(previously a literal `1` in the SQL text) — `ridersUtils.test.js`, `riderUatCoverage.test.js`,
+`shopGlobalStatusSync.test.js`'s unit block, `settingsDeliveryGate.test.js`. One new wrinkle in
+`shopGlobalStatusSync.test.js`'s wiring tests: `toggleMyShop`/`updateShop` now also call
+`bustAreaCaches(areaId)` after the sync, which issues one additional real query
+(`UPDATE areas SET catalog_version = catalog_version + 1 WHERE id = ?`) that needed a 7th queued mock.
+
+**Live verification (local dev DB, migration re-run clean):** confirmed both existing riders already
+carry `area_id`. Ran the temporary area-2/rider-pair script described in 15.8 directly against MySQL —
+`listEligibleRiders`/`countActiveRiders` scoped correctly in both directions, then cleaned up (no
+orphaned rows left, confirmed by re-query). Full checkout/dispatch HTTP flow could not be exercised (no
+customer/rider JWT available without completing Firebase phone-auth OTP, same constraint as TASK
+11/13/14) — covered instead by the full Jest suite (90/90 suites, 989/990 tests, 1 pre-existing skip).
+
+**Guardrail:** `shops`/`riders` still not added to `SWEPT_TABLES` — `adminController.js` (TASK 17's
+reports/dashboard/admin-orders-list turf, confirmed explicitly out of scope for this task per TASK
+13's own notes), `productController.js`, `dashboardController.js`, `orderController.js`,
+`cartController.js`, and `mobileAdminController.js` all still reference `shops`/`riders` outside this
+task's file list (catalog/dashboard/order-domain tasks' turf, or identity-only role-conflict checks).
+Remaining informational violation count: 249 (down from 284 — coupons task's count was 274, meaning
+this task alone closed 25 real unscoped sites across its own file list).
 
 **Commit:** `feat: AREA TASK 15 — per-area shops, riders, assignment, sweepers`
 
