@@ -15,6 +15,7 @@ const realtimeEvents = require('../realtime/orderEvents');
 const { emitToCustomer, emitToAdmins } = require('../realtime/socket');
 const orderAutoAccept = require('../realtime/orderAutoAccept');
 const adminInbox = require('../utils/adminNotifications');
+const { requestAreaId, getDefaultArea } = require('../utils/areaScope');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const { calculateCart } = require('./cartController');
@@ -1385,16 +1386,38 @@ const updateOrderRemark = async (req, res) => {
   res.status(200).json({ message: 'Order remark updated successfully', order: updatedOrder });
 };
 
+// admin_notifications / notification_batches — unlike shops/riders (which
+// reject 'all' outright), a super_admin genuinely needs "every area" here:
+// the operational inbox and broadcast history are legitimate cross-area
+// views/audiences (H6), not a single-tenant write. area_admin still never
+// gets a choice — resolveAdminArea already pins them to their own area and
+// 403s if they try to send X-Area-Id.
+const resolveAreaOrAll = (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required for this action (pass a specific area, or "all")' });
+    return undefined;
+  }
+  return areaId; // a number, or the literal 'all'
+};
+
 const getAdminNotifications = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const pagination = validatePagination(req.query.page, req.query.limit);
   const offset = (pagination.page - 1) * pagination.limit;
+  const areaClause = areaId === 'all' ? '' : ' AND area_id = ?';
+  const areaParams = areaId === 'all' ? [] : [areaId];
 
   const [rows] = await pool.query(
-    'SELECT * FROM notification_batches WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT ? OFFSET ?',
-    [pagination.limit, offset]
+    `SELECT * FROM notification_batches WHERE deleted_at IS NULL${areaClause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    [...areaParams, pagination.limit, offset]
   );
 
-  const [countRows] = await pool.query('SELECT COUNT(*) as total FROM notification_batches WHERE deleted_at IS NULL');
+  const [countRows] = await pool.query(
+    `SELECT COUNT(*) as total FROM notification_batches WHERE deleted_at IS NULL${areaClause}`,
+    areaParams
+  );
   const total = countRows[0].total;
 
   res.status(200).json({
@@ -1411,6 +1434,12 @@ const getAdminNotifications = async (req, res) => {
 const createAdminNotification = async (req, res) => {
   const { title, body, type, target, phones } = req.body;
   const adminId = req.admin.id;
+  // H6/16.3: 'everyone' is scoped to one area by default; a super_admin may
+  // explicitly opt into 'all' (X-Area-Id: all) to reach every area at once.
+  // area_admin never sees a choice — resolveAdminArea already pins them to
+  // their own area and 403s if they try to send the header themselves.
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
 
   if (!title || !body || !type || !target) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'title, body, type, and target are required' });
@@ -1449,10 +1478,27 @@ const createAdminNotification = async (req, res) => {
   let targetUserIds = [];
   let resolvedPhones = [];
   let unmatchedPhones = [];
+  let targetLabel = target;
+  // H6: customers are global and carry only last_area_id, a cache — this is
+  // approximate by nature (reaches whoever's last order was in this area,
+  // misses someone who has never ordered, includes someone who has since
+  // moved). audienceNote below surfaces that in the response for whichever
+  // admin UI reads it; not fixable without a precise per-user area signal
+  // this codebase doesn't have (§2.2).
+  let audienceNote = null;
 
   if (target === 'everyone') {
-    const [users] = await pool.query('SELECT id FROM users WHERE blocked = 0');
-    targetUserIds = users.map(u => u.id);
+    if (areaId === 'all') {
+      const [users] = await pool.query('SELECT id FROM users WHERE blocked = 0');
+      targetUserIds = users.map(u => u.id);
+      targetLabel = 'everyone (all areas)';
+      audienceNote = 'Sent to every non-blocked customer across every area.';
+    } else {
+      const [users] = await pool.query('SELECT id FROM users WHERE blocked = 0 AND last_area_id = ?', [areaId]);
+      targetUserIds = users.map(u => u.id);
+      targetLabel = `everyone (area ${areaId})`;
+      audienceNote = 'Approximate: reaches customers whose most recent order was in this area. Misses anyone who has never ordered, and may include someone who has since moved.';
+    }
   } else if (target === 'phones') {
     const sanitized = sanitizePhones(phones);
     if (sanitized.length === 0) {
@@ -1557,13 +1603,20 @@ const createAdminNotification = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'No recipients found for target' });
   }
 
+  // notification_batches.area_id is NOT NULL and can't hold "every area" —
+  // an 'all areas' broadcast still records the default area on this audit
+  // row (getDefaultArea(), same fallback used wherever no single area
+  // applies); targetLabel's own text is what actually documents true reach.
+  const batchAreaId = areaId === 'all' ? (await getDefaultArea())?.id : areaId;
+
   const result = await notificationService.createBroadcastNotification({
     title,
     body,
     type,
     createdByAdminId: adminId,
     targetUserIds,
-    targetName: target === 'phones' ? `phones:${resolvedPhones.join(',')}` : target
+    targetName: target === 'phones' ? `phones:${resolvedPhones.join(',')}` : targetLabel,
+    areaId: batchAreaId,
   });
 
   if (!result) {
@@ -1607,6 +1660,7 @@ const createAdminNotification = async (req, res) => {
       batchId: result.batchId,
       recipientCount: result.count,
       pushEligibleCount: result.pushEligibleCount ?? null,
+      audienceNote,
       ...(target === 'phones'
         ? { matchedPhones: resolvedPhones, unmatchedPhones }
         : {}),
@@ -1615,9 +1669,13 @@ const createAdminNotification = async (req, res) => {
 };
 
 const getAdminNotificationById = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const { id } = req.params;
-  const [rows] = await pool.query('SELECT * FROM notification_batches WHERE id = ?', [id]);
-  
+  const areaClause = areaId === 'all' ? '' : ' AND area_id = ?';
+  const areaParams = areaId === 'all' ? [] : [areaId];
+  const [rows] = await pool.query(`SELECT * FROM notification_batches WHERE id = ?${areaClause}`, [id, ...areaParams]);
+
   if (rows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Notification batch not found' });
   }
@@ -1626,9 +1684,13 @@ const getAdminNotificationById = async (req, res) => {
 };
 
 const deleteAdminNotification = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const { id } = req.params;
-  
-  const [batchRows] = await pool.query('SELECT * FROM notification_batches WHERE id = ?', [id]);
+  const areaClause = areaId === 'all' ? '' : ' AND area_id = ?';
+  const areaParams = areaId === 'all' ? [] : [areaId];
+
+  const [batchRows] = await pool.query(`SELECT * FROM notification_batches WHERE id = ?${areaClause}`, [id, ...areaParams]);
   if (batchRows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Notification batch not found' });
   }
@@ -1715,51 +1777,71 @@ const adminCreateOrder = async (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────
 
 const getInbox = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+  const areaClause = areaId === 'all' ? '' : ' AND area_id = ?';
+  const areaParams = areaId === 'all' ? [] : [areaId];
   const [rows] = await pool.query(
     `SELECT id, type, title, body, related_url, related_id, read_at, created_at
        FROM admin_notifications
+      WHERE 1=1${areaClause}
       ORDER BY created_at DESC, id DESC
       LIMIT ?`,
-    [limit]
+    [...areaParams, limit]
   );
   const [[count]] = await pool.query(
-    'SELECT COUNT(*) AS n FROM admin_notifications WHERE read_at IS NULL'
+    `SELECT COUNT(*) AS n FROM admin_notifications WHERE read_at IS NULL${areaClause}`,
+    areaParams
   );
   res.status(200).json({ data: rows, unread_count: Number(count.n) || 0 });
 };
 
 const getInboxUnreadCount = async (req, res) => {
-  const count = await adminInbox.getUnreadCount();
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
+  const count = await adminInbox.getUnreadCount(areaId);
   res.status(200).json({ count });
 };
 
 const markInboxRead = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const id = parseInt(req.params.id, 10);
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Invalid id' });
   }
+  const areaClause = areaId === 'all' ? '' : ' AND area_id = ?';
+  const areaParams = areaId === 'all' ? [] : [areaId];
   await pool.query(
-    'UPDATE admin_notifications SET read_at = NOW() WHERE id = ? AND read_at IS NULL',
-    [id]
+    `UPDATE admin_notifications SET read_at = NOW() WHERE id = ? AND read_at IS NULL${areaClause}`,
+    [id, ...areaParams]
   );
-  adminInbox.broadcastUnreadCount();
+  adminInbox.broadcastUnreadCount(areaId);
   res.status(200).json({ message: 'Marked as read' });
 };
 
 const markAllInboxRead = async (req, res) => {
-  await pool.query('UPDATE admin_notifications SET read_at = NOW() WHERE read_at IS NULL');
-  adminInbox.broadcastUnreadCount();
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
+  const areaClause = areaId === 'all' ? '' : ' AND area_id = ?';
+  const areaParams = areaId === 'all' ? [] : [areaId];
+  await pool.query(`UPDATE admin_notifications SET read_at = NOW() WHERE read_at IS NULL${areaClause}`, areaParams);
+  adminInbox.broadcastUnreadCount(areaId);
   res.status(200).json({ message: 'All marked as read' });
 };
 
 const dismissInbox = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const id = parseInt(req.params.id, 10);
   if (!Number.isFinite(id) || id <= 0) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Invalid id' });
   }
-  await pool.query('DELETE FROM admin_notifications WHERE id = ?', [id]);
-  adminInbox.broadcastUnreadCount();
+  const areaClause = areaId === 'all' ? '' : ' AND area_id = ?';
+  const areaParams = areaId === 'all' ? [] : [areaId];
+  await pool.query(`DELETE FROM admin_notifications WHERE id = ?${areaClause}`, [id, ...areaParams]);
+  adminInbox.broadcastUnreadCount(areaId);
   res.status(200).json({ message: 'Dismissed' });
 };
 

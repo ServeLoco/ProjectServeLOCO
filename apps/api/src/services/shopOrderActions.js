@@ -183,7 +183,7 @@ async function confirmShopOrder(shopId, orderId, { shopName } = {}) {
  */
 async function rejectShopOrder(shopId, orderId, { shopName } = {}) {
   const [countRows] = await pool.query(
-    `SELECT COUNT(*) as cnt FROM order_items oi
+    `SELECT COUNT(*) as cnt, MAX(o.area_id) as area_id FROM order_items oi
      JOIN orders o ON o.id = oi.order_id
      WHERE oi.order_id = ? AND oi.shop_id = ? AND o.status IN ('Accepted', 'Preparing')`,
     [orderId, shopId]
@@ -217,6 +217,7 @@ async function rejectShopOrder(shopId, orderId, { shopName } = {}) {
     body: `${shopName || 'A shop'} rejected their items on order #${orderId}. Review and take action (cancel, reassign, contact customer).`,
     relatedUrl: `/orders?id=${orderId}`,
     relatedId: String(orderId),
+    areaId: countRows[0].area_id,
   });
 
   await maybeAutoCancelOrderWhenAllShopsRejected(orderId);

@@ -223,15 +223,24 @@ const createOrderNotification = async ({ userId, order, event, connection = pool
   });
 };
 
+/**
+ * areaId is required (NOT NULL column, TASK 3) — a broadcast that genuinely
+ * fans out to every area (super admin's explicit 'all' choice, H6) still
+ * records ONE area on this audit row (getDefaultArea(), same fallback used
+ * everywhere else no single area applies) since the column can't hold
+ * "every area"; `target`'s own text ('everyone (all areas)' vs 'everyone
+ * (area N)') is what actually documents true reach to anyone reading the
+ * batch list, not this column.
+ */
 const createNotificationBatch = async ({
-  title, body, type, target, recipientCount, createdByAdminId, connection = pool
+  title, body, type, target, recipientCount, createdByAdminId, areaId, connection = pool
 }) => {
   try {
     const queryResult = await connection.query(`
       INSERT INTO notification_batches (
-        title, body, type, target, recipient_count, created_by_admin_id
-      ) VALUES (?, ?, ?, ?, ?, ?)
-    `, [title, body, type, target, recipientCount, createdByAdminId]);
+        area_id, title, body, type, target, recipient_count, created_by_admin_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, [areaId, title, body, type, target, recipientCount, createdByAdminId]);
     return firstQueryResult(queryResult);
   } catch (error) {
     console.error('Error creating notification batch:', error);
@@ -240,7 +249,7 @@ const createNotificationBatch = async ({
 };
 
 const createBroadcastNotification = async ({
-  title, body, type, createdByAdminId, targetUserIds, targetName, connection = pool
+  title, body, type, createdByAdminId, targetUserIds, targetName, areaId, connection = pool
 }) => {
   if (!targetUserIds || targetUserIds.length === 0) return null;
 
@@ -253,7 +262,7 @@ const createBroadcastNotification = async ({
     }
 
     const batchResult = await createNotificationBatch({
-      title, body, type, target: targetName, recipientCount: targetUserIds.length, createdByAdminId, connection: tx
+      title, body, type, target: targetName, recipientCount: targetUserIds.length, createdByAdminId, areaId, connection: tx
     });
     const batchId = batchResult.insertId;
 

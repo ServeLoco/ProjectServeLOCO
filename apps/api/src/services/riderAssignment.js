@@ -403,6 +403,7 @@ const failAssignment = async (orderId, reason = 'No riders available') => {
       body: `${failReason}. Cancel with a reason or investigate / deliver manually.`,
       relatedUrl: `/orders?id=${orderId}`,
       relatedId: String(orderId),
+      areaId: updated.area_id,
     });
 
     try {

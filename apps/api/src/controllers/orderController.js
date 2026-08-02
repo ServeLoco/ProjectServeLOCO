@@ -656,6 +656,7 @@ const createOrder = async (req, res) => {
       body: `${order.customer_name || 'Customer'} placed an order — ₹${Number(order.total).toFixed(0)}`,
       relatedUrl: `/orders?id=${orderId}`,
       relatedId: String(orderId),
+      areaId: deliveryAreaId,
     });
 
     orderAutoAccept.schedule(orderId, orderNumber);

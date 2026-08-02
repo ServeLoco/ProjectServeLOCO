@@ -5,6 +5,7 @@ const adminInbox = require('../utils/adminNotifications');
 const { getShopForUser } = require('../utils/shops');
 const { getRiderForUser } = require('../utils/riders');
 const { getMobileAdminForUser } = require('../utils/mobileAdmins');
+const { getDefaultArea } = require('../utils/areaScope');
 
 // Sliding-window token renewal. We refresh whenever the token has used
 // more than half of its own lifetime. This auto-adapts to whatever
@@ -329,12 +330,17 @@ const verifyFirebaseToken = async (req, res) => {
     isNewUser = true;
 
     // Admin inbox — fire-and-forget notification on new customer signup.
+    // No pin/location exists at signup time to resolve a real area from —
+    // the default area is the same fallback resolveCustomerArea itself uses
+    // for "no pin, no order history" (§4.2), not a guess invented here.
+    const signupAreaId = (await getDefaultArea())?.id;
     adminInbox.createAdminNotification({
       type: adminInbox.TYPES.NEW_CUSTOMER,
       title: 'New customer signed up',
       body: `${trimmedName} (${normalizedPhone}) just created an account via OTP`,
       relatedUrl: `/customers?id=${userId}`,
       relatedId: String(userId),
+      areaId: signupAreaId,
     });
 
     user = {

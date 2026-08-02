@@ -33,6 +33,11 @@ jest.mock('../src/db/mysql', () => {
     }
 
     if (normalized.startsWith('SELECT id FROM users WHERE blocked = 0')) {
+      // Matches both the 'all areas' form and the per-area
+      // "AND last_area_id = ?" form — this in-memory mock doesn't model
+      // last_area_id, so every non-blocked user counts as a recipient
+      // either way (real per-area filtering is covered by the controller's
+      // own unit-level tests, not this integration-style fixture).
       return [state.users.filter(user => !user.blocked).map(user => ({ id: user.id }))];
     }
 
@@ -40,12 +45,13 @@ jest.mock('../src/db/mysql', () => {
       const id = state.nextBatchId++;
       state.batches.push({
         id,
-        title: params[0],
-        body: params[1],
-        type: params[2],
-        target: params[3],
-        recipient_count: params[4],
-        created_by_admin_id: params[5],
+        area_id: params[0],
+        title: params[1],
+        body: params[2],
+        type: params[3],
+        target: params[4],
+        recipient_count: params[5],
+        created_by_admin_id: params[6],
         created_at: new Date(),
         deleted_at: null
       });
@@ -203,7 +209,7 @@ beforeAll(async () => {
   const [result] = await pool.query('INSERT INTO users (phone, name, password_hash) VALUES (?, ?, ?)', [phone, 'Test User', 'hash']);
   customerId = result.insertId;
   userToken = signCustomerToken(customerId);
-  adminToken = signAdminToken(1);
+  adminToken = signAdminToken(1, { adminRole: 'area_admin', areaId: 1 });
 });
 
 afterAll(async () => {

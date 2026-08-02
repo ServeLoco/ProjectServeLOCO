@@ -382,6 +382,7 @@ const maybeAutoCancelOrderWhenAllShopsRejected = async (orderId) => {
         : 'All shops rejected this order. It was cancelled automatically.',
       relatedUrl: `/orders?id=${orderId}`,
       relatedId: String(orderId),
+      areaId: updatedOrder.area_id,
     });
 
     const notificationService = require('./notificationService');
