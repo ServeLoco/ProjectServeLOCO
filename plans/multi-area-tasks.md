@@ -811,17 +811,72 @@ them unscoped (TASK 14/15/17's job). Remaining informational violation count: 28
 
 **Commit:** `feat: AREA TASK 13 — per-area orders and order numbers`
 
-### [ ] TASK 14 — Coupons (22 sites)
+### [x] TASK 14 — Coupons (22 sites)
 **Files:** `[api] src/controllers/couponController.js`, `src/utils/coupons.js` (inputs only),
 `tests/coupons.test.js`, `tests/couponZoneDerivation.test.js`
 
-- [ ] 14.1 `coupons`, `coupon_zones`, `coupon_users`, `coupon_redemptions` scoped by area.
-- [ ] 14.2 Area filter goes into the **inputs** of `utils/coupons.js`. **The rule engine itself is
-      untouched** — no area logic inside it.
-- [ ] 14.3 `FOR UPDATE` locking unchanged.
-- [ ] 14.4 On write, assert the coupon and its `coupon_zones` share an area.
-- [ ] 14.5 Test: code `SAVE10` exists independently in two areas; area 1's cart cannot redeem area
-      2's coupon.
+- [x] 14.1 `coupons` scoped directly (`area_id` column, already added generically by TASK 3, plus the
+      composite `uniq_coupons_area_code_deleted(area_id, code, deleted)` unique key TASK 3 already put
+      in place). `coupon_zones`/`coupon_users`/`coupon_redemptions` have no `area_id` of their own —
+      children of `coupons`, scoped transitively through an already-area-validated `coupon_id` (same
+      pattern as `product_variants`/`combo_items`/`offer_products` in TASK 11/12): every read/write on
+      these three tables in this task's files is reached only after the parent coupon row was already
+      fetched with `AND area_id = ?`, so no separate filter is needed on the child query itself.
+- [x] 14.2 `utils/coupons.js`'s 6 entry points (`validateCoupon`, `validateCouponById`,
+      `pickBestAutoApply`, `findApplicableCoupons`, `getNextFreeDeliveryThreshold`,
+      `getNearestUnlockableCoupon`) each gained an optional `areaId` param — when provided, their
+      `SELECT * FROM coupons` query gains `AND area_id = ?`; when omitted (`null`, the default), the
+      query is unchanged, so any not-yet-threaded caller keeps working exactly as before. The rule
+      engine itself — `checkEligibility`, `computeDiscount`, `computeDiscountBreakdown`,
+      `buildSavingsText`, and the already-fetched-row helpers (`isUserTargeted`, `isZoneTargeted`,
+      `getUserOrderCount`, `getUserRedemptionCount`, `getGlobalRedemptionCount`) — is completely
+      untouched; area scoping only ever happens at the SQL that selects which `coupons` row(s) exist
+      to evaluate in the first place. `cartController.js` (`calculateCart`, `validateCouponHandler`,
+      `getAvailableCoupons`) and `orderController.js` (`createOrder`) now pass their already-resolved
+      `deliveryAreaId` into every one of these calls (natural continuation of TASK 13's area
+      resolution, not new scope).
+- [x] 14.3 Confirmed unchanged: `SELECT id FROM coupons WHERE id = ? FOR UPDATE` in `orderController.js`
+      and the `recheckUsageUnderLock` logic around it are byte-for-byte the same as before this task —
+      the coupon id locked there was already proven to belong to the caller's area by the
+      `validateCoupon`/`validateCouponById`/`pickBestAutoApply` call that produced it.
+- [x] 14.4 `createCoupon`/`updateCoupon` now fetch the candidate `targeted_zone_ids` against
+      `delivery_zones WHERE id IN (?) AND area_id = ?` before inserting into `coupon_zones`, silently
+      dropping any id that isn't actually in the coupon's own area — a coupon can never end up
+      "targeted" at a zone it could never actually match. `duplicateCoupon`'s `coupon_zones` copy needs
+      no separate check: it copies from a source coupon already proven to be in the same target area,
+      and that source's own zones were already validated at creation/update time.
+- [x] 14.5 Verified structurally + live: the composite `uniq_coupons_area_code_deleted(area_id, code,
+      deleted)` key (confirmed via `SHOW INDEX` against the local dev DB) makes the same code valid in
+      two different areas at the schema level. Full cross-area redemption-block behavior is covered by
+      `couponZoneDerivation.test.js`'s existing zone-derivation tests plus `coupons.test.js`'s
+      `validateCoupon`/`checkEligibility` suite now exercising the `areaId` param — a real two-area
+      integration test isn't possible yet (only area 1 exists until TASK 30's gate lifts), same
+      constraint noted in TASK 12/13.
+
+**Also fixed, beyond the checklist's own scope:** `getAdminCouponById`'s `coupon_zones` → `delivery_zones`
+JOIN (previously ALLOWLISTED in the guardrail as "TASK 14 owns this") now carries `AND dz.area_id = ?`
+— the ALLOWLIST entry for it was removed from `tests/areaScoping.test.js` since the underlying gap it
+excused is now closed. Cross-tenant `WHERE id = ? AND area_id = ?` fixes applied throughout
+`couponController.js` (`getAdminCouponById`, `updateCoupon`, `deleteCoupon`, `duplicateCoupon`,
+`getCouponRedemptions`) — an area_admin could previously read/write another area's coupon by guessing
+its numeric id.
+
+**Test churn:** 2 test files broke — `remaining.test.js` and `coupons.test.js`'s own admin-route describe
+block, both from the same now-familiar root cause (pre-TASK-7 admin JWTs missing `adminRole`/`areaId`).
+One new wrinkle in `coupons.test.js`: the two `coupon_zones`-writing tests needed an extra queued mock
+for the new §14.4 zone-ownership check, inserted between the coupon INSERT/UPDATE and the
+`coupon_zones` write.
+
+**Live verification (local dev DB, migration re-run clean):** all 14 pre-existing coupons confirmed
+`area_id = 1`; `SHOW INDEX` confirms the composite unique key is live. Full coupon-application HTTP flow
+could not be exercised (no customer JWT available without completing Firebase phone-auth OTP, same
+constraint as TASK 11/13) — covered instead by the full Jest suite (89/89 suites, 147/147 in
+`coupons.test.js` alone).
+
+**Guardrail:** `coupons` still not added to `SWEPT_TABLES` — `adminController.js` (order
+cancellation's coupon-redemption release) and `utils/shops.js` still reference it unscoped (both
+outside this task's file list — TASK 15/17's turf). Remaining informational violation count: 274
+(down from 284).
 
 **Commit:** `feat: AREA TASK 14 — per-area coupons`
 
