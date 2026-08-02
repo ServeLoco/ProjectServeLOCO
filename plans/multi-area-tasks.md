@@ -981,17 +981,93 @@ this task alone closed 25 real unscoped sites across its own file list).
 
 **Commit:** `feat: AREA TASK 15 — per-area shops, riders, assignment, sweepers`
 
-### [ ] TASK 16 — Notifications + broadcast push (14 sites)
+### [x] TASK 16 — Notifications + broadcast push (14 sites)
 **Spec:** H6 · **Files:** `[api] src/controllers/notificationController.js`,
 `src/utils/notificationService.js`, `src/utils/adminNotifications.js`, `src/utils/expoPush.js`
 
-- [ ] 16.1 `notifications`, `notification_batches`, `admin_notifications` scoped.
-- [ ] 16.2 `notification_templates` stays **global** — already correct, leave it.
-- [ ] 16.3 Broadcast targets one area by `users.last_area_id`, unless a super admin opts into
-      all-areas.
-- [ ] 16.4 Surface the imprecision in the admin UI copy (H6): last-known-area targeting misses users
-      who have never ordered.
-- [ ] 16.5 Order-related pushes unaffected (they target a specific user about a specific order).
+- [x] 16.1 `notification_batches` and `admin_notifications` scoped — both are NOT NULL + carry a
+      composite unique key including `area_id` since TASK 3 (`uniq_admin_inbox_area_event(area_id,
+      type, related_id)`, confirmed live via `SHOW INDEX`). `notifications` (the customer's own inbox)
+      is **not** in `AREA_SCOPED_TABLES` at all and was never meant to be — every query in
+      `notificationController.js` is `WHERE user_id = ?`, a global identity (§2.2), same reasoning as
+      `orders`' customer-read endpoints in TASK 13; `notificationController.js` needed **zero changes**.
+      `expoPush.js` likewise needed zero changes — it only ever takes an already-filtered `userIds`
+      list from its caller, same trusted-id pattern as `product_variants`/`combo_items` elsewhere.
+      `utils/adminNotifications.js`: `createAdminNotification` gained a required `areaId` param (the
+      INSERT's NOT NULL column leaves no optional-param option, unlike TASK 11/14's coupons.js/
+      storeMode.js pattern); `getUnreadCount(areaId)`/`broadcastUnreadCount(areaId)` scope by area or
+      accept `'all'`/omitted for the pre-existing global behavior; `notifyMobileAdminsPush` now filters
+      `mobile_admins` by `area_id = ?` too (a mobile admin in area 2 has no reason to be paged about
+      area 1's new order) — `mobile_admins` itself (the controller managing it) is otherwise untouched,
+      out of this task's file list. `notificationService.js`: `createNotificationBatch`/
+      `createBroadcastNotification` gained `areaId`. `adminController.js` (not in the file list, but
+      owns every real caller): all 5 `createAdminNotification` call sites across `authController.js`,
+      `orderController.js`, `riderAssignment.js`, `utils/shops.js`, `shopOrderActions.js` now pass a
+      concrete `areaId` — 4 from an already-known order's own `area_id` (or `deliveryAreaId` at order
+      creation), 1 (`authController.js`'s new-signup notification, no pin/order exists yet at that
+      point) from `getDefaultArea()`, the same fallback `resolveCustomerArea` itself uses when no pin
+      and no order history exist (§4.2) — not a guess invented for this task. The 5 admin-facing
+      `notification_batches`/`admin_notifications` CRUD endpoints in `adminController.js`
+      (`getAdminNotifications`, `getAdminNotificationById`, `deleteAdminNotification`, `getInbox`,
+      `getInboxUnreadCount`, `markInboxRead`, `markAllInboxRead`, `dismissInbox`) all gained a new
+      `resolveAreaOrAll` helper (rejects missing area context, unlike shops/riders' `requireOneArea`
+      this one *allows* `'all'` for a super_admin — legitimate cross-area reads/writes here, not a
+      mutation that must stay single-tenant).
+- [x] 16.2 Confirmed: `notification_templates` has no `area_id` column, referenced only by
+      `event_key` lookup in `createOrderNotification` — untouched, correctly global.
+- [x] 16.3 `target: 'everyone'` now resolves recipients by `users.last_area_id = ?` for a concrete
+      area (area_admin's own area, or a super_admin's chosen `X-Area-Id`); a super_admin sending
+      `X-Area-Id: all` gets the pre-existing unscoped `SELECT id FROM users WHERE blocked = 0` — the
+      real "opt into all areas" H6 describes. A super_admin with **no** `X-Area-Id` header gets a 400,
+      same as shops/riders' `requireOneArea` pattern, rather than silently defaulting to one area or
+      leaking to all. `target: 'phones'` deliberately stays fully unscoped — the admin explicitly typed
+      those individual numbers, same identity-is-the-boundary reasoning as `getMyOrders`/riders'
+      self-service endpoints in TASK 15.
+- [x] 16.4 API response now includes `audienceNote` — explicit copy distinguishing "Approximate:
+      reaches customers whose most recent order was in this area. Misses anyone who has never ordered,
+      and may include someone who has since moved." (single-area) from "Sent to every non-blocked
+      customer across every area." (`'all'`). `apps/admin` (the React panel that would render this) is
+      outside this task's backend-only file list — not touched, matching the file-list-authoritative
+      pattern since TASK 9; the field exists so a future frontend change has something to display
+      without another backend round trip.
+- [x] 16.5 Confirmed: `createOrderNotification` (the actual order-status push path — placed/accepted/
+      preparing/out-for-delivery/delivered/cancelled/payment events) and its `notifications` table
+      writes are byte-for-byte untouched. Only the separate admin-inbox side-channel notification each
+      of those 5 call sites *also* fires (`adminInbox.createAdminNotification`, a different table,
+      different audience — the admin dashboard bell, not the customer) gained the `areaId` argument.
+
+**Also fixed, beyond the checklist's own scope:** found and reported (via a spawned follow-up task, not
+fixed here) that `mobileAdminController.js`'s `createMobileAdmin` INSERT never supplies `area_id`, and
+`mobile_admins.area_id` is NOT NULL with no default (confirmed live via `SHOW COLUMNS`) — creating a new
+mobile admin against the real schema currently throws outright. `mobileAdminController.js`/`mobile_admins`
+is not in any task's file list from TASK 9 through TASK 17 (checked); this is a genuine gap the original
+checklist missed, not something in scope for TASK 16 to fully resolve (would mean designing that whole
+file's area-scoping from scratch, including its login/token-signing path, untouched by this task).
+
+**Test churn:** 2 test files broke, both pre-existing tests hitting `adminInbox`'s now-required `areaId`
+plumbing indirectly. `tests/notifications.test.js` (its own hand-rolled in-memory `pool.query` mock):
+`signAdminToken(1)` needed `{ adminRole: 'area_admin', areaId: 1 }` (same root cause as every other admin
+JWT fix since TASK 7), and the `INSERT INTO notification_batches` field-mapping in its mock needed to
+shift one column for the new leading `area_id` param. `tests/adminNotificationsPush.test.js` needed no
+changes — it only asserts on the push fan-out, not the INSERT's exact params. Added
+`tests/notificationAreaScoping.test.js` (new): area_admin's `'everyone'` broadcast queries by
+`last_area_id`, super_admin's `'all'` broadcast skips that filter, super_admin with no area header gets
+400, and the inbox unread-count endpoint scopes by area — same "assert the real SQL/params" style as
+TASK 15's `riderAreaIsolation.test.js`.
+
+**Live verification (local dev DB, migration re-run clean):** confirmed `admin_notifications.area_id` and
+`notification_batches.area_id` are both `NOT NULL` with the composite unique key live. Ran
+`createAdminNotification`/`getUnreadCount` directly against real MySQL with a temporary area 2: both
+inserted with the correct `area_id`, and `getUnreadCount` returned exactly 1 for each area independently
+— cleaned up afterward, confirmed no orphaned rows. Full broadcast-push HTTP flow through the real Expo
+API could not be exercised (no real device tokens locally, same constraint as prior tasks' push-adjacent
+work) — covered instead by the full Jest suite (91/91 suites, 993/994 tests, 1 pre-existing skip).
+
+**Guardrail:** `admin_notifications`/`notification_batches` still not added to `SWEPT_TABLES` out of the
+same caution as every other table this sweep has touched, even though a `src/controllers|services|utils`
+grep confirms only this task's 3 files (`utils/adminNotifications.js`, `utils/notificationService.js`,
+`controllers/adminController.js`) reference either table anywhere in the codebase — left for a final audit
+pass rather than asserted here. Remaining informational violation count: 243 (down from 249).
 
 **Commit:** `feat: AREA TASK 16 — per-area notifications and broadcast`
 
