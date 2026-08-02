@@ -8,7 +8,14 @@ jest.mock('../src/db/mysql', () => ({
 }));
 jest.mock('../src/middleware/authMiddleware', () => ({
   requireCustomer: (req, res, next) => next(),
-  requireAdmin: (req, res, next) => next()
+  // Real requireAdmin also chains resolveAdminArea, which is what sets
+  // req.areaId — reports now read that, so this bare passthrough mock must
+  // still set it (area_admin, area 1) or requestAreaId() throws.
+  requireAdmin: (req, res, next) => {
+    req.admin = { id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 };
+    req.areaId = 1;
+    next();
+  }
 }));
 
 const app = express();

@@ -54,6 +54,7 @@ const createPresenceTracker = (deps, opts = {}) => {
         userId: meta.userId,
         platform: meta.platform,
         appVersion: meta.appVersion,
+        areaId: meta.areaId,
       });
     } catch (_) {
       // fire-and-forget — sessionStore already swallows, but double-guard
@@ -62,6 +63,11 @@ const createPresenceTracker = (deps, opts = {}) => {
     presence.set(socketId, {
       userId: meta.userId,
       role: meta.role,
+      // Resolved by the caller (socket.js) at connect time — no pin exists
+      // at the socket layer (H7), so this is users.last_area_id → default
+      // area, same as the session doc just opened above. May be null if
+      // even that fallback chain came up empty.
+      areaId: meta.areaId ?? null,
       platform: meta.platform || null,
       appVersion: meta.appVersion || null,
       screen: null,
@@ -91,15 +97,25 @@ const createPresenceTracker = (deps, opts = {}) => {
     }
   };
 
-  const getLiveSnapshot = () => {
+  /**
+   * areaId filters to one area's online customers; omitted (default)
+   * returns every area combined — today's pre-TASK-17 behavior, unchanged,
+   * since per-area admin socket rooms don't exist yet (TASK 23). Each user
+   * entry still carries its own areaId either way, and the combined
+   * snapshot's `byArea` breakdown lets a caller split it client-side today
+   * without waiting on real rooms.
+   */
+  const getLiveSnapshot = (areaId) => {
     resetPeakIfNewDay();
     const users = [];
     const byScreen = {};
     const byPlatform = { android: 0, ios: 0 };
+    const byArea = {};
 
     let online = 0;
     for (const entry of presence.values()) {
       if (entry.role !== 'customer') continue;
+      if (areaId !== undefined && entry.areaId !== areaId) continue;
       online += 1;
 
       if (entry.platform) {
@@ -111,26 +127,37 @@ const createPresenceTracker = (deps, opts = {}) => {
         byScreen[entry.screen] = (byScreen[entry.screen] || 0) + 1;
       }
 
+      const areaKey = entry.areaId == null ? 'unknown' : String(entry.areaId);
+      byArea[areaKey] = (byArea[areaKey] || 0) + 1;
+
       const connectedMin = Math.max(0, Math.round((now() - entry.connectedAt) / 60000));
       users.push({
         userId: entry.userId,
+        areaId: entry.areaId,
         screen: entry.screen,
         platform: entry.platform,
         connectedMin,
       });
     }
 
-    if (online > peakToday) peakToday = online;
+    if (areaId === undefined && online > peakToday) peakToday = online;
 
     return {
       online,
       peakToday,
       byScreen,
       byPlatform,
+      byArea,
       users,
     };
   };
 
+  // Not yet area-scoped on the socket layer (per-area admin rooms land in
+  // TASK 23) — this still emits one combined snapshot to every admin
+  // regardless of area, same as every other realtime emit in the codebase
+  // until then. getLiveSnapshot(areaId) above is ready for TASK 23 to call
+  // per area room; the `byArea` field on the combined snapshot is the
+  // interim way a client can already split this today.
   const emitLiveSnapshot = () => {
     const snap = getLiveSnapshot();
     try {

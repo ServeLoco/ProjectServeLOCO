@@ -6,6 +6,7 @@
 const { getDb } = require('../db/mongodb');
 const { pool } = require('../db/mysql');
 const { insertEvents } = require('../services/analytics/eventStore');
+const { requestAreaId, getAreaById } = require('../utils/areaScope');
 
 const DEFAULT_DAYS = 30;
 const MAX_DAYS = 365;
@@ -37,25 +38,82 @@ const safeCollection = (name) => {
   try { return getDb().collection(name); } catch (_) { return null; }
 };
 
+// Every admin analytics endpoint is scoped to one area unless a super_admin
+// explicitly opts into X-Area-Id: all (§2.10 — Analytics is one of the pages
+// that accepts 'all', unlike Settings/Delivery Zones/Store Modes). No silent
+// default: a super_admin with no header gets a 400, same as shops/riders'
+// requireOneArea and adminController's notification endpoints.
+const resolveAreaOrAll = (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required for this action (pass a specific area, or "all")' });
+    return undefined;
+  }
+  return areaId;
+};
+
+// Mongo $match fragment for one area, or {} to match every area.
+const areaMatch = (areaId) => (areaId === 'all' ? {} : { areaId });
+
+// Attaches areaCode to each row of a Mongo aggregation result that was
+// grouped by areaId (only meaningful in 'all' mode — §2.10's "areaCode/
+// area_code column added to each row"). Areas are a tiny, TTL-cached table
+// (§3.9), so a lookup per row is cheap.
+const withAreaCodes = async (rows, areaIdField = 'areaId') => {
+  const out = [];
+  for (const row of rows) {
+    const area = await getAreaById(row[areaIdField]);
+    out.push({ ...row, areaCode: area?.code || null, area_code: area?.code || null });
+  }
+  return out;
+};
+
 // ── Customer: POST /api/analytics/events ──────────────────────────────────
 const postEvents = async (req, res) => {
   const userId = req.user?.id;
   const events = Array.isArray(req.body?.events) ? req.body.events : [];
-  const accepted = await insertEvents(userId, events);
+  // req.areaId comes from resolveCustomerArea on this route (§9.5/§4.2:
+  // pin → users.last_area_id → default area).
+  const accepted = await insertEvents(userId, events, req.areaId);
   res.status(202).json({ accepted });
 };
 
 // ── Admin: GET summary?days=30 ────────────────────────────────────────────
 const getSummary = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const days = clampDays(req.query.days);
   const { start } = dateRange(days);
-  const daily = [];
+  let daily = [];
   try {
     const col = safeCollection('analytics_daily');
     if (col) {
-      const docs = await col.find({ date: { $gte: toLocalDateStr(start) } })
-        .sort({ date: 1 }).toArray();
-      daily.push(...docs);
+      if (areaId === 'all') {
+        // Cross-area roll-up: sum each date's per-area docs into one
+        // combined row (§2.10). Approximate for `visitors` the same way
+        // last_area_id-based broadcast targeting is approximate (H6) — a
+        // user active in two areas the same day is counted in both areas'
+        // per-day distinct-visitor figures, so the summed total can be a
+        // slight overcount rather than a true cross-area distinct count.
+        daily = await col.aggregate([
+          { $match: { date: { $gte: toLocalDateStr(start) } } },
+          { $group: {
+            _id: '$date',
+            visitors: { $sum: '$visitors' },
+            sessions: { $sum: '$sessions' },
+            orders: { $sum: '$orders' },
+            cartAdds: { $sum: '$cartAdds' },
+            cartRemoves: { $sum: '$cartRemoves' },
+            windowShoppers: { $sum: '$windowShoppers' },
+          } },
+          { $project: { _id: 0, date: '$_id', visitors: 1, sessions: 1, orders: 1, cartAdds: 1, cartRemoves: 1, windowShoppers: 1 } },
+          { $sort: { date: 1 } },
+        ]).toArray();
+      } else {
+        const docs = await col.find({ date: { $gte: toLocalDateStr(start) }, areaId })
+          .sort({ date: 1 }).toArray();
+        daily.push(...docs);
+      }
     }
   } catch (_) { /* fire-and-forget */ }
 
@@ -66,14 +124,14 @@ const getSummary = async (req, res) => {
     const eventsCol = safeCollection('analytics_events');
     if (sessionsCol) {
       const a = await sessionsCol.aggregate([
-        { $match: { connectedAt: { $gte: todayStart } } },
+        { $match: { connectedAt: { $gte: todayStart }, ...areaMatch(areaId) } },
         { $group: { _id: null, sessions: { $sum: 1 }, users: { $addToSet: '$userId' } } },
       ]).toArray();
       if (a[0]) { today.sessions = a[0].sessions || 0; today.visitors = (a[0].users || []).length; }
     }
     if (eventsCol) {
       const a = await eventsCol.aggregate([
-        { $match: { createdAt: { $gte: todayStart } } },
+        { $match: { createdAt: { $gte: todayStart }, ...areaMatch(areaId) } },
         { $group: { _id: '$type', count: { $sum: 1 } } },
       ]).toArray();
       for (const r of a) {
@@ -89,6 +147,8 @@ const getSummary = async (req, res) => {
 
 // ── Admin: GET products?days=30 ───────────────────────────────────────────
 const getProducts = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const days = clampDays(req.query.days);
   const { start } = dateRange(days);
   let rows = [];
@@ -96,7 +156,7 @@ const getProducts = async (req, res) => {
     const col = safeCollection('analytics_events');
     if (col) {
       rows = await col.aggregate([
-        { $match: { createdAt: { $gte: start }, type: { $in: ['cart_add', 'cart_remove', 'product_view'] } } },
+        { $match: { createdAt: { $gte: start }, type: { $in: ['cart_add', 'cart_remove', 'product_view'] }, ...areaMatch(areaId) } },
         { $group: { _id: { productId: '$productId', type: '$type' }, count: { $sum: 1 } } },
         { $sort: { count: -1 } },
       ]).toArray();
@@ -120,6 +180,8 @@ const getProducts = async (req, res) => {
 
 // ── Admin: GET window-shoppers?days=7 ─────────────────────────────────────
 const getWindowShoppers = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const days = clampDays(req.query.days || 7);
   const { start } = dateRange(days);
   let aggRows = [];
@@ -127,7 +189,7 @@ const getWindowShoppers = async (req, res) => {
     const col = safeCollection('analytics_events');
     if (col) {
       aggRows = await col.aggregate([
-        { $match: { createdAt: { $gte: start }, type: { $in: ['cart_add', 'cart_remove', 'order_placed'] } } },
+        { $match: { createdAt: { $gte: start }, type: { $in: ['cart_add', 'cart_remove', 'order_placed'] }, ...areaMatch(areaId) } },
         { $group: { _id: '$userId',
           cartAdds: { $sum: { $cond: [{ $eq: ['$type', 'cart_add'] }, 1, 0] } },
           cartRemoves: { $sum: { $cond: [{ $eq: ['$type', 'cart_remove'] }, 1, 0] } },
@@ -155,6 +217,11 @@ const getWindowShoppers = async (req, res) => {
 };
 
 // ── Admin: GET user/:id?days=30 ───────────────────────────────────────────
+// Deliberately NOT area-scoped: a user's own activity history is a global
+// identity concern (§2.2), same reasoning TASK 13 applied to a customer's
+// own order history — an admin drilling into a specific already-known
+// userId should see that person's full activity, not have it silently
+// truncated to whichever area happens to be selected right now.
 const getUserDrillDown = async (req, res) => {
   const userId = parseInt(req.params.id, 10);
   if (!Number.isFinite(userId)) return res.status(400).json({ code: 'BAD_REQUEST', message: 'Invalid user id' });
@@ -221,13 +288,30 @@ const getUserDrillDown = async (req, res) => {
 
 // ── Admin: GET hourly?days=14 ─────────────────────────────────────────────
 const getHourly = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const days = clampDays(req.query.days || 14);
   const { start } = dateRange(days);
   let docs = [];
   try {
     const col = safeCollection('analytics_daily');
     if (col) {
-      docs = await col.find({ date: { $gte: toLocalDateStr(start) } }).sort({ date: 1 }).toArray();
+      if (areaId === 'all') {
+        // Cross-area roll-up: sum each date's per-area hourlyActive arrays
+        // element-wise (same approximate-distinct caveat as getSummary).
+        const perAreaDocs = await col.find({ date: { $gte: toLocalDateStr(start) } })
+          .sort({ date: 1 }).toArray();
+        const byDate = new Map();
+        for (const d of perAreaDocs) {
+          const hourly = d.hourlyActive || new Array(24).fill(0);
+          if (!byDate.has(d.date)) byDate.set(d.date, new Array(24).fill(0));
+          const acc = byDate.get(d.date);
+          for (let h = 0; h < 24; h++) acc[h] += hourly[h] || 0;
+        }
+        docs = [...byDate.entries()].map(([date, hourlyActive]) => ({ date, hourlyActive }));
+      } else {
+        docs = await col.find({ date: { $gte: toLocalDateStr(start) }, areaId }).sort({ date: 1 }).toArray();
+      }
     }
   } catch (_) { /* fire-and-forget */ }
   const daysData = docs.map(d => ({ date: d.date, hourlyActive: d.hourlyActive || new Array(24).fill(0) }));
@@ -247,6 +331,8 @@ const clampMinutes = (raw) => {
 };
 
 const getActiveUsers = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const minutes = clampMinutes(req.query.minutes);
   const cutoff = new Date(Date.now() - minutes * 60 * 1000);
   const search = String(req.query.search || '').trim();
@@ -256,12 +342,13 @@ const getActiveUsers = async (req, res) => {
     const col = safeCollection('analytics_sessions');
     if (col) {
       aggRows = await col.aggregate([
-        { $match: { connectedAt: { $gte: cutoff } } },
+        { $match: { connectedAt: { $gte: cutoff }, ...areaMatch(areaId) } },
         { $group: {
           _id: '$userId',
           sessions: { $sum: 1 },
           lastActiveAt: { $max: '$connectedAt' },
           platform: { $last: '$platform' },
+          areaId: { $last: '$areaId' },
         } },
         { $sort: { lastActiveAt: -1 } },
         { $limit: 200 },
@@ -287,7 +374,7 @@ const getActiveUsers = async (req, res) => {
   const userMap = {};
   for (const u of userRows) userMap[u.id] = u;
 
-  const data = aggRows
+  let data = aggRows
     .filter(r => userMap[r._id])
     .map(r => ({
       userId: r._id,
@@ -296,7 +383,12 @@ const getActiveUsers = async (req, res) => {
       lastActiveAt: r.lastActiveAt,
       sessions: r.sessions,
       platform: r.platform || null,
+      areaId: r.areaId ?? null,
     }));
+
+  if (areaId === 'all') {
+    data = await withAreaCodes(data);
+  }
 
   res.status(200).json({ data, minutes });
 };

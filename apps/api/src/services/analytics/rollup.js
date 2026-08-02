@@ -1,8 +1,10 @@
 // Daily rollup job — aggregates sessions + events for a calendar day into one
-// analytics_daily doc (TTL 365d). Runs in-process at 00:05 via setTimeout; on
-// startup also backfills yesterday if its doc is missing. No new dependencies.
+// analytics_daily doc PER AREA (TASK 17 — groups by (areaId, date), TTL
+// 365d). Runs in-process at 00:05 via setTimeout; on startup also backfills
+// yesterday if its docs are missing.
 
 const { getDb } = require('../../db/mongodb');
+const { listAreas } = require('../../utils/areaScope');
 
 const ROLLOUT_HOUR = 0; // 00:xx
 const ROLLOUT_MINUTE = 5; // 00:05
@@ -16,27 +18,14 @@ const toLocalDateStr = (d) => {
   return `${y}-${m}-${day}`;
 };
 
-/**
- * Compute + upsert the daily stats doc for a given date string (YYYY-MM-DD).
- * @param {string} dateStr  e.g. '2026-07-08'
- * @param {import('mongodb').Db} [db]  optional injected db (for testing)
- * @returns {Promise<object>} the computed stats object
- */
-const computeDailyStats = async (dateStr, db) => {
-  const database = db || getDb();
-  const sessionsCol = database.collection('analytics_sessions');
-  const eventsCol = database.collection('analytics_events');
-  const dailyCol = database.collection('analytics_daily');
+// A doc from before this task, or an event/session ingested through a code
+// path that hasn't picked up areaId yet, has no areaId field at all — §9.5/
+// 17.10 treat that as area 1 at query time (the only area that has ever
+// existed), never a separate "unknown" bucket.
+const AREA_ID_FALLBACK = 1;
+const resolveAreaId = (doc) => (doc.areaId != null ? doc.areaId : AREA_ID_FALLBACK);
 
-  // Date range for the given day (server timezone).
-  const dayStart = new Date(dateStr + 'T00:00:00');
-  const dayEnd = new Date(dateStr + 'T23:59:59.999');
-
-  // --- Sessions ---
-  const sessions = await sessionsCol.find({
-    connectedAt: { $gte: dayStart, $lte: dayEnd },
-  }).toArray();
-
+const computeStatsForDocs = (sessions, events) => {
   const distinctUsers = new Set();
   let totalTimeSec = 0;
   for (const s of sessions) {
@@ -46,11 +35,6 @@ const computeDailyStats = async (dateStr, db) => {
   const visitors = distinctUsers.size;
   const sessionCount = sessions.length;
   const avgSessionSec = sessionCount > 0 ? Math.round(totalTimeSec / sessionCount) : 0;
-
-  // --- Events ---
-  const events = await eventsCol.find({
-    createdAt: { $gte: dayStart, $lte: dayEnd },
-  }).toArray();
 
   let orders = 0, cartAdds = 0, cartRemoves = 0;
   const usersWithCartAdd = new Set();
@@ -89,8 +73,7 @@ const computeDailyStats = async (dateStr, db) => {
       .sort((a, b) => b.count - a.count)
       .slice(0, 10);
 
-  const stats = {
-    date: dateStr,
+  return {
     visitors,
     sessions: sessionCount,
     newUsers: 0, // computed below if possible
@@ -105,18 +88,77 @@ const computeDailyStats = async (dateStr, db) => {
     topRemoved: toTop10(productCounts.cart_remove),
     topViewed: toTop10(productCounts.product_view),
   };
+};
 
-  // Upsert into analytics_daily.
-  await dailyCol.updateOne(
-    { date: dateStr },
-    {
-      $set: { ...stats, createdAt: new Date() },
-      $setOnInsert: { date: dateStr },
-    },
-    { upsert: true }
-  );
+/**
+ * Compute + upsert one analytics_daily doc PER AREA for a given date string
+ * (YYYY-MM-DD) — §9.5/17.7: groups by (areaId, date), one doc per area, not
+ * one combined doc. Sessions/events for the whole day are fetched once (not
+ * once per area) and partitioned in memory — cheap at "tens of areas" (§3.9),
+ * and avoids N find() round trips for N areas.
+ * @param {string} dateStr  e.g. '2026-07-08'
+ * @param {import('mongodb').Db} [db]  optional injected db (for testing)
+ * @returns {Promise<object[]>} the computed stats objects, one per area
+ */
+const computeDailyStats = async (dateStr, db) => {
+  const database = db || getDb();
+  const sessionsCol = database.collection('analytics_sessions');
+  const eventsCol = database.collection('analytics_events');
+  const dailyCol = database.collection('analytics_daily');
 
-  return stats;
+  // Date range for the given day (server timezone).
+  const dayStart = new Date(dateStr + 'T00:00:00');
+  const dayEnd = new Date(dateStr + 'T23:59:59.999');
+
+  const [sessions, events, areas] = await Promise.all([
+    sessionsCol.find({ connectedAt: { $gte: dayStart, $lte: dayEnd } }).toArray(),
+    eventsCol.find({ createdAt: { $gte: dayStart, $lte: dayEnd } }).toArray(),
+    listAreas({ activeOnly: true }),
+  ]);
+
+  const sessionsByArea = new Map();
+  for (const s of sessions) {
+    const areaId = resolveAreaId(s);
+    if (!sessionsByArea.has(areaId)) sessionsByArea.set(areaId, []);
+    sessionsByArea.get(areaId).push(s);
+  }
+  const eventsByArea = new Map();
+  for (const e of events) {
+    const areaId = resolveAreaId(e);
+    if (!eventsByArea.has(areaId)) eventsByArea.set(areaId, []);
+    eventsByArea.get(areaId).push(e);
+  }
+
+  // Every active area gets a doc even with zero traffic (a real "0" day is
+  // still data, distinct from "this area didn't exist yet"), plus any area
+  // that has traffic but wasn't in the active list for some reason (e.g. a
+  // deactivated area with historical data still needs its doc written).
+  const areaIds = new Set(areas.map((a) => a.id));
+  for (const areaId of sessionsByArea.keys()) areaIds.add(areaId);
+  for (const areaId of eventsByArea.keys()) areaIds.add(areaId);
+  if (areaIds.size === 0) areaIds.add(AREA_ID_FALLBACK);
+
+  const results = [];
+  for (const areaId of areaIds) {
+    const stats = {
+      areaId,
+      date: dateStr,
+      ...computeStatsForDocs(sessionsByArea.get(areaId) || [], eventsByArea.get(areaId) || []),
+    };
+
+    await dailyCol.updateOne(
+      { areaId, date: dateStr },
+      {
+        $set: { ...stats, createdAt: new Date() },
+        $setOnInsert: { areaId, date: dateStr },
+      },
+      { upsert: true }
+    );
+
+    results.push(stats);
+  }
+
+  return results;
 };
 
 /**
@@ -130,7 +172,12 @@ const msUntilNextRun = (now = new Date()) => {
 };
 
 /**
- * Backfill yesterday if its daily doc is missing (called on startup).
+ * Backfill yesterday if it's missing a doc for any currently-active area
+ * (called on startup). Compares doc count to active-area count rather than
+ * a single findOne — a new area added after yesterday's rollup already ran
+ * must still get its own doc, not be skipped because area 1's already exists.
+ * computeDailyStats itself is a pure upsert either way, so re-running it for
+ * a date that's already fully backfilled is a safe no-op, just wasted work.
  */
 const backfillYesterday = async () => {
   try {
@@ -138,8 +185,11 @@ const backfillYesterday = async () => {
     yesterday.setDate(yesterday.getDate() - 1);
     const dateStr = toLocalDateStr(yesterday);
     const db = getDb();
-    const existing = await db.collection('analytics_daily').findOne({ date: dateStr });
-    if (!existing) {
+    const [existingCount, activeAreas] = await Promise.all([
+      db.collection('analytics_daily').countDocuments({ date: dateStr }),
+      listAreas({ activeOnly: true }),
+    ]);
+    if (existingCount < Math.max(activeAreas.length, 1)) {
       await computeDailyStats(dateStr, db);
       console.log(`[analytics-rollup] backfilled yesterday (${dateStr})`);
     }

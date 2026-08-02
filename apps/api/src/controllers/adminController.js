@@ -15,7 +15,7 @@ const realtimeEvents = require('../realtime/orderEvents');
 const { emitToCustomer, emitToAdmins } = require('../realtime/socket');
 const orderAutoAccept = require('../realtime/orderAutoAccept');
 const adminInbox = require('../utils/adminNotifications');
-const { requestAreaId, getDefaultArea } = require('../utils/areaScope');
+const { requestAreaId, getDefaultArea, getAreaById } = require('../utils/areaScope');
 const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const { calculateCart } = require('./cartController');
@@ -31,6 +31,49 @@ const getCancelledPaymentStatus = (paymentMethod) => (
 const queryRows = async (sql, params) => {
   const result = await pool.query(sql, params);
   return Array.isArray(result) ? result[0] || [] : [];
+};
+
+// Dashboard mixes order/sales KPIs (which could aggregate) with the same
+// shop_open/delivery_available/rain_charge_enabled booleans the Settings
+// page shows — those don't mean anything summed across areas, so unlike the
+// 6 report endpoints below (which DO accept 'all', per §2.10), the Dashboard
+// requires one concrete area, same as Settings/Delivery Zones/Store Modes.
+const requireOneArea = (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required for this action' });
+    return null;
+  }
+  if (areaId === 'all') {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'This action cannot target "all" areas at once — pick one area' });
+    return null;
+  }
+  return areaId;
+};
+
+// §2.10: Orders, Reports and Analytics accept X-Area-Id: all and return a
+// cross-area roll-up. No silent default: a super_admin with no header gets
+// a 400 (area_admin never sees a choice — resolveAdminArea already pins
+// them to their own area).
+const resolveAreaOrAll = (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required for this action (pass a specific area, or "all")' });
+    return undefined;
+  }
+  return areaId;
+};
+
+// Attaches areaCode/area_code to each row of a cross-area ('all') report
+// result — §2.10's "areaCode/area_code column added to each row". Areas are
+// a tiny, TTL-cached table (§3.9), so a lookup per row is cheap.
+const withAreaCodes = async (rows, areaIdField = 'area_id') => {
+  const out = [];
+  for (const row of rows) {
+    const area = await getAreaById(row[areaIdField]);
+    out.push({ ...row, areaCode: area?.code || null, area_code: area?.code || null });
+  }
+  return out;
 };
 
 // Account-level lockout, independent of the per-IP login rate limiter — a
@@ -270,6 +313,9 @@ const setTrustStatus = async (req, res) => {
 };
 
 const getDashboard = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const [metricsRow = {}] = await queryRows(`
     SELECT
       COUNT(CASE WHEN DATE(created_at) = CURDATE() THEN 1 END) as today_orders,
@@ -280,30 +326,31 @@ const getDashboard = async (req, res) => {
       COALESCE(SUM(CASE WHEN payment_method = 'UPI' AND status != 'Cancelled' THEN total ELSE 0 END), 0) as upi_total,
       COALESCE(SUM(CASE WHEN DATE(created_at) = CURDATE() AND payment_status = 'Pending' AND status != 'Cancelled' THEN total ELSE 0 END), 0) as pending_payment_total
     FROM orders
-  `);
+    WHERE area_id = ?
+  `, [areaId]);
 
   const latestOrders = await queryRows(`
-    SELECT * FROM orders 
-    ORDER BY (status = 'Pending') DESC, created_at DESC 
+    SELECT * FROM orders
+    WHERE area_id = ?
+    ORDER BY (status = 'Pending') DESC, created_at DESC
     LIMIT 10
-  `);
+  `, [areaId]);
 
   const unavailableProducts = await queryRows(`
-    SELECT id, name, price FROM products WHERE available = 0
-  `);
+    SELECT id, name, price FROM products WHERE available = 0 AND area_id = ?
+  `, [areaId]);
 
   const topProducts = await queryRows(`
     SELECT oi.product_id, oi.item_type, oi.product_name, SUM(oi.quantity) as total_quantity, SUM(oi.line_total) as total_sales
     FROM order_items oi
     JOIN orders o ON oi.order_id = o.id
-    WHERE o.status != 'Cancelled'
+    WHERE o.status != 'Cancelled' AND o.area_id = ?
     GROUP BY oi.product_id, oi.item_type, oi.product_name
     ORDER BY total_sales DESC
     LIMIT 5
-  `);
+  `, [areaId]);
 
-  // stopgap area 1 (TASK 17 scopes the admin dashboard/reports by area)
-  const [settingsRow] = await queryRows('SELECT shop_open, delivery_available, rain_charge_enabled FROM settings WHERE area_id = 1 LIMIT 1');
+  const [settingsRow] = await queryRows('SELECT shop_open, delivery_available, rain_charge_enabled FROM settings WHERE area_id = ? LIMIT 1', [areaId]);
 
   res.status(200).json({
     data: {
@@ -329,6 +376,8 @@ const getDashboard = async (req, res) => {
 };
 
 const getSalesReport = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const { period } = req.query;
   const allowedPeriods = ['today', 'week', 'month', 'all'];
   if (period && !allowedPeriods.includes(period)) {
@@ -343,6 +392,15 @@ const getSalesReport = async (req, res) => {
   } else if (period === 'month') {
     dateFilter = 'YEAR(created_at) = YEAR(CURDATE()) AND MONTH(created_at) = MONTH(CURDATE())';
   }
+  // areaId === 'all' (super_admin, §2.10) intentionally leaves this at '1=1'
+  // — every query below sums/groups across every area, a real cross-area
+  // roll-up rather than one row per area (there's nothing per-row here to
+  // attach an areaCode to).
+  const areaParams = [];
+  if (areaId !== 'all') {
+    dateFilter += ' AND area_id = ?';
+    areaParams.push(areaId);
+  }
 
   const [[salesRow]] = await pool.query(`
     SELECT
@@ -351,11 +409,11 @@ const getSalesReport = async (req, res) => {
       COUNT(*) as total_orders
     FROM orders
     WHERE ${dateFilter}
-  `);
+  `, areaParams);
 
-  const [statusRows] = await pool.query(`SELECT status, COUNT(*) as count FROM orders WHERE ${dateFilter} GROUP BY status`);
-  const [paymentBreakdownRows] = await pool.query(`SELECT payment_method, COUNT(*) as count FROM orders WHERE ${dateFilter} GROUP BY payment_method`);
-  const [paymentStatusRows] = await pool.query(`SELECT payment_status, COUNT(*) as count FROM orders WHERE ${dateFilter} GROUP BY payment_status`);
+  const [statusRows] = await pool.query(`SELECT status, COUNT(*) as count FROM orders WHERE ${dateFilter} GROUP BY status`, areaParams);
+  const [paymentBreakdownRows] = await pool.query(`SELECT payment_method, COUNT(*) as count FROM orders WHERE ${dateFilter} GROUP BY payment_method`, areaParams);
+  const [paymentStatusRows] = await pool.query(`SELECT payment_status, COUNT(*) as count FROM orders WHERE ${dateFilter} GROUP BY payment_status`, areaParams);
 
   const status_breakdown = {};
   statusRows.forEach(row => { status_breakdown[row.status.toLowerCase()] = row.count; });
@@ -364,14 +422,16 @@ const getSalesReport = async (req, res) => {
   const payment_status = {};
   paymentStatusRows.forEach(row => { payment_status[(row.payment_status || 'unknown').toLowerCase()] = row.count; });
 
+  const legacyAreaClause = areaId === 'all' ? '' : ' AND area_id = ?';
+  const legacyAreaParams = areaId === 'all' ? [] : [areaId];
   const [[legacySalesRow]] = await pool.query(`
     SELECT
       COALESCE(SUM(CASE WHEN DATE(created_at) = CURDATE() THEN total ELSE 0 END), 0) as today_sales,
       COALESCE(SUM(CASE WHEN YEARWEEK(created_at, 1) = YEARWEEK(CURDATE(), 1) THEN total ELSE 0 END), 0) as week_sales,
       COALESCE(SUM(CASE WHEN YEAR(created_at) = YEAR(CURDATE()) AND MONTH(created_at) = MONTH(CURDATE()) THEN total ELSE 0 END), 0) as month_sales
     FROM orders
-    WHERE status != 'Cancelled'
-  `);
+    WHERE status != 'Cancelled'${legacyAreaClause}
+  `, legacyAreaParams);
 
   res.status(200).json({
     total_revenue: salesRow.total_revenue,
@@ -408,6 +468,8 @@ const getAdminCustomerById = async (req, res) => {
 };
 
 const getTopProductsReport = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const { period } = req.query;
   const allowedPeriods = ['today', 'week', 'month', 'all'];
   if (period && !allowedPeriods.includes(period)) {
@@ -423,17 +485,34 @@ const getTopProductsReport = async (req, res) => {
     dateFilter = 'YEAR(o.created_at) = YEAR(CURDATE()) AND MONTH(o.created_at) = MONTH(CURDATE())';
   }
 
+  // 'all' mode groups by area too — products aren't shared across areas yet
+  // (§2.5/2.6, TASK 18's job), so the same product_id in two different areas
+  // is two distinct catalog rows, not one to merge together.
+  const areaParams = [];
+  let groupBy = 'oi.product_id, oi.item_type, oi.product_name';
+  if (areaId === 'all') {
+    groupBy = 'oi.area_id, ' + groupBy;
+  } else {
+    dateFilter += ' AND oi.area_id = ?';
+    areaParams.push(areaId);
+  }
+
   const [rows] = await pool.query(`
-    SELECT oi.product_id, oi.item_type, oi.product_name, SUM(oi.quantity) as total_quantity, SUM(oi.line_total) as total_sales
+    SELECT ${areaId === 'all' ? 'oi.area_id,' : ''} oi.product_id, oi.item_type, oi.product_name, SUM(oi.quantity) as total_quantity, SUM(oi.line_total) as total_sales
     FROM order_items oi
     JOIN orders o ON oi.order_id = o.id
     WHERE o.status != 'Cancelled' AND ${dateFilter}
-    GROUP BY oi.product_id, oi.item_type, oi.product_name
+    GROUP BY ${groupBy}
     ORDER BY total_quantity DESC
-  `);
-  res.status(200).json({ data: rows });
+  `, areaParams);
+  const data = areaId === 'all' ? await withAreaCodes(rows) : rows;
+  res.status(200).json({ data });
 };
 
+// Deliberately NOT area-scoped: customers are a global identity (§2.2), not
+// owned by an area — the same reasoning TASK 13 applied to a customer's own
+// order history. total/trusted/blocked customer counts are platform-wide by
+// nature; scoping them would just be wrong, not more precise.
 const getCustomersReport = async (req, res) => {
   const { period } = req.query;
   const allowedPeriods = ['today', 'week', 'month', 'all'];
@@ -463,6 +542,8 @@ const getCustomersReport = async (req, res) => {
 };
 
 const getShopsReport = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   const { period } = req.query;
   const allowedPeriods = ['today', 'week', 'month', 'all'];
   if (period && !allowedPeriods.includes(period)) {
@@ -477,12 +558,21 @@ const getShopsReport = async (req, res) => {
   } else if (period === 'month') {
     dateFilter = 'YEAR(o.created_at) = YEAR(CURDATE()) AND MONTH(o.created_at) = MONTH(CURDATE())';
   }
+  if (areaId !== 'all') {
+    dateFilter += ' AND o.area_id = ?';
+  }
+  const areaParams = areaId === 'all' ? [] : [areaId];
 
   // Excluding Cancelled here means a cancelled order simply never counts —
   // covers the "handle cancellations" requirement without any separate
   // subtraction logic to keep in sync.
+  // shop_id itself is a global PK (unlike product_id, no cross-area
+  // collision risk), so 'all' mode needs no extra GROUP BY key here — just
+  // an areaCode annotation per row. Reads oi.area_id (not shops.area_id) so
+  // house items (shop_id NULL, no shops row to join) still get a real area
+  // — every order_item carries its own area_id regardless of shop_id (TASK 13).
   const [shopRows] = await pool.query(`
-    SELECT oi.shop_id, s.name AS shop_name,
+    SELECT oi.shop_id, s.name AS shop_name, oi.area_id AS area_id,
       COUNT(DISTINCT oi.order_id) AS order_count,
       COALESCE(SUM(oi.line_total), 0) AS total_amount,
       COALESCE(SUM(oi.quantity), 0) AS total_items_sold
@@ -490,9 +580,9 @@ const getShopsReport = async (req, res) => {
     JOIN orders o ON oi.order_id = o.id
     LEFT JOIN shops s ON s.id = oi.shop_id
     WHERE o.status != 'Cancelled' AND ${dateFilter}
-    GROUP BY oi.shop_id, s.name
+    GROUP BY oi.shop_id, s.name, oi.area_id
     ORDER BY total_amount DESC
-  `);
+  `, areaParams);
 
   const [productRows] = await pool.query(`
     SELECT oi.shop_id, oi.product_id, oi.item_type, oi.product_name,
@@ -503,7 +593,7 @@ const getShopsReport = async (req, res) => {
     WHERE o.status != 'Cancelled' AND ${dateFilter}
     GROUP BY oi.shop_id, oi.product_id, oi.item_type, oi.product_name
     ORDER BY quantity DESC
-  `);
+  `, areaParams);
 
   const productsByShop = new Map();
   for (const row of productRows) {
@@ -512,11 +602,12 @@ const getShopsReport = async (req, res) => {
     productsByShop.get(key).push(row);
   }
 
-  const data = shopRows.map((row) => {
+  let data = shopRows.map((row) => {
     const key = row.shop_id ?? 'house';
     return {
       shop_id: row.shop_id,
       shop_name: row.shop_id ? (row.shop_name || 'Deleted Shop') : 'House (No Shop)',
+      area_id: row.area_id,
       order_count: row.order_count,
       total_amount: row.total_amount,
       total_items_sold: row.total_items_sold,
@@ -524,18 +615,31 @@ const getShopsReport = async (req, res) => {
     };
   });
 
+  if (areaId === 'all') {
+    data = await withAreaCodes(data);
+  }
+
   res.status(200).json({ data });
 };
 
 // Business-day date filter shared by the profit/payout report endpoints.
-// key='all' skips the filter; every other key was already resolved to a
-// concrete [from, to] business-day range by resolvePeriod().
-const buildPeriodDateFilter = (resolved, column = 'o.created_at') => {
-  if (resolved.key === 'all') return { clause: '1=1', params: [] };
-  return {
-    clause: `DATE(CONVERT_TZ(${column}, '+00:00', ?)) BETWEEN ? AND ?`,
-    params: [resolved.timezone, resolved.from, resolved.to],
-  };
+// resolved.key='all' (report PERIOD, e.g. "all time" — unrelated to the
+// areaId 'all' below) skips the date clause; every other period key was
+// already resolved to a concrete [from, to] business-day range by
+// resolvePeriod(). areaId is a separate axis: a number appends an area
+// filter, 'all' (super_admin cross-area roll-up, §2.10) or undefined skips it.
+const buildPeriodDateFilter = (resolved, areaId, column = 'o.created_at') => {
+  const parts = [];
+  const params = [];
+  if (resolved.key !== 'all') {
+    parts.push(`DATE(CONVERT_TZ(${column}, '+00:00', ?)) BETWEEN ? AND ?`);
+    params.push(resolved.timezone, resolved.from, resolved.to);
+  }
+  if (areaId !== undefined && areaId !== 'all') {
+    parts.push('o.area_id = ?');
+    params.push(areaId);
+  }
+  return { clause: parts.length > 0 ? parts.join(' AND ') : '1=1', params };
 };
 
 // Profit & payout report — the daily business ledger. Basis is Delivered
@@ -547,6 +651,8 @@ const buildPeriodDateFilter = (resolved, column = 'o.created_at') => {
 // as zero cost but flagged via warnings.unpricedItemsCount so margin doesn't
 // silently read optimistic).
 const getProfitSummary = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   let resolved;
   try {
     resolved = resolvePeriod({ period: req.query.period, from: req.query.from, to: req.query.to });
@@ -557,7 +663,7 @@ const getProfitSummary = async (req, res) => {
     throw err;
   }
 
-  const { clause: dateFilter, params: dateParams } = buildPeriodDateFilter(resolved);
+  const { clause: dateFilter, params: dateParams } = buildPeriodDateFilter(resolved, areaId);
 
   const [[deliveredRow]] = await pool.query(`
     SELECT
@@ -599,7 +705,7 @@ const getProfitSummary = async (req, res) => {
   `, dateParams);
 
   const [shopRows] = await pool.query(`
-    SELECT oi.shop_id, s.name AS shop_name,
+    SELECT oi.shop_id, s.name AS shop_name, oi.area_id AS area_id,
       COUNT(DISTINCT oi.order_id) AS delivered_orders,
       COALESCE(SUM(oi.quantity), 0) AS items_sold,
       COALESCE(SUM(oi.line_total), 0) AS app_sales,
@@ -609,7 +715,7 @@ const getProfitSummary = async (req, res) => {
     JOIN orders o ON oi.order_id = o.id
     LEFT JOIN shops s ON s.id = oi.shop_id
     WHERE o.status = 'Delivered' AND ${dateFilter}
-    GROUP BY oi.shop_id, s.name
+    GROUP BY oi.shop_id, s.name, oi.area_id
     ORDER BY shop_cost DESC
   `, dateParams);
 
@@ -661,7 +767,7 @@ const getProfitSummary = async (req, res) => {
     marginPercent, margin_percent: marginPercent,
   };
 
-  const shops = shopRows.map((row) => {
+  let shops = shopRows.map((row) => {
     const rowAppSales = toMoney(row.app_sales);
     const rowShopCost = toMoney(row.shop_cost);
     const rowMargin = roundMoney(rowAppSales - rowShopCost);
@@ -672,6 +778,7 @@ const getProfitSummary = async (req, res) => {
     return {
       shopId: row.shop_id, shop_id: row.shop_id,
       shopName, shop_name: shopName,
+      area_id: row.area_id,
       deliveredOrders: deliveredOrdersForShop, delivered_orders: deliveredOrdersForShop,
       itemsSold, items_sold: itemsSold,
       appSales: rowAppSales, app_sales: rowAppSales,
@@ -680,6 +787,9 @@ const getProfitSummary = async (req, res) => {
       unpricedItems, unpriced_items: unpricedItems,
     };
   });
+  if (areaId === 'all') {
+    shops = await withAreaCodes(shops);
+  }
 
   const paymentSplit = {
     cash: { orders: Number(deliveredRow.cash_orders) || 0, amount: toMoney(deliveredRow.cash_amount) },
@@ -711,6 +821,8 @@ const PROFIT_ORDERS_SORTS = {
 };
 
 const getProfitOrders = async (req, res) => {
+  const areaId = resolveAreaOrAll(req, res);
+  if (areaId === undefined) return;
   let resolved;
   try {
     resolved = resolvePeriod({ period: req.query.period, from: req.query.from, to: req.query.to });
@@ -724,7 +836,7 @@ const getProfitOrders = async (req, res) => {
   const { shopId, sort } = req.query;
   const sortClause = PROFIT_ORDERS_SORTS[sort] || PROFIT_ORDERS_SORTS.time;
   const pagination = validatePagination(req.query.page, req.query.limit);
-  const { clause: dateFilter, params: dateParams } = buildPeriodDateFilter(resolved);
+  const { clause: dateFilter, params: dateParams } = buildPeriodDateFilter(resolved, areaId);
 
   let shopFilterClause = '';
   const shopFilterParams = [];
@@ -745,7 +857,7 @@ const getProfitOrders = async (req, res) => {
   const offset = (pagination.page - 1) * pagination.limit;
 
   const [rows] = await pool.query(`
-    SELECT o.id, o.order_number, o.created_at, o.delivered_at, o.customer_name, o.payment_method, o.status,
+    SELECT o.id, o.order_number, o.area_id, o.created_at, o.delivered_at, o.customer_name, o.payment_method, o.status,
       o.subtotal AS app_items_total, o.delivery_charge, o.night_charge, o.rain_charge, o.fast_delivery_charge,
       o.discount_amount, o.total AS customer_paid,
       COALESCE((SELECT SUM(oi.shop_line_total) FROM order_items oi
@@ -782,7 +894,7 @@ const getProfitOrders = async (req, res) => {
     }
   }
 
-  const data = rows.map((row) => {
+  let data = rows.map((row) => {
     const appItemsTotal = toMoney(row.app_items_total);
     const shopCost = toMoney(row.shop_cost);
     const productMargin = roundMoney(appItemsTotal - shopCost);
@@ -795,6 +907,7 @@ const getProfitOrders = async (req, res) => {
     return {
       id: row.id,
       orderNumber: row.order_number, order_number: row.order_number,
+      area_id: row.area_id,
       createdAt: row.created_at, created_at: row.created_at,
       deliveredAt: row.delivered_at, delivered_at: row.delivered_at,
       customerName: row.customer_name, customer_name: row.customer_name,
@@ -811,6 +924,9 @@ const getProfitOrders = async (req, res) => {
       hasUnpricedItems: !!row.has_unpriced_items, has_unpriced_items: !!row.has_unpriced_items,
     };
   });
+  if (areaId === 'all') {
+    data = await withAreaCodes(data);
+  }
 
   res.status(200).json({
     data,
@@ -1386,21 +1502,10 @@ const updateOrderRemark = async (req, res) => {
   res.status(200).json({ message: 'Order remark updated successfully', order: updatedOrder });
 };
 
-// admin_notifications / notification_batches — unlike shops/riders (which
-// reject 'all' outright), a super_admin genuinely needs "every area" here:
-// the operational inbox and broadcast history are legitimate cross-area
-// views/audiences (H6), not a single-tenant write. area_admin still never
-// gets a choice — resolveAdminArea already pins them to their own area and
-// 403s if they try to send X-Area-Id.
-const resolveAreaOrAll = (req, res) => {
-  const areaId = requestAreaId(req);
-  if (areaId === null) {
-    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required for this action (pass a specific area, or "all")' });
-    return undefined;
-  }
-  return areaId; // a number, or the literal 'all'
-};
-
+// admin_notifications / notification_batches use the same resolveAreaOrAll
+// helper defined near the top of this file (§2.10 also covers the
+// operational inbox and broadcast history as legitimate cross-area H6
+// views/audiences, not a single-tenant write).
 const getAdminNotifications = async (req, res) => {
   const areaId = resolveAreaOrAll(req, res);
   if (areaId === undefined) return;

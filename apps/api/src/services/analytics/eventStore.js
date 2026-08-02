@@ -65,9 +65,12 @@ const validateEvent = (event) => {
  * Never throws — returns 0 on Mongo failure.
  * @param {number} userId
  * @param {unknown[]} events
+ * @param {number} [areaId] - from resolveCustomerArea on the ingest route
+ *   (§9.5/§4.2 chain: pin → last_area_id → default area). Stamped on every
+ *   doc so the rollup can group by (areaId, date).
  * @returns {Promise<number>} number of accepted events
  */
-const insertEvents = async (userId, events) => {
+const insertEvents = async (userId, events, areaId) => {
   if (!Array.isArray(events)) return 0;
 
   const docs = [];
@@ -75,7 +78,7 @@ const insertEvents = async (userId, events) => {
     if (docs.length >= MAX_EVENTS_PER_CALL) break;
     const clean = validateEvent(ev);
     if (!clean) continue;
-    docs.push({ userId, ...clean, createdAt: new Date() });
+    docs.push({ userId, areaId, ...clean, createdAt: new Date() });
   }
 
   if (docs.length === 0) return 0;

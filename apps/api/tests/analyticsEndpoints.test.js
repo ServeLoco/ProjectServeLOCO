@@ -35,7 +35,7 @@ const analyticsRoutes = require('../src/routes/analyticsRoutes');
 const { signCustomerToken, signAdminToken } = require('../src/utils/auth');
 
 const customerToken = signCustomerToken(123);
-const adminToken = signAdminToken(1);
+const adminToken = signAdminToken(1, { adminRole: 'area_admin', areaId: 1 });
 
 const buildApp = () => {
   const app = express();

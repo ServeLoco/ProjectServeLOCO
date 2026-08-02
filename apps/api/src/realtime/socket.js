@@ -4,6 +4,7 @@ const { verifyToken } = require('../utils/auth');
 const { createPresenceTracker } = require('./presence');
 const sessionStore = require('../services/analytics/sessionStore');
 const { pool } = require('../db/mysql');
+const { getDefaultArea } = require('../utils/areaScope');
 
 let io = null;
 let presenceTracker = null;
@@ -64,6 +65,26 @@ const authenticateSocket = async (socket, next) => {
   }
 };
 
+// No pin exists at the socket layer (H7 — a cold-start connect races the
+// app's own area resolution), so this mirrors resolveCustomerArea's no-pin
+// fallback chain (§4.2/§9.5): users.last_area_id, then the default area.
+// One lookup per connect (not per event/row) — same acceptable one-time cost
+// as any other per-request user lookup elsewhere in this codebase.
+const resolveAreaIdForSocketUser = async (userId) => {
+  try {
+    const [rows] = await pool.query('SELECT last_area_id FROM users WHERE id = ?', [userId]);
+    if (rows[0]?.last_area_id) return rows[0].last_area_id;
+  } catch (_) {
+    // fall through to default area
+  }
+  try {
+    const defaultArea = await getDefaultArea();
+    return defaultArea ? defaultArea.id : null;
+  } catch (_) {
+    return null;
+  }
+};
+
 const joinRoleRoom = (socket) => {
   const auth = socket.data.auth;
   if (!auth) return;
@@ -112,12 +133,21 @@ const initRealtime = (server) => {
     if (auth && auth.role === 'customer') {
       const platform = socket.handshake.auth?.platform || null;
       const appVersion = socket.handshake.auth?.appVersion || null;
-      presenceTracker.addPresence(socket.id, {
-        userId: auth.id,
-        role: auth.role,
-        platform,
-        appVersion,
-      }).catch(() => {});
+      // Same NODE_ENV guard as authenticateSocket's admin revocation check
+      // above — the test suite's socket tests don't mock db/mysql, and this
+      // lookup is genuinely optional (presence/analytics only, never auth).
+      const areaIdPromise = process.env.NODE_ENV !== 'test'
+        ? resolveAreaIdForSocketUser(auth.id)
+        : Promise.resolve(null);
+      areaIdPromise
+        .then((areaId) => presenceTracker.addPresence(socket.id, {
+          userId: auth.id,
+          role: auth.role,
+          platform,
+          appVersion,
+          areaId,
+        }))
+        .catch(() => {});
     }
 
     // Screen-change events from the customer app (analyticsClient.trackScreen).
@@ -186,4 +216,7 @@ module.exports = {
   emitToCustomer,
   getRealtimeStatus,
   initRealtime,
+  // Exported for unit testing only — the NODE_ENV guard around its one real
+  // call site (above) is what keeps the e2e socket tests DB-free.
+  resolveAreaIdForSocketUser,
 };

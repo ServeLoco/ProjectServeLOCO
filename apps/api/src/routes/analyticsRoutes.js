@@ -2,6 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const asyncHandler = require('../utils/asyncHandler');
 const { requireCustomer, requireAdmin } = require('../middleware/authMiddleware');
+const { resolveCustomerArea } = require('../middleware/areaMiddleware');
 const { postEvents, getSummary, getProducts, getWindowShoppers, getUserDrillDown, getHourly, getActiveUsers } = require('../controllers/analyticsController');
 
 // Customer analytics router — mounted at /api/analytics
@@ -17,7 +18,7 @@ const eventsLimiter = rateLimit({
   message: { code: 'TOO_MANY_REQUESTS', message: 'Too many analytics requests, please try again later.' },
 });
 
-router.post('/events', requireCustomer, eventsLimiter, asyncHandler(postEvents));
+router.post('/events', requireCustomer, resolveCustomerArea, eventsLimiter, asyncHandler(postEvents));
 
 // Admin analytics router — mounted at /api/admin/analytics
 const adminRouter = express.Router();

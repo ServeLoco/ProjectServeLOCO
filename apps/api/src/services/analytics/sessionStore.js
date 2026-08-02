@@ -6,14 +6,19 @@ const { getDb } = require('../../db/mongodb');
 
 /**
  * Insert a new session doc and return its _id (null if Mongo is unavailable).
- * @param {{userId:number, platform:string, appVersion:string}} meta
+ * areaId is resolved by the caller (socket.js, at connect time, via
+ * users.last_area_id → default area — same §4.2 fallback chain as everywhere
+ * else no pin exists) and passed straight through; this module stays a thin
+ * Mongo-only wrapper with no MySQL dependency of its own.
+ * @param {{userId:number, platform:string, appVersion:string, areaId?:number}} meta
  * @returns {Promise<string|null>}
  */
-const openSession = async ({ userId, platform, appVersion }) => {
+const openSession = async ({ userId, platform, appVersion, areaId }) => {
   try {
     const now = new Date();
     const res = await getDb().collection('analytics_sessions').insertOne({
       userId,
+      areaId,
       platform: platform || null,
       appVersion: appVersion || null,
       connectedAt: now,

@@ -12,7 +12,7 @@ const app = express();
 app.use(express.json());
 app.use('/api/admin', adminRoutes);
 
-const token = jwt.sign({ id: 'admin', role: 'admin' }, process.env.JWT_SECRET || 'secret');
+const token = jwt.sign({ id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 }, process.env.JWT_SECRET || 'secret');
 
 // getProfitSummary issues 6 queries in this fixed order: delivered aggregate
 // (sales/charges/discount/paid/payment-split), shop cost, warnings, per-shop

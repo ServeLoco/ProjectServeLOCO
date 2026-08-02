@@ -138,6 +138,7 @@ describe('createPresenceTracker', () => {
       peakToday: 0,
       byScreen: {},
       byPlatform: { android: 0, ios: 0 },
+      byArea: {},
       users: [],
     });
   });

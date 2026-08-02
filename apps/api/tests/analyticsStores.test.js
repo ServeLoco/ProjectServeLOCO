@@ -30,11 +30,17 @@ beforeEach(() => {
 });
 
 describe('ensureAnalyticsIndexes', () => {
-  it('creates all specced indexes for the three collections', async () => {
+  it('creates all specced indexes for the three collections, area-prefixed (TASK 17)', async () => {
     const calls = {};
     const db = {
       collection: jest.fn((name) => {
-        if (!calls[name]) calls[name] = { createIndex: jest.fn().mockResolvedValue() };
+        if (!calls[name]) {
+          calls[name] = {
+            createIndex: jest.fn().mockResolvedValue(),
+            dropIndex: jest.fn().mockResolvedValue(),
+            updateMany: jest.fn().mockResolvedValue({ modifiedCount: 0 }),
+          };
+        }
         return calls[name];
       }),
     };
@@ -44,16 +50,45 @@ describe('ensureAnalyticsIndexes', () => {
     const sessionCalls = calls.analytics_sessions.createIndex.mock.calls;
     expect(sessionCalls).toContainEqual([{ createdAt: 1 }, { expireAfterSeconds: 2592000 }]);
     expect(sessionCalls).toContainEqual([{ userId: 1, createdAt: -1 }]);
+    expect(sessionCalls).toContainEqual([{ areaId: 1, createdAt: -1 }]);
 
     const eventCalls = calls.analytics_events.createIndex.mock.calls;
     expect(eventCalls).toContainEqual([{ createdAt: 1 }, { expireAfterSeconds: 2592000 }]);
     expect(eventCalls).toContainEqual([{ userId: 1, createdAt: -1 }]);
-    expect(eventCalls).toContainEqual([{ type: 1, createdAt: -1 }]);
-    expect(eventCalls).toContainEqual([{ productId: 1, type: 1, createdAt: -1 }]);
+    expect(eventCalls).toContainEqual([{ areaId: 1, createdAt: -1 }]);
+    expect(eventCalls).toContainEqual([{ areaId: 1, type: 1, createdAt: -1 }]);
+    expect(eventCalls).toContainEqual([{ areaId: 1, productId: 1, type: 1, createdAt: -1 }]);
+    expect(calls.analytics_events.dropIndex).toHaveBeenCalledWith('type_1_createdAt_-1');
+    expect(calls.analytics_events.dropIndex).toHaveBeenCalledWith('productId_1_type_1_createdAt_-1');
 
+    // Backfill runs before the new unique index is created.
+    expect(calls.analytics_daily.updateMany).toHaveBeenCalledWith(
+      { areaId: { $exists: false } },
+      { $set: { areaId: 1 } }
+    );
+    expect(calls.analytics_daily.dropIndex).toHaveBeenCalledWith('date_1');
     const dailyCalls = calls.analytics_daily.createIndex.mock.calls;
-    expect(dailyCalls).toContainEqual([{ date: 1 }, { unique: true }]);
+    expect(dailyCalls).toContainEqual([{ areaId: 1, date: 1 }, { unique: true }]);
     expect(dailyCalls).toContainEqual([{ createdAt: 1 }, { expireAfterSeconds: 31536000 }]);
+
+    const updateManyOrder = calls.analytics_daily.updateMany.mock.invocationCallOrder[0];
+    const uniqueIndexOrder = calls.analytics_daily.createIndex.mock.invocationCallOrder[
+      dailyCalls.findIndex((c) => c[1]?.unique)
+    ];
+    expect(updateManyOrder).toBeLessThan(uniqueIndexOrder);
+  });
+
+  it('swallows an already-dropped index without throwing', async () => {
+    const err = new Error('index not found');
+    err.codeName = 'IndexNotFound';
+    const db = {
+      collection: jest.fn(() => ({
+        createIndex: jest.fn().mockResolvedValue(),
+        dropIndex: jest.fn().mockRejectedValue(err),
+        updateMany: jest.fn().mockResolvedValue({ modifiedCount: 0 }),
+      })),
+    };
+    await expect(ensureAnalyticsIndexes(db)).resolves.toBeUndefined();
   });
 });
 
