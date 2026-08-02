@@ -1331,23 +1331,72 @@ whole yet either — revisit once TASK 30's final audit sweeps those tables for 
 
 **Commit:** `feat: AREA TASK 19 — library CRUD, add-from-library, promote`
 
-### [ ] TASK 20 — Library edit propagation
+### [x] TASK 20 — Library edit propagation
 **Spec:** §3.7, §6.7 · **Files:** `[api] src/utils/productLibrary.js`, `libraryController.js`
 
-- [ ] 20.1 `propagateLibraryEdit(conn, libraryProductId)` — **one** batched
-      `UPDATE products SET name=?, description=?, image_id=?, unit=? WHERE library_product_id=?`.
-- [ ] 20.2 **Explicit column list, always.** Never a `SET` built from a spread of the request body —
-      one stray column overwrites every area's pricing in a single statement (§6.7).
-- [ ] 20.3 One batched `UPDATE product_variants` for labels.
-- [ ] 20.4 Affected areas from a single `SELECT DISTINCT area_id`; `bustAreaCaches` per area **after
-      the response is sent**.
-- [ ] 20.5 Variant **adds** → new per-area rows at `suggested_price` with `available = 0`, so a new
-      size never goes on sale at a price nobody chose.
-- [ ] 20.6 Variant **removals** → soft-delete (`deleted = 1`). Live carts and order snapshots hold
-      `product_variants.id` and must keep resolving. Never a hard delete.
-- [ ] 20.7 Test: after a library edit, every per-area `price`, `available` and `display_order` is
-      byte-identical.
-- [ ] 20.8 Test: the `products.price` ⇄ default-variant mirror survives every propagation path.
+- [x] 20.1 `propagateLibraryEdit(conn, libraryProductId)` — re-reads the library row fresh (never takes
+      new values as arguments, so it can't propagate a half-applied edit) and runs exactly one
+      `UPDATE products SET name = ?, description = ?, image_id = ?, unit = ? WHERE library_product_id
+      = ?`, covered by TASK 18's `idx_products_library_product` index.
+- [x] 20.2 Confirmed by test: the identity UPDATE's column list is hardcoded, never built from
+      `req.body` — verified the generated SQL text never mentions `price`, `available`,
+      `category_id`, or `display_order` anywhere.
+- [x] 20.3 One JOIN-based `UPDATE product_variants pv JOIN library_variants lv ON lv.id =
+      pv.library_variant_id SET pv.label = lv.label WHERE lv.library_product_id = ? AND pv.deleted =
+      0` — a single statement relabels every area's variants still linked to a live library variant,
+      not one query per area.
+- [x] 20.4 Affected areas from `SELECT DISTINCT area_id FROM products WHERE library_product_id = ? AND
+      deleted = 0`, returned to the caller. `libraryController.js`'s `updateLibraryProduct` sends the
+      HTTP response **first**, then fires `Promise.all(areaIds.map(bustAreaCaches))` after — the admin
+      never waits on N cache busts for an edit that already committed.
+- [x] 20.5 New library variants get a **separate INSERT pass**: `libVariants` (current) vs `areaProducts`
+      × `existingLinks` (`product_id:library_variant_id` pairs already materialized) — any combination
+      missing from that set gets one batched multi-row `INSERT INTO product_variants (...) VALUES ?` at
+      `suggested_price`, `available = 0`. Deliberately **never `is_default`**, even if the library
+      marks the new variant as its own default — flipping an existing area's default variant would
+      silently retarget the `products.price` mirror everywhere at once; `is_default` only ever applies
+      at initial `materializeToArea` time, confirmed by test and live verification.
+- [x] 20.6 A `product_variants` row still pointing at a `library_variant_id` that `library_variants` no
+      longer has (removed via `syncLibraryVariants`' hard-delete) gets one JOIN-based
+      `UPDATE ... SET pv.deleted = 1 WHERE ... library_variant_id NOT IN (...)` — confirmed by test the
+      generated SQL is a `SET pv.deleted = 1`, never a `DELETE FROM product_variants`.
+      `syncLibraryVariants(conn, libraryProductId, variants)` (new) is the upsert-by-id +
+      hard-delete-missing counterpart for `library_variants` itself, called from
+      `updateLibraryProduct` when the request body includes a `variants` array — hard delete is
+      correct there specifically because nothing outside `product_variants.library_variant_id`
+      references a `library_variants.id`, unlike `product_variants.id` which live carts/orders hold.
+- [x] 20.7/20.8 Tests + live verification (both against the real dev DB, not just mocks): materialized a
+      temp library item into area 1 (`price=25, displayOrder=7`), then renamed the library, relabeled
+      one variant, removed another, and added a new one — confirmed live that the area product's
+      `price`, `category_id`, `display_order`, and `available` were byte-identical before and after
+      propagation (20.7), the kept variant's `price` still matched the product's own price (the mirror
+      survived, 20.8), the removed variant's row was soft-deleted (`deleted: 1`) and still resolvable
+      by id, and the new variant landed at the library's `suggested_price` with `available: 0`. Cleaned
+      up afterward, confirmed no orphaned rows.
+
+**`updateLibraryProduct` (`libraryController.js`) rewritten** to actually call this task's new
+functions: now runs in one transaction — `product_library` scalar update (if any fields sent),
+`syncLibraryVariants` (if a `variants` array is sent), `propagateLibraryEdit` — commits, responds, then
+busts caches after the response per 20.4. Previously (TASK 19) it only updated `product_library`'s own
+row with no propagation and no variant editing at all.
+
+**Test churn:** none — TASK 19's own tests for `updateLibraryProduct` didn't exist yet (that endpoint
+had no dedicated test file), so extending its behavior broke nothing. Added
+`tests/libraryPropagation.test.js` (new, 8 tests): the identity UPDATE's exact column list and absence
+of area-owned columns, the JOIN-based label UPDATE, the removal soft-delete's exact SQL shape, the
+variant-add INSERT's exact row shape (price/available/is_default/library_variant_id), the "skip areas
+that already have every variant" case, `NOT_FOUND`, and `syncLibraryVariants`' upsert/hard-delete/no-op
+paths.
+
+**Live verification (local dev DB):** see 20.7/20.8 above — a full materialize-then-edit-then-propagate
+round trip against real MySQL, covering rename, relabel, remove, and add in one pass. Full Jest suite:
+95/95 suites, 1020/1021 tests, 1 pre-existing skip.
+
+**Guardrail:** informational violation count: 245 (up from 242) — the 3 new sites are
+`propagateLibraryEdit`'s identity/label/removal UPDATE statements, which are deliberately cross-area BY
+DESIGN (the entire point of this task is fanning one edit out to every area that carries the item) —
+not gaps. Not allowlisted for the same reason as TASK 19's additions: `products`/`product_variants`
+aren't in `SWEPT_TABLES` yet.
 
 **Commit:** `feat: AREA TASK 20 — library edit propagation`
 
