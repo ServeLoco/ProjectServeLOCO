@@ -546,22 +546,107 @@ zone via its real owner and confirmed the bbox correctly shrank back down; clean
 row afterward.
 **Commit:** `feat: AREA TASK 10 — per-area delivery zones and pricing`
 
-### [ ] TASK 11 — Catalog: categories, products, combos, groups, store modes (162 sites)
+### [x] TASK 11 — Catalog: categories, products, combos, groups, store modes (162 sites)
 **Spec:** §6.2 rule 4, H4, H5, H8 · **Files:** `[api] src/controllers/productController.js`,
 `categoryController.js`, `comboController.js`, `storeModeController.js`, `bulkImportController.js`,
 `shopAdminController.js`, `shopOwnerController.js`, `src/utils/storeMode.js`
 
-- [ ] 11.1 `products` (79), `categories` (44), `combos` (26), `store_modes` (13), `product_groups`.
-- [ ] 11.2 Seed `store_modes` `is_system` rows (`packed`, `fast_food`) **per area**. Verify the old
-      global UNIQUE really was dropped in 3.7 — otherwise `INSERT IGNORE` silently does nothing.
-- [ ] 11.3 `utils/storeMode.js` `normalizeStoreType` validates a slug **within the area**, not
-      against a global list (H4).
-- [ ] 11.4 `bulkImportController.js:529` raw `INSERT INTO products` gains `area_id` — imports land in
-      the admin's current area (H8).
-- [ ] 11.5 Both combo representations get `area_id` (`combos` table **and** `products.is_combo` rows;
-      H5). Do not attempt to unify them.
-- [ ] 11.6 Replace the 9 `bustProductCaches()` / scattered bust pairs with `bustAreaCaches(areaId)`.
-- [ ] 11.7 Search stays `LIKE` for now — TASK 22 replaces it.
+- [x] 11.1 `area_id` columns for `products`/`categories`/`combos`/`store_modes`/`product_groups` were
+      already added generically by TASK 3's `AREA_SCOPED_TABLES` sweep (column + backfill + composite
+      indexes + per-area UNIQUE key rewrites already in `migrate.js`) — this task's own job was
+      threading real `req.areaId`/admin-session `areaId` through every controller query, which is done:
+      `productController.js` (public `getProducts` strict-null §2.4 catalog rule, `getProductById`
+      deliberately left unscoped for order-history/deep-link compatibility — documented inline —, all
+      admin CRUD + bulk endpoints + pricing grid, cross-tenant `WHERE id=? AND area_id=?` fixes
+      throughout), `categoryController.js` (public + admin CRUD), `comboController.js` (admin CRUD,
+      `validateComboItems`'s product-existence check now area-scoped per H5), `storeModeController.js`
+      (public strict-null like other catalog reads, not settings-style lenient — documented why),
+      `storeModeRoutes.js`/`productRoutes.js`/`categoryRoutes.js` gained `resolveCustomerArea`.
+      `product_groups` (shops isn't area-scoped until TASK 15, so group rows are stamped from the
+      acting admin's session area in `shopAdminController.js`, or from `shops.area_id` — added to the
+      `requireShopOwner` SELECT — in `shopOwnerController.js`'s self-service flow).
+- [x] 11.2 `areaScope.seedSystemStoreModes(areaId)` added (reused by future clone-area/TASK 25);
+      `migrate.js` now loops every existing area and `INSERT IGNORE`s `packed`/`fast_food` per area.
+      Verified live: the old global UNIQUE on `store_modes.slug` was already dropped and replaced with
+      `uniq_store_modes_area_slug(area_id, slug)` back in TASK 3/8 — confirmed via `SHOW INDEX` against
+      the local dev DB, so `INSERT IGNORE` seeding works correctly.
+- [x] 11.3 `normalizeStoreType(value, { areaId })` — additive optional param (not a breaking positional
+      change, given 16 call sites across 7 files), defaults to a stopgap area for callers outside this
+      task's file list (cartController/couponController/dashboardController/settingsController — their
+      owning TASKs 12/13/14 thread the real value through). Every caller inside this task's own files
+      now passes a real `areaId`.
+- [x] 11.4 `bulkImportController.js`'s raw `INSERT INTO products` gains `area_id` (H8); the update-path
+      UPDATE, the explicit-id lookup, the name+category fallback lookup, and the categories load used
+      for CSV row resolution are all scoped to the importing admin's area too — an import into area 2
+      can no longer resolve against or edit area 1's categories/products.
+- [x] 11.5 Both combo representations scoped: `combos` table (full CRUD) and `products.is_combo` rows
+      (via `productController.js`'s product CRUD) both carry real `area_id`; kept as two representations
+      per spec, not unified.
+- [x] 11.6 All scattered `bustProductCaches()`/`bustDashboardCache()`/inline `microCache.bust(...,1)`
+      call sites in the touched files replaced with `bustAreaCaches(areaId)`.
+- [x] 11.7 Search still `LIKE` — confirmed untouched, TASK 22's job.
+
+**Also fixed, beyond the checklist's own scope:**
+- `areaScope.bustAreaCaches`'s `invalidateStoreModeCache()` call was still zero-arg (stale TASK 4-era
+  stopgap comment); now passes the real `areaId` through — `storeMode.js`'s per-area cache actually
+  busts per-area as of this task.
+- Cross-tenant fixes matching the pattern already found in TASK 10: `updateStoreMode`,
+  `updateCategory`/`deleteCategory`, `updateProduct`/`deleteProduct`/`updateProductImage`, `updateCombo`/
+  `deleteCombo`, and the shop-group CRUD in both `shopAdminController.js` and `shopOwnerController.js`
+  all had (or would have had, once `area_id` existed) an id-only `WHERE` that let an area_admin
+  read/write another area's row by guessing its globally-sequential numeric id — all now
+  `WHERE id = ? AND area_id = ?`.
+- `product_variants`/`combo_items` have no `area_id` column of their own (children of
+  products/combos, scoped through the FK) — `updateVariantAvailability` and the variant branch of
+  `updateProductPricing` gained an `EXISTS (... products.area_id = ?)` guard so a variant id can't be
+  used to reach another area's product.
+- `storeModeController.getStoreModes` was initially written with settings-style leniency (fallback to
+  the default area when the pin resolves to no zone); caught during review — store modes gate which
+  products a customer can even reach, so it's catalog data, not settings metadata, and must follow the
+  strict "empty list for null areaId" rule like `listActiveZonesPublic`, not `getSettings`'s leniency.
+  Fixed before this landed.
+- `getProducts`'s public catalog listing now resolves `areaId` strictly and returns an empty list
+  (not a default-area fallback) when a pin resolves outside every zone — same §2.4 rule, previously
+  entirely unenforced since the whole endpoint was hardcoded to area 1.
+- Found and fixed a real gap while wiring this up: `productRoutes.js` and `categoryRoutes.js` never
+  had `resolveCustomerArea` mounted at all (only `storeModeRoutes.js` was updated as the "obvious"
+  file) — without this fix `req.areaId` would have been undefined on every public product/category
+  request in production.
+
+**Test churn:** 9 test files broke from this sweep — `productsPagination.test.js`, `productCategory.test.js`,
+`productShopClosed.test.js` needed the same `resolveCustomerArea`-consumes-a-`pool.query`-call fix
+already established in TASK 9/10 (explicit default-area-lookup mock + `areaScope._resetCachesForTests()`
+in `beforeEach`, or the request short-circuits/miscounts). `productVariants.test.js`, `bulkImport.test.js`,
+`shopPricing.test.js`, `productsBulkAssignShop.test.js`, `adminShopGroups.test.js`, `comboTransaction.test.js`
+all used pre-TASK-7 admin JWTs (`{ id, role: 'admin' }` with no `adminRole`) that `resolveAdminArea`
+correctly leaves `req.areaId` unresolved for — updated to the `adminRole: 'area_admin', areaId: 1` shape
+already established as the test convention. Also found and fixed a real bug of my own: `getProducts`
+initially used `pool.escape(areaId)` unconditionally to inline the area filter into the base query
+string — broke every test file whose `db/mysql` mock didn't stub `pool.escape` (most of them, since the
+old code only called it for optional filters). Switched to `Number(areaId)` interpolation, safe because
+`areaId` is guaranteed a validated positive integer by that point (already checked for null/'all').
+Assorted param-shape/call-count assertion updates for the new `area_id` bind params and the extra
+`bustAreaCaches` → `bumpCatalogVersion` pool.query call on writes.
+
+**Live verification (local dev DB, migration re-run clean):** `GET /api/products`, `GET /api/categories`,
+`GET /api/store-modes` all return real area-1-scoped data with the new `area_id` joins/filters in place.
+Confirmed via `SHOW INDEX`/`SELECT COUNT(DISTINCT area_id)` that `products`/`categories`/`combos`/
+`store_modes`/`product_groups` are all correctly `area_id = 1` (only area 1 exists) and the composite
+UNIQUE keys (`uniq_categories_area_slug`, `uniq_store_modes_area_slug`) are in place. Admin-endpoint live
+verification (login) was skipped — no admin credentials available outside `.env`, which is off-limits —
+covered instead by the full Jest suite (all 88 suites green) exercising every admin write path against a
+mocked DB.
+
+**Guardrail:** `tests/areaScoping.test.js`'s `SWEPT_TABLES` deliberately does NOT gain `categories`/
+`products`/`combos`/`store_modes`/`product_groups` yet, even though this task's own files are fully
+scoped — `cartController.js`, `orderController.js`, `dashboardController.js`, `analyticsController.js`,
+and `settingsController.js`'s radius-pricing reads (all owned by TASK 12/13/14/17) still reference these
+tables unscoped. Unlike `settings`/`delivery_zones` (single-owner tables TASK 9/10 swept completely),
+these five span many files owned by different future tasks — add them to `SWEPT_TABLES` only once every
+remaining site across the whole codebase is done. The informational (non-failing) remaining-violations
+count moved from including these 5 tables' sites as "not yet swept" throughout, unaffected by this
+choice — 336 sites remain across all not-yet-swept tables after this task, shrinking further as
+TASK 12+ land.
 
 **Commit:** `feat: AREA TASK 11 — per-area catalog`
 
