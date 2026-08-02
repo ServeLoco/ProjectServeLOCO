@@ -1454,22 +1454,76 @@ cross-area by design (same reasoning as TASK 20's count increase), not gaps.
 
 **Commit:** `feat: AREA TASK 21 — category and store-mode libraries`
 
-### [ ] TASK 22 — Fulltext search, area scoping, units lookup
+### [x] TASK 22 — Fulltext search, area scoping, units lookup
 **Spec:** §3.11, H4 · **Files:** `[api] src/db/migrate.js`,
 `src/controllers/productController.js` (`:377`, `:635`), `tests/productCategory.test.js`
 
-- [ ] 22.1 `FULLTEXT KEY ft_products_name (name)` on `products`; same on `product_library.name`.
-- [ ] 22.2 Customer search → `WHERE p.area_id = ? AND MATCH(p.name) AGAINST (? IN BOOLEAN MODE)`
-      with a `term*` prefix. Replaces the unindexable `LIKE '%term%'` full scan.
-- [ ] 22.3 Keep `LIKE` only as a fallback for terms shorter than `innodb_ft_min_token_size`.
-- [ ] 22.4 Admin "find a product to add" searches **`product_library`** — one global index instead of
-      N per-area copies — then maps to area rows via `library_product_id`.
-- [ ] 22.5 `units` lookup table; `product_library.unit_id` points at it; backfill from distinct
-      existing `products.unit` strings.
-- [ ] 22.6 `products.unit` **keeps its current free-text column and value** — no response shape
-      changes.
-- [ ] 22.7 **Test: a customer search in area 2 returns zero area 1 products.**
-- [ ] 22.8 Benchmark before/after on a realistic row count; record the numbers in the commit body.
+- [x] 22.1 `FULLTEXT KEY ft_products_name (name)` on `products` and `ft_product_library_name` on
+      `product_library.name`, both idempotent (`ensureFulltextIndex`, same INFORMATION_SCHEMA-check
+      shape as every other `ensure*` helper in `migrate.js`). Confirmed live via `SHOW INDEX` —
+      `Index_type: FULLTEXT` on both.
+- [x] 22.2/22.3 New shared `src/utils/search.js` — `decideSearchMode(term)` returns `fulltext` (term ≥
+      `FULLTEXT_MIN_TERM_LENGTH` = 3, matching InnoDB's `innodb_ft_min_token_size` default) with boolean-
+      mode operators stripped and a `*` prefix appended, `like` (shorter terms), or `none` (empty/
+      pure-operator input — resolves to `1=0`, never an unfiltered scan). One decision function reused
+      at all 3 call sites rather than 3 copies of the same length check. Customer `getProducts`
+      (`productController.js`, formerly `:377`) and admin `getAdminProducts` (formerly `:635`) both
+      replaced their `p.name LIKE '%term%'` with this — customer's stays string-interpolated
+      (`pool.escape`, matching the rest of that query's existing style), admin's stays parameterized.
+      Combos (no FULLTEXT index, out of 22.1's scope) keep `LIKE` unconditionally in the shared
+      customer-search subquery builder — a deliberate, permanent fallback for that one subquery, not
+      the length-based one.
+- [x] 22.4 `GET /admin/library`'s `search` (built in TASK 19, `libraryController.js`) upgraded from
+      `LIKE` to the same `decideSearchMode` against `product_library.name` — this **is** admin's "find
+      a product to add" lookup (one global index, TASK 19 already maps results to area rows via
+      `library_product_id` in the same response).
+- [x] 22.5 `units (id, name UNIQUE, created_at)` created; one-shot
+      `INSERT IGNORE INTO units (name) SELECT DISTINCT TRIM(unit) FROM products WHERE unit IS NOT NULL
+      AND TRIM(unit) != ''` (not a per-row batched migration — realistically tens of distinct values,
+      confirmed live: 6 on this dev DB). No FK from `product_library.unit_id` to it, same
+      no-FK-for-cross-cutting-pointer-columns convention as every other library linkage column in this
+      codebase. **Also fixed, beyond the checklist's own scope:** `materializeToArea` and
+      `propagateLibraryEdit` (TASK 19/20) both hardcoded `unit: null` on every write, with a comment
+      saying the units table didn't exist yet — now that it does, both resolve `lib.unit_id` to the
+      matching `units.name` and write that string, closing a gap those two tasks left open pending
+      this one.
+- [x] 22.6 Confirmed: `products.unit` itself is untouched — still the same free-text column, same
+      values on every existing row (the `units` table is purely additive, read from library
+      materialization/propagation, never written back to `products.unit` by anything else, and no
+      response field changed shape).
+- [x] 22.7 New `tests/productSearchAreaIsolation.test.js` — same "assert the real SQL sent to MySQL,
+      not just the mocked response" style as TASK 12.4/15.8's isolation tests (no real area 2 exists
+      yet, §6.6): a pin resolving into a synthetic area 2 searches `p.area_id = 2` via
+      `MATCH(p.name) AGAINST (... IN BOOLEAN MODE)`, never `area_id = 1`; the mirror-image area-1 case;
+      and a short (2-char) term correctly falls back to `LIKE '%ab%'` while staying area-scoped.
+- [x] 22.8 **Benchmark** (local dev DB, real MySQL, not an estimate): inserted 20,000 synthetic
+      `products` rows (area 1) alongside the existing 9, then ran the same `term='Milk'` search both
+      ways:
+      | | rows matched | time | `EXPLAIN` key used | rows examined (est.) |
+      |---|---|---|---|---|
+      | `LIKE '%Milk%'` | 1,927 | 22ms | `idx_products_area_category_available_order` (can't use it for the `LIKE`'s own predicate, just the `area_id` prefix) | 10,004 |
+      | `MATCH(name) AGAINST ('Milk*' IN BOOLEAN MODE)` | 1,927 | 10ms | `ft_products_name` | 1 |
+
+      Same result set, ~2.2x faster at 20k rows, and — the number that actually matters as N grows —
+      `EXPLAIN` confirms `LIKE` still examines ~half the table (10,004 of 20,009 rows) while `MATCH`
+      resolves through the FULLTEXT index directly (`rows: 1`, i.e. genuinely index-driven, not
+      scan-driven). The gap widens with row count; it does not stay at 2x. Cleaned up all 20,000
+      synthetic rows afterward — confirmed 0 remain.
+
+**Test churn:** none — no existing test exercised the `search=` query param on either
+`GET /api/products` or `GET /admin/products` before this task (grepped to confirm), so replacing the
+LIKE mechanism broke nothing. Added `tests/searchMode.test.js` (5 cases: min-length fallback, fulltext
+prefix, operator stripping, empty/pure-operator input, whitespace trimming) and
+`tests/productSearchAreaIsolation.test.js` (3 cases, 22.7).
+
+**Live verification:** see 22.1 (`SHOW INDEX`) and 22.5 (real distinct units backfilled) and 22.8
+(the benchmark itself) above, all against the real local dev DB. Full Jest suite: 97/97 suites,
+1032/1033 tests, 1 pre-existing skip.
+
+**Guardrail:** informational violation count: 247 (unchanged from TASK 21) — every touched query was
+already area-scoped before this task (the customer/admin product search predicates already carried
+`area_id`); this task only replaced the search *mechanism*, not the area predicate, so no new
+scoped-but-unscoped sites were introduced or closed.
 
 **Commit:** `feat: AREA TASK 22 — fulltext search, area scoping, units lookup`
 
