@@ -8,6 +8,7 @@ const { roundMoney, toMoney } = require('../utils/money');
 const { isCodBlockedDuringNight } = require('../utils/nightDelivery');
 const { calculateRainCharge } = require('../utils/rainCharge');
 const { resolveDeliveryPricing, loadActiveZones, loadActiveExclusionZones } = require('../utils/deliveryPricing');
+const { resolveAreaIdForPricing } = require('../utils/areaScope');
 const { validateCoupon, validateCouponById, pickBestAutoApply } = require('../utils/coupons');
 
 // Expected business failures → 400. clientCode lets specific failures carry a
@@ -326,13 +327,21 @@ const createOrder = async (req, res) => {
 
     subtotal = roundMoney(subtotal);
 
+    // Which AREA this coordinate belongs to is resolved via the outer pool +
+    // its short TTL cache, not the transaction connection — area membership
+    // is a coarse, rarely-changing routing fact, unlike the zone PRICING
+    // data below, which still reads through `connection` uncached for
+    // transactional consistency (same reasoning as loadActiveExclusionZones'
+    // existing comment).
+    const deliveryAreaId = await resolveAreaIdForPricing(latitude, longitude);
+
     // Radius-zone pricing (server-authoritative — never trusts the preview the
     // client saw). Read + pure compute inside the existing transaction; the
     // resolver falls back to legacy flat pricing when zone mode isn't fully
     // configured or the order has no coordinates ("Enter Manually").
-    const zones = settings.radius_pricing_active ? await loadActiveZones(connection) : [];
+    const zones = settings.radius_pricing_active ? await loadActiveZones(connection, deliveryAreaId) : [];
     // Exclusion squares block delivery regardless of zone/flat pricing mode.
-    const exclusionZones = await loadActiveExclusionZones(connection);
+    const exclusionZones = await loadActiveExclusionZones(connection, deliveryAreaId);
     const pricing = resolveDeliveryPricing({
       customerLat: latitude,
       customerLng: longitude,

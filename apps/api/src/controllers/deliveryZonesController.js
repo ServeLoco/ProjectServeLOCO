@@ -1,7 +1,8 @@
 const { pool } = require('../db/mysql');
-const microCache = require('../utils/microCache');
 const { parseBoundary, polygonAreaKm2, areaEquivalentRadiusKm, polygonSelfIntersects } = require('../utils/deliveryPricing');
 const { emitToAllCustomers } = require('../realtime/socket');
+const { requestAreaId, bustAreaCaches, recomputeAreaBbox } = require('../utils/areaScope');
+const microCache = require('../utils/microCache');
 
 // Admin CRUD for polygon delivery zones (delivery_zones table). Each row is
 // its own irregular boundary (array of {lat,lng} vertices) and may nest
@@ -115,10 +116,12 @@ const validateZoneValues = ({ boundary, name, normalCharge, fastCharge, normalEt
   return null;
 };
 
-// Resolves and validates a parent zone reference: must exist, can't be the
-// zone itself, and can't create a parent/child cycle (walks the candidate
-// parent's own ancestor chain looking for `selfId`). selfId is null on create.
-const resolveParentZoneId = async (rawParentZoneId, selfId) => {
+// Resolves and validates a parent zone reference: must exist IN THE SAME
+// AREA (nesting a zone under another area's zone would let matchZone cross
+// area boundaries), can't be the zone itself, and can't create a parent/
+// child cycle (walks the candidate parent's own ancestor chain looking for
+// `selfId`). selfId is null on create.
+const resolveParentZoneId = async (rawParentZoneId, selfId, areaId) => {
   if (!hasValue(rawParentZoneId)) return { parentZoneId: null };
   const parentZoneId = Number(rawParentZoneId);
   if (!Number.isInteger(parentZoneId) || parentZoneId < 1) {
@@ -127,7 +130,7 @@ const resolveParentZoneId = async (rawParentZoneId, selfId) => {
   if (selfId != null && parentZoneId === selfId) {
     return { error: 'A zone cannot be its own parent' };
   }
-  const [rows] = await pool.query('SELECT id, parent_zone_id FROM delivery_zones WHERE id = ?', [parentZoneId]);
+  const [rows] = await pool.query('SELECT id, parent_zone_id FROM delivery_zones WHERE id = ? AND area_id = ?', [parentZoneId, areaId]);
   if (rows.length === 0) {
     return { error: 'Parent zone not found' };
   }
@@ -139,14 +142,34 @@ const resolveParentZoneId = async (rawParentZoneId, selfId) => {
     }
     if (visited.has(cursor.parent_zone_id)) break; // defensive: existing cycle, stop walking
     visited.add(cursor.parent_zone_id);
+    // area_id is not re-checked here — a zone's own parent_zone_id can only
+    // ever point within its own area (every write in this file enforces
+    // that), so once cursor is confirmed same-area, its ancestors are too.
     const [next] = await pool.query('SELECT id, parent_zone_id FROM delivery_zones WHERE id = ?', [cursor.parent_zone_id]);
     cursor = next[0];
   }
   return { parentZoneId };
 };
 
+// Rejects null (super_admin, no X-Area-Id) and 'all' — zone management
+// always targets exactly one area (§2.10).
+const requireOneArea = (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required to manage delivery zones' });
+    return null;
+  }
+  if (areaId === 'all') {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Delivery zones cannot be managed for "all" areas at once — pick one area' });
+    return null;
+  }
+  return areaId;
+};
+
 const listZones = async (req, res) => {
-  const [rows] = await pool.query('SELECT * FROM delivery_zones ORDER BY id ASC');
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+  const [rows] = await pool.query('SELECT * FROM delivery_zones WHERE area_id = ? ORDER BY id ASC', [areaId]);
   const zones = rows.map(zoneJson).sort((a, b) => a.areaKm2 - b.areaKm2);
   res.status(200).json({ data: zones });
 };
@@ -158,22 +181,26 @@ const listZones = async (req, res) => {
 // Unauthenticated and hit by every app that opens the map, so it goes through
 // the micro-cache instead of a table scan per request. Busted by every zone
 // mutation below, so an admin edit still shows up immediately.
-//
-// Key/bust calls are hardcoded to area 1 for now (TASK 10 makes this
-// area-scoped for real, loading only the resolved area's zones — see
-// plans/multi-area.md §3.2); the plumbing is in place so that swap only
-// changes the `1` below, not the key shape.
-const PUBLIC_ZONES_AREA_ID_STOPGAP = 1;
 const publicZonesCacheKey = (areaId) => `delivery-zones:${areaId}:public`;
 const PUBLIC_ZONES_CACHE_TTL_MS = 60 * 1000;
 
 const listActiveZonesPublic = async (req, res) => {
-  const cacheKey = publicZonesCacheKey(PUBLIC_ZONES_AREA_ID_STOPGAP);
+  const areaId = requestAreaId(req);
+  // A pin outside every zone (null) shows no shapes at all — showing
+  // another area's polygons would be actively misleading, not helpful
+  // (§2.4). Only a cold app open with no pin yet resolves to a real area
+  // via resolveCustomerArea's own default-area fallback.
+  if (areaId === null || areaId === 'all') {
+    return res.status(200).json({ data: [] });
+  }
+
+  const cacheKey = publicZonesCacheKey(areaId);
   const cached = microCache.get(cacheKey);
   if (cached) return res.status(200).json({ data: cached });
 
   const [rows] = await pool.query(
-    'SELECT id, name, boundary, parent_zone_id FROM delivery_zones WHERE active = 1'
+    'SELECT id, name, boundary, parent_zone_id FROM delivery_zones WHERE active = 1 AND area_id = ?',
+    [areaId]
   );
   const zones = rows.map((row) => ({
     id: row.id,
@@ -186,13 +213,16 @@ const listActiveZonesPublic = async (req, res) => {
   res.status(200).json({ data: zones });
 };
 
-// Every zone write goes through here so the admin cache bust, the public
+// Every zone write goes through here so the area's bbox (§3.2, used by the
+// bbox prefilter in resolveAreaForPoint), the admin cache bust, the public
 // geometry cache bust and the customer push stay in lockstep.
-const notifyZonesChanged = (reason, zoneId) => {
-  microCache.bust('dashboard', PUBLIC_ZONES_AREA_ID_STOPGAP);
-  microCache.bust('delivery-zones', PUBLIC_ZONES_AREA_ID_STOPGAP);
+const notifyZonesChanged = async (reason, zoneId, areaId) => {
+  await recomputeAreaBbox(areaId);
+  await bustAreaCaches(areaId);
   // Push so any customer mid-checkout gets the new pricing without waiting
   // for their next pin move — see realtimeClient.js's delivery_zones.updated.
+  // Platform-wide for now (TASK 23 makes this area-scoped); harmless today
+  // since only one area exists, revisit before a second area goes live.
   emitToAllCustomers('delivery_zones.updated', { reason, zoneId });
 };
 
@@ -201,14 +231,13 @@ const notifyZonesChanged = (reason, zoneId) => {
 // deleting or deactivating their last zone would take the whole shop offline
 // rather than quietly reverting to flat pricing. Refuse the write and tell
 // them to turn zone pricing off first.
-const wouldLeaveNoActiveZones = async (excludedZoneId) => {
-  // stopgap area 1 (TASK 10 threads the resolved area through zone writes)
-  const [settingsRows] = await pool.query('SELECT radius_pricing_active FROM settings WHERE area_id = 1 LIMIT 1');
+const wouldLeaveNoActiveZones = async (excludedZoneId, areaId) => {
+  const [settingsRows] = await pool.query('SELECT radius_pricing_active FROM settings WHERE area_id = ? LIMIT 1', [areaId]);
   const zonePricingOn = Number(settingsRows[0]?.radius_pricing_active) === 1;
   if (!zonePricingOn) return false;
   const [zoneRows] = await pool.query(
-    'SELECT COUNT(*) AS count FROM delivery_zones WHERE active = 1 AND id != ?',
-    [excludedZoneId]
+    'SELECT COUNT(*) AS count FROM delivery_zones WHERE active = 1 AND area_id = ? AND id != ?',
+    [areaId, excludedZoneId]
   );
   return Number(zoneRows[0]?.count) === 0;
 };
@@ -217,6 +246,9 @@ const LAST_ACTIVE_ZONE_MESSAGE = 'This is the only active zone and zone pricing 
   + 'Turn zone pricing off first, or add another active zone.';
 
 const createZone = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const body = req.body || {};
   const rawBoundary = body.boundary;
   const rawName = pick(body, 'name', 'name');
@@ -232,7 +264,7 @@ const createZone = async (req, res) => {
   const message = validateZoneValues(values);
   if (message) return validationError(res, message);
 
-  const parentResult = await resolveParentZoneId(pick(body, 'parent_zone_id', 'parentZoneId'), null);
+  const parentResult = await resolveParentZoneId(pick(body, 'parent_zone_id', 'parentZoneId'), null, areaId);
   if (parentResult.error) return validationError(res, parentResult.error);
 
   const codEnabled = pick(body, 'cod_enabled', 'codEnabled');
@@ -240,9 +272,10 @@ const createZone = async (req, res) => {
 
   const [result] = await pool.query(
     `INSERT INTO delivery_zones
-      (name, boundary, parent_zone_id, normal_charge, fast_charge, normal_eta_minutes, fast_eta_minutes, night_charge, cod_enabled, active)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (area_id, name, boundary, parent_zone_id, normal_charge, fast_charge, normal_eta_minutes, fast_eta_minutes, night_charge, cod_enabled, active)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
+      areaId,
       values.name,
       JSON.stringify(values.boundary),
       parentResult.parentZoneId,
@@ -252,16 +285,23 @@ const createZone = async (req, res) => {
       active === undefined ? 1 : toBool01(active),
     ]
   );
-  const [rows] = await pool.query('SELECT * FROM delivery_zones WHERE id = ?', [result.insertId]);
-  notifyZonesChanged('created', result.insertId);
+  const [rows] = await pool.query('SELECT * FROM delivery_zones WHERE id = ? AND area_id = ?', [result.insertId, areaId]);
+  await notifyZonesChanged('created', result.insertId, areaId);
   res.status(201).json({ message: 'Delivery zone created', id: result.insertId, data: zoneJson(rows[0]) });
 };
 
 const updateZone = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return validationError(res, 'Valid zone id is required');
 
-  const [rows] = await pool.query('SELECT * FROM delivery_zones WHERE id = ?', [id]);
+  // area_id in the WHERE, not just id: without this, an area_admin could
+  // PATCH another area's zone by id (ids are a single global sequence) and
+  // succeed. Scoping the SELECT makes a cross-area id read as "not found"
+  // rather than leaking whether the zone exists elsewhere.
+  const [rows] = await pool.query('SELECT * FROM delivery_zones WHERE id = ? AND area_id = ?', [id, areaId]);
   if (rows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Delivery zone not found' });
   }
@@ -298,7 +338,8 @@ const updateZone = async (req, res) => {
   const rawParentZoneId = pick(body, 'parent_zone_id', 'parentZoneId');
   const parentResult = await resolveParentZoneId(
     rawParentZoneId === undefined ? existing.parent_zone_id : rawParentZoneId,
-    id
+    id,
+    areaId
   );
   if (parentResult.error) return validationError(res, parentResult.error);
 
@@ -307,7 +348,7 @@ const updateZone = async (req, res) => {
   const active = pick(body, 'active', 'active');
 
   const nextActive = active === undefined ? Number(existing.active) : toBool01(active);
-  if (Number(existing.active) === 1 && nextActive === 0 && await wouldLeaveNoActiveZones(id)) {
+  if (Number(existing.active) === 1 && nextActive === 0 && await wouldLeaveNoActiveZones(id, areaId)) {
     return validationError(res, LAST_ACTIVE_ZONE_MESSAGE);
   }
 
@@ -317,31 +358,34 @@ const updateZone = async (req, res) => {
       normal_charge = ?, fast_charge = ?,
       normal_eta_minutes = ?, fast_eta_minutes = ?, night_charge = ?,
       cod_enabled = ?, active = ?
-     WHERE id = ?`,
+     WHERE id = ? AND area_id = ?`,
     [
       name, JSON.stringify(merged.boundary), parentResult.parentZoneId,
       merged.normalCharge, merged.fastCharge,
       merged.normalEta, merged.fastEta, merged.nightCharge,
       codEnabled === undefined ? existing.cod_enabled : toBool01(codEnabled),
       active === undefined ? existing.active : toBool01(active),
-      id,
+      id, areaId,
     ]
   );
 
-  const [updatedRows] = await pool.query('SELECT * FROM delivery_zones WHERE id = ?', [id]);
-  notifyZonesChanged('updated', id);
+  const [updatedRows] = await pool.query('SELECT * FROM delivery_zones WHERE id = ? AND area_id = ?', [id, areaId]);
+  await notifyZonesChanged('updated', id, areaId);
   res.status(200).json({ message: 'Delivery zone updated', data: zoneJson(updatedRows[0]) });
 };
 
 const deleteZone = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id < 1) return validationError(res, 'Valid zone id is required');
 
-  const [existingRows] = await pool.query('SELECT active FROM delivery_zones WHERE id = ?', [id]);
+  const [existingRows] = await pool.query('SELECT active FROM delivery_zones WHERE id = ? AND area_id = ?', [id, areaId]);
   if (existingRows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Delivery zone not found' });
   }
-  if (Number(existingRows[0].active) === 1 && await wouldLeaveNoActiveZones(id)) {
+  if (Number(existingRows[0].active) === 1 && await wouldLeaveNoActiveZones(id, areaId)) {
     return validationError(res, LAST_ACTIVE_ZONE_MESSAGE);
   }
 
@@ -349,11 +393,11 @@ const deleteZone = async (req, res) => {
   // priced with, so zone rows have no referential afterlife. Any child zones
   // (parent_zone_id = this id) fall back to ON DELETE SET NULL — they keep
   // their own boundary and simply stop being nested inside this one.
-  const [result] = await pool.query('DELETE FROM delivery_zones WHERE id = ?', [id]);
+  const [result] = await pool.query('DELETE FROM delivery_zones WHERE id = ? AND area_id = ?', [id, areaId]);
   if (result.affectedRows === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Delivery zone not found' });
   }
-  notifyZonesChanged('deleted', id);
+  await notifyZonesChanged('deleted', id, areaId);
   res.status(200).json({ message: 'Delivery zone deleted' });
 };
 

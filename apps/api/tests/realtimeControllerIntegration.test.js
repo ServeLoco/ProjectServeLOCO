@@ -63,6 +63,14 @@ describe('Controller -> realtime event integration', () => {
       const conn = mockConnection();
       pool.getConnection.mockResolvedValue(conn);
 
+      // No latitude/longitude in validatedData (these tests call the
+      // controller directly, bypassing the route validator that would
+      // normally coerce a missing pin to null) — resolveAreaForPoint
+      // short-circuits on the missing pin and resolveAreaIdForPricing goes
+      // straight to getDefaultArea(), which reads through the outer pool
+      // (never the transaction connection) for exactly one query.
+      pool.query.mockResolvedValueOnce([[{ id: 1, active: 1, is_default: 1 }]]);
+
       // SELECT user
       conn.query.mockResolvedValueOnce([[{ id: 1, name: 'Test', phone: '123', whatsapp_number: '123', blocked: 0, address: 'Addr' }]]);
       // SELECT settings
@@ -98,6 +106,9 @@ describe('Controller -> realtime event integration', () => {
     it('emits emitNotificationCreated for order_placed event', async () => {
       const conn = mockConnection();
       pool.getConnection.mockResolvedValue(conn);
+
+      // See the comment in the previous test — same 1-query area fallback.
+      pool.query.mockResolvedValueOnce([[{ id: 1, active: 1, is_default: 1 }]]);
 
       conn.query.mockResolvedValueOnce([[{ id: 1, name: 'Test', phone: '123', whatsapp_number: '123', blocked: 0, address: 'Addr' }]]);
       conn.query.mockResolvedValueOnce([[{ shop_open: 1, delivery_available: 1, night_charge: 0 }]]);

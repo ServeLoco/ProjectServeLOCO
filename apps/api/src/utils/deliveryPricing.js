@@ -285,28 +285,33 @@ function findNearestZone(lat, lng, zones) {
 }
 
 /**
- * Loads active zones. Accepts the pool or a transaction connection — both
- * expose .query().
+ * Loads active zones for ONE area. Accepts the pool or a transaction
+ * connection — both expose .query(). areaId is required (not optional) —
+ * every caller must know which area it's pricing for; see
+ * plans/multi-area.md §3.2 for why this is the single biggest perf win in
+ * the multi-area rollout (this used to load every active zone platform-wide).
  */
-async function loadActiveZones(db) {
+async function loadActiveZones(db, areaId) {
   const [rows] = await db.query(
-    'SELECT * FROM delivery_zones WHERE active = 1'
+    'SELECT * FROM delivery_zones WHERE active = 1 AND area_id = ?',
+    [areaId]
   );
   return rows;
 }
 
 /**
- * Loads active no-delivery exclusion squares. Accepts the pool or a
- * transaction connection — both expose .query().
+ * Loads active no-delivery exclusion squares for ONE area. Accepts the pool
+ * or a transaction connection — both expose .query().
  *
  * Deliberately NOT micro-cached: order creation calls this on a transaction
  * connection, and serving a process-wide cached value inside a transaction
  * would make the read non-repeatable with respect to the rest of the
  * transaction. The table is small and indexed; the query is cheap.
  */
-async function loadActiveExclusionZones(db) {
+async function loadActiveExclusionZones(db, areaId) {
   const [rows] = await db.query(
-    'SELECT * FROM delivery_exclusion_zones WHERE active = 1'
+    'SELECT * FROM delivery_exclusion_zones WHERE active = 1 AND area_id = ?',
+    [areaId]
   );
   return rows;
 }

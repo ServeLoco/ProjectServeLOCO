@@ -10,7 +10,7 @@
  */
 const { pool } = require('../db/mysql');
 const { createTtlCache } = require('./ttlCache');
-const { matchZone } = require('./deliveryPricing');
+const { matchZone, loadActiveZones, parseBoundary } = require('./deliveryPricing');
 const microCache = require('./microCache');
 
 // ---------------------------------------------------------------------
@@ -48,26 +48,18 @@ async function getDefaultArea() {
 }
 
 // ---------------------------------------------------------------------
-// Per-area delivery-zone loading, used only by resolveAreaForPoint below.
-// Deliberately a small direct query here rather than reusing
-// deliveryPricing.js's loadActiveZones(db) — that function still loads
-// EVERY active zone platform-wide (its area_id filter is TASK 10's job).
-// Querying `WHERE area_id = ?` here means resolution is genuinely
-// area-scoped from TASK 6 onward, not just after TASK 10 catches up.
-// polygon matching itself is never reimplemented — matchZone (imported
-// above) is reused unchanged.
+// Per-area delivery-zone loading, used by resolveAreaForPoint below.
+// TASK 10 gave deliveryPricing.js's loadActiveZones(db, areaId) a real
+// area filter, so this just wraps it in a short TTL cache — no more
+// duplicate query (TASK 6 had its own inline query here, specifically
+// because loadActiveZones was still platform-wide at the time; that
+// reason is gone now).
 // ---------------------------------------------------------------------
 const AREA_ZONES_CACHE_TTL_MS = 15_000;
 const areaZonesCache = createTtlCache({ ttlMs: AREA_ZONES_CACHE_TTL_MS });
 
 async function loadZonesForArea(areaId) {
-  return areaZonesCache.wrap(`zones:${areaId}`, async () => {
-    const [rows] = await pool.query(
-      'SELECT * FROM delivery_zones WHERE area_id = ? AND active = 1',
-      [areaId]
-    );
-    return rows;
-  });
+  return areaZonesCache.wrap(`zones:${areaId}`, () => loadActiveZones(pool, areaId));
 }
 
 /**
@@ -116,6 +108,23 @@ async function resolveAreaForPoint(lat, lng) {
     }
   }
   return null;
+}
+
+/**
+ * Best-effort area id for a pricing calculation (cart preview, order
+ * creation) that already has its own "nothing matched" safety net —
+ * resolveDeliveryPricing falls back to flat pricing when zones is empty,
+ * regardless of WHY it's empty. Those callers don't need resolveAreaForPoint's
+ * strict null-means-"we don't deliver here" distinction (that's a checkout-
+ * gating concern, TASK 13/27's job); they just need a definite area id to
+ * scope the zone/exclusion-zone queries with. Falls back to the default
+ * area when the pin is missing/invalid or matches no zone.
+ */
+async function resolveAreaIdForPricing(lat, lng) {
+  const resolved = await resolveAreaForPoint(lat, lng);
+  if (resolved) return resolved.areaId;
+  const defaultArea = await getDefaultArea();
+  return defaultArea ? defaultArea.id : 1;
 }
 
 // ---------------------------------------------------------------------
@@ -170,6 +179,33 @@ async function bumpCatalogVersion(areaId) {
 }
 
 /**
+ * Recomputes an area's bounding box (§3.2, TASK 10) from the union of its
+ * OWN active zones' vertices — called by every zone write
+ * (deliveryZonesController.notifyZonesChanged) so resolveAreaForPoint's
+ * bbox prefilter stays accurate. Zero active zones (or zero with a usable
+ * boundary) clears the bbox back to NULL, which bboxCandidateAreas already
+ * treats as "always a candidate" — the same safe fallback a brand new
+ * area has before it's drawn its first zone.
+ */
+async function recomputeAreaBbox(areaId) {
+  const zones = await loadActiveZones(pool, areaId);
+  let minLat = null, maxLat = null, minLng = null, maxLng = null;
+  for (const zone of zones) {
+    for (const point of parseBoundary(zone.boundary)) {
+      if (minLat === null || point.lat < minLat) minLat = point.lat;
+      if (maxLat === null || point.lat > maxLat) maxLat = point.lat;
+      if (minLng === null || point.lng < minLng) minLng = point.lng;
+      if (maxLng === null || point.lng > maxLng) maxLng = point.lng;
+    }
+  }
+  await pool.query(
+    'UPDATE areas SET min_lat = ?, max_lat = ?, min_lng = ?, max_lng = ? WHERE id = ?',
+    [minLat, maxLat, minLng, maxLng, areaId]
+  );
+  areasCache.del(ALL_AREAS_KEY);
+}
+
+/**
  * Fans out to every area-scoped cache. Partial today, by necessity:
  * microCache namespaces (dashboard/categories/delivery-zones) are
  * genuinely area-keyed as of TASK 4, so busting them by areaId works
@@ -215,6 +251,8 @@ module.exports = {
   listAreas,
   getDefaultArea,
   resolveAreaForPoint,
+  resolveAreaIdForPricing,
+  recomputeAreaBbox,
   requestAreaId,
   assertAreaAccess,
   bustAreaCaches,

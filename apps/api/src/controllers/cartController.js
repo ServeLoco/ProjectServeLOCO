@@ -1,6 +1,7 @@
 const { pool } = require('../db/mysql');
 const { isId, isPositiveInteger, validateCoordinates } = require('../validators');
 const { resolveDeliveryPricing, loadActiveZones, loadActiveExclusionZones, parseBoundary, polygonAreaKm2 } = require('../utils/deliveryPricing');
+const { resolveAreaIdForPricing } = require('../utils/areaScope');
 const { roundMoney, toMoney } = require('../utils/money');
 const { calculateRainCharge } = require('../utils/rainCharge');
 const { validateCoupon, validateCouponById, pickBestAutoApply, findApplicableCoupons, getNextFreeDeliveryThreshold, getNearestUnlockableCoupon } = require('../utils/coupons');
@@ -210,15 +211,22 @@ const calculateCart = async (req, res) => {
   let requiresLocation = false;
   let deliveryMessage = '';
 
+  // Resolved from the SAME pin used for pricing below — resolveDeliveryPricing
+  // already has its own "nothing matched" -> flat-pricing fallback, so this
+  // only needs a best-effort area id to scope the zone queries with, not the
+  // stricter null-means-"no delivery" distinction resolveAreaForPoint makes
+  // (that's a checkout-gating concern, TASK 27's job).
+  const deliveryAreaId = await resolveAreaIdForPricing(customerLat, customerLng);
+
   // Radius-zone pricing: when active (flag + center pin + coords + zones), the
   // matched zone's charges/ETAs/COD policy replace the flat settings values.
   // Any missing precondition falls back to the legacy flat pricing inside the
   // resolver, so the rest of this function (incl. the coupon block) is
   // agnostic to which mode priced the cart.
-  const zones = settings.radius_pricing_active ? await loadActiveZones(pool) : [];
+  const zones = settings.radius_pricing_active ? await loadActiveZones(pool, deliveryAreaId) : [];
   // Exclusion squares block delivery regardless of zone/flat pricing mode,
   // so they're always loaded (small table) — not gated by radius_pricing_active.
-  const exclusionZones = await loadActiveExclusionZones(pool);
+  const exclusionZones = await loadActiveExclusionZones(pool, deliveryAreaId);
   const pricing = resolveDeliveryPricing({
     customerLat,
     customerLng,
@@ -661,12 +669,13 @@ const validateCouponHandler = async (req, res) => {
     );
     const zoneSettings = settingRows[0] || {};
     if (zoneSettings.radius_pricing_active) {
+      const deliveryAreaId = await resolveAreaIdForPricing(customerLat, customerLng);
       const pricing = resolveDeliveryPricing({
         customerLat,
         customerLng,
         deliveryType: 'standard',
         settings: zoneSettings,
-        zones: await loadActiveZones(pool),
+        zones: await loadActiveZones(pool, deliveryAreaId),
       });
       zoneId = pricing.zone ? pricing.zone.id : null;
     }
@@ -768,12 +777,13 @@ const getAvailableCoupons = async (req, res) => {
     );
     const zoneSettings = settingRows[0] || {};
     if (zoneSettings.radius_pricing_active) {
+      const deliveryAreaId = await resolveAreaIdForPricing(customerLat, customerLng);
       const pricing = resolveDeliveryPricing({
         customerLat,
         customerLng,
         deliveryType: 'standard',
         settings: zoneSettings,
-        zones: await loadActiveZones(pool),
+        zones: await loadActiveZones(pool, deliveryAreaId),
       });
       zoneId = pricing.zone ? pricing.zone.id : null;
     }

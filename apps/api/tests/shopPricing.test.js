@@ -17,6 +17,7 @@ const adminRoutes = require('../src/routes/adminRoutes');
 const orderRoutes = require('../src/routes/orderRoutes');
 const shopRoutes = require('../src/routes/shopRoutes');
 const { pool } = require('../src/db/mysql');
+const areaScope = require('../src/utils/areaScope');
 
 jest.mock('../src/db/mysql', () => ({
   pool: { query: jest.fn(), getConnection: jest.fn() },
@@ -47,7 +48,20 @@ shopApp.use('/api/shop', shopRoutes);
 const adminToken = jwt.sign({ id: 'admin', role: 'admin' }, process.env.JWT_SECRET || 'secret');
 const customerToken = (id) => jwt.sign({ id, role: 'customer' }, process.env.JWT_SECRET || 'test_jwt_secret_that_is_long_enough');
 
-beforeEach(() => { jest.clearAllMocks(); });
+beforeEach(() => {
+  jest.clearAllMocks();
+  areaScope._resetCachesForTests();
+});
+
+// TASK 10: order creation resolves which area the (validator-normalized,
+// here effectively 0,0) pin belongs to via the outer pool — 2 queries
+// (areas list, then a zone-match check that finds nothing) — before the
+// rest of the transaction runs on mockConnection.
+const queueAreaResolution = () => {
+  pool.query
+    .mockResolvedValueOnce([[{ id: 1, active: 1, is_default: 1, min_lat: null, max_lat: null, min_lng: null, max_lng: null }]])
+    .mockResolvedValueOnce([[]]);
+};
 
 // ─────────────────────────────────────────────────────────────────────────
 // PATCH /api/admin/products/pricing
@@ -196,6 +210,7 @@ describe('Order creation snapshots shop pricing', () => {
       rollback: jest.fn(),
       release: jest.fn(),
     };
+    queueAreaResolution();
     pool.getConnection.mockResolvedValue(mockConnection);
 
     const res = await request(orderApp)
@@ -237,6 +252,7 @@ describe('Order creation snapshots shop pricing', () => {
       rollback: jest.fn(),
       release: jest.fn(),
     };
+    queueAreaResolution();
     pool.getConnection.mockResolvedValue(mockConnection);
 
     const res = await request(orderApp)
@@ -272,6 +288,7 @@ describe('Order creation snapshots shop pricing', () => {
       rollback: jest.fn(),
       release: jest.fn(),
     };
+    queueAreaResolution();
     pool.getConnection.mockResolvedValue(mockConnection);
 
     const res = await request(orderApp)
@@ -307,6 +324,7 @@ describe('Order creation snapshots shop pricing', () => {
       rollback: jest.fn(),
       release: jest.fn(),
     };
+    queueAreaResolution();
     pool.getConnection.mockResolvedValue(mockConnection);
 
     const res = await request(orderApp)

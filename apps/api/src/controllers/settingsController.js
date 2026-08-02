@@ -296,7 +296,10 @@ const updateSettings = async (req, res) => {
     const wantsRadiusPricing = body.radius_pricing_active === true || body.radius_pricing_active === 'true'
       || body.radius_pricing_active === 1 || body.radius_pricing_active === '1';
     if (wantsRadiusPricing) {
-      const [zoneRows] = await pool.query('SELECT COUNT(*) AS count FROM delivery_zones WHERE active = 1');
+      // area_id here matters for real: without it, area 1's admin could
+      // enable radius pricing believing zones exist, when the count was
+      // actually coming from a DIFFERENT area's zones.
+      const [zoneRows] = await pool.query('SELECT COUNT(*) AS count FROM delivery_zones WHERE active = 1 AND area_id = ?', [areaId]);
       if (Number(zoneRows[0]?.count) === 0) {
         return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Add at least one active delivery zone before enabling radius pricing' });
       }

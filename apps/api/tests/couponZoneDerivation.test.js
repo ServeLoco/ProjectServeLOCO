@@ -3,6 +3,7 @@ const express = require('express');
 const cartRoutes = require('../src/routes/cartRoutes');
 const { pool } = require('../src/db/mysql');
 const jwt = require('jsonwebtoken');
+const areaScope = require('../src/utils/areaScope');
 
 jest.mock('../src/db/mysql', () => ({
   pool: { query: jest.fn(), getConnection: jest.fn() }
@@ -51,6 +52,17 @@ const ZONE_ROW = {
   cod_enabled: 1, active: 1,
 };
 
+const AREA_ROW = { id: 1, code: 'A1', name: 'Area 1', active: 1, is_default: 1, min_lat: null, max_lat: null, min_lng: null, max_lng: null };
+
+// TASK 10: a request carrying a pin now resolves which area it belongs to
+// (via the outer pool, 2 queries: the areas list, then a zone-match check)
+// before loading that area's pricing zones.
+const queueAreaResolution = () => {
+  pool.query
+    .mockResolvedValueOnce([[AREA_ROW]])
+    .mockResolvedValueOnce([[ZONE_ROW]]);
+};
+
 const ZONE_SETTINGS = {
   delivery_charge: '20.00',
   night_charge: 0,
@@ -70,12 +82,13 @@ const ZONE_SETTINGS = {
 describe('POST /api/cart/validate-coupon — zone is derived server-side', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    areaScope._resetCachesForTests();
   });
 
   it('ignores a delivery_zone_id supplied in the request body', async () => {
-    pool.query
-      .mockResolvedValueOnce([[ZONE_SETTINGS]]) // settings
-      .mockResolvedValueOnce([[ZONE_ROW]]);     // active zones
+    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]); // settings
+    queueAreaResolution();
+    pool.query.mockResolvedValueOnce([[ZONE_ROW]]);     // active zones
 
     const res = await request(app)
       .post('/api/cart/validate-coupon')
@@ -95,9 +108,9 @@ describe('POST /api/cart/validate-coupon — zone is derived server-side', () =>
   });
 
   it('resolves no zone when the pin is outside every zone', async () => {
-    pool.query
-      .mockResolvedValueOnce([[ZONE_SETTINGS]])
-      .mockResolvedValueOnce([[ZONE_ROW]]);
+    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]);
+    queueAreaResolution();
+    pool.query.mockResolvedValueOnce([[ZONE_ROW]]);
 
     const far = offsetPoint(CENTER.lat, CENTER.lng, 0, 50);
     const res = await request(app)
@@ -143,12 +156,13 @@ describe('POST /api/cart/validate-coupon — zone is derived server-side', () =>
 describe('GET /api/cart/available-coupons — zone is derived server-side', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    areaScope._resetCachesForTests();
   });
 
   it('ignores a delivery_zone_id supplied as a query param', async () => {
-    pool.query
-      .mockResolvedValueOnce([[ZONE_SETTINGS]]) // settings
-      .mockResolvedValueOnce([[ZONE_ROW]]);     // active zones
+    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]); // settings
+    queueAreaResolution();
+    pool.query.mockResolvedValueOnce([[ZONE_ROW]]);     // active zones
 
     const res = await request(app)
       .get('/api/cart/available-coupons')
@@ -167,9 +181,9 @@ describe('GET /api/cart/available-coupons — zone is derived server-side', () =
   });
 
   it('resolves no zone when the pin is outside every zone', async () => {
-    pool.query
-      .mockResolvedValueOnce([[ZONE_SETTINGS]])
-      .mockResolvedValueOnce([[ZONE_ROW]]);
+    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]);
+    queueAreaResolution();
+    pool.query.mockResolvedValueOnce([[ZONE_ROW]]);
 
     const far = offsetPoint(CENTER.lat, CENTER.lng, 0, 50);
     const res = await request(app)

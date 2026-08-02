@@ -51,6 +51,8 @@ const SCOPED_TABLES = [
 // never remove from it, one Phase C task at a time.
 const SWEPT_TABLES = [
   'settings', // TASK 9
+  'delivery_zones', // TASK 10
+  'delivery_exclusion_zones', // TASK 10
 ];
 
 // { file: relative path from apps/api, line: 1-indexed, reason: why this is OK }
@@ -69,6 +71,35 @@ const ALLOWLIST = [
       "getUsedImageIds' settings query — images are global (§2.5/§2.6), so " +
       '"is this image used anywhere" is deliberately a cross-area scan of ' +
       'every area\'s upi_qr_image_id, not just one area\'s.',
+  },
+  {
+    file: 'src/controllers/deliveryZonesController.js',
+    line: 148,
+    reason:
+      "resolveParentZoneId's ancestor-walk (ancestor lookup by parent_zone_id, " +
+      'not the initial parent fetch, which IS area-scoped a few lines above). ' +
+      "A zone's parent_zone_id can only ever point at a zone in the SAME area " +
+      '— every write in this file enforces that — so once the immediate parent ' +
+      'is confirmed same-area, walking further ancestors by id alone cannot ' +
+      'cross into another area.',
+  },
+  {
+    file: 'src/utils/coupons.js',
+    line: 240,
+    reason:
+      "getZoneAndAncestorIds' ancestor-walk — same reasoning as the " +
+      'deliveryZonesController.js entry above (parent_zone_id never crosses ' +
+      'areas). Also: this file is the coupon rule engine, which the spec ' +
+      'explicitly says to scope only at its inputs, never inside its logic.',
+  },
+  {
+    file: 'src/controllers/couponController.js',
+    line: 137,
+    reason:
+      'Zone-name lookup for a coupon\'s targeted zones — coupons/coupon_zones ' +
+      "aren't area-scoped yet (TASK 14 owns that full redesign); scoping just " +
+      'this JOIN\'s delivery_zones side ahead of TASK 14 would be premature ' +
+      'and wouldn\'t make the read meaningfully safer on its own.',
   },
 ];
 

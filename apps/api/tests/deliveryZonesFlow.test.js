@@ -4,6 +4,7 @@ const cartRoutes = require('../src/routes/cartRoutes');
 const orderRoutes = require('../src/routes/orderRoutes');
 const { pool } = require('../src/db/mysql');
 const jwt = require('jsonwebtoken');
+const areaScope = require('../src/utils/areaScope');
 
 jest.mock('../src/db/mysql', () => ({
   pool: { query: jest.fn(), getConnection: jest.fn() }
@@ -85,6 +86,23 @@ const ZONE_SETTINGS = {
   radius_pricing_active: 1,
 };
 
+// area 1, no bbox computed yet (matches every real install until a zone
+// write recomputes it) — bboxCandidateAreas treats that as "always a
+// candidate", same as production today.
+const AREA_ROW = { id: 1, code: 'A1', name: 'Area 1', active: 1, is_default: 1, min_lat: null, max_lat: null, min_lng: null, max_lng: null };
+
+// TASK 10: calculateCart/createOrder now resolve which area a pin belongs
+// to (via the outer `pool`, never the transaction connection — see
+// orderController.js's comment) before loading that area's pricing zones.
+// That's 2 extra pool.query calls ahead of the real zones/exclusion-zones
+// queries: the areas list, then a zone-match check against the same
+// geometry the pricing step will use next.
+const queueAreaResolution = () => {
+  pool.query
+    .mockResolvedValueOnce([[AREA_ROW]])
+    .mockResolvedValueOnce([ZONE_ROWS]);
+};
+
 const makeConnection = () => ({
   beginTransaction: jest.fn(),
   query: jest.fn(),
@@ -96,13 +114,16 @@ const makeConnection = () => ({
 describe('Delivery zone pricing — cart preview', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    areaScope._resetCachesForTests();
   });
 
   it('prices from the matched zone with dual-cased zone fields', async () => {
     const p = pointAtKm(3);
     pool.query
       .mockResolvedValueOnce([[ZONE_SETTINGS]]) // settings
-      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]) // products
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]); // products
+    queueAreaResolution();
+    pool.query
       .mockResolvedValueOnce([ZONE_ROWS]) // active zones
       .mockResolvedValueOnce([[]]); // active exclusion zones
 
@@ -136,7 +157,9 @@ describe('Delivery zone pricing — cart preview', () => {
     const p = pointAtKm(7);
     pool.query
       .mockResolvedValueOnce([[ZONE_SETTINGS]])
-      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]])
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]);
+    queueAreaResolution();
+    pool.query
       .mockResolvedValueOnce([ZONE_ROWS]) // active zones
       .mockResolvedValueOnce([[]]); // active exclusion zones
 
@@ -156,7 +179,14 @@ describe('Delivery zone pricing — cart preview', () => {
     const p = pointAtKm(15);
     pool.query
       .mockResolvedValueOnce([[ZONE_SETTINGS]])
-      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]])
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]);
+    // No zone matches this pin, so resolveAreaForPoint returns null and
+    // resolveAreaIdForPricing falls back to the default area — but that
+    // fallback reuses the SAME cached areas list from the bbox check
+    // (areaScope's 60s areasCache), so it's still exactly 2 extra calls,
+    // not 3.
+    queueAreaResolution();
+    pool.query
       .mockResolvedValueOnce([ZONE_ROWS]) // active zones
       .mockResolvedValueOnce([[]]); // active exclusion zones
 
@@ -180,7 +210,12 @@ describe('Delivery zone pricing — cart preview', () => {
   it('refuses to quote when no coordinates are sent and zone pricing is on', async () => {
     pool.query
       .mockResolvedValueOnce([[ZONE_SETTINGS]])
-      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]])
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]);
+    // No pin at all: resolveAreaForPoint short-circuits before touching the
+    // DB (Number(undefined) isn't finite), so resolveAreaIdForPricing goes
+    // straight to getDefaultArea() — only 1 extra call, not 2.
+    pool.query.mockResolvedValueOnce([[AREA_ROW]]);
+    pool.query
       .mockResolvedValueOnce([ZONE_ROWS]) // active zones
       .mockResolvedValueOnce([[]]); // active exclusion zones
 
@@ -201,7 +236,9 @@ describe('Delivery zone pricing — cart preview', () => {
     const p = pointAtKm(3);
     pool.query
       .mockResolvedValueOnce([[ZONE_SETTINGS]])
-      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]])
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]);
+    queueAreaResolution();
+    pool.query
       .mockResolvedValueOnce([ZONE_ROWS]) // active zones
       .mockResolvedValueOnce([[]]); // active exclusion zones
     pickBestAutoApply.mockResolvedValueOnce({
@@ -219,17 +256,76 @@ describe('Delivery zone pricing — cart preview', () => {
     expect(res.body.discount).toBe(10);
     expect(res.body.deliveryMessage).toBe('Free delivery unlocked!');
   });
+
+  // TASK 10.6 — the biggest perf win in the spec (§3.2): before this task,
+  // loadActiveZones had no area filter at all and a single cart preview
+  // walked every active zone platform-wide. This proves the opposite is
+  // now true with two REAL areas in play: area 2's zone data exists (a
+  // huge boundary that would happily swallow this test's pin too, if
+  // fetched) but the query for area 1's pin is scoped to area_id = 1 and
+  // never touches it.
+  it('a cart preview in area 1 loads only area 1\'s zones — area 2 is never queried at all', async () => {
+    const p = pointAtKm(3);
+    // Both areas are real bbox candidates (area 2 covers this same region
+    // at a huge scale) — the bbox prefilter alone can't rule area 2 out,
+    // so this actually exercises resolveAreaForPoint's per-area loop, not
+    // just a single-candidate happy path.
+    const AREA_1 = { id: 1, code: 'A1', name: 'Area 1', active: 1, is_default: 1, min_lat: null, max_lat: null, min_lng: null, max_lng: null };
+    const AREA_2 = { id: 2, code: 'A2', name: 'Area 2', active: 1, is_default: 0, min_lat: null, max_lat: null, min_lng: null, max_lng: null };
+
+    pool.query
+      .mockResolvedValueOnce([[ZONE_SETTINGS]]) // settings
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]) // products
+      .mockResolvedValueOnce([[AREA_1, AREA_2]]) // bbox candidate areas — both, area 1 listed first
+      .mockResolvedValueOnce([ZONE_ROWS]) // resolveAreaForPoint's zone-match query for area 1 — matches
+      .mockResolvedValueOnce([ZONE_ROWS]) // the REAL pricing zones query, scoped to area 1
+      .mockResolvedValueOnce([[]]) // active exclusion zones
+      .mockResolvedValueOnce([[{ type: 'packed' }]]); // store-type derivation from items — unrelated to zones
+    // Deliberately NOT mocking an 8th call: if area 2 were ever queried for
+    // its zones (the isolation this task exists to guarantee), the mock
+    // queue runs dry and loadActiveZones' destructure throws — this test
+    // would fail with a 500, not a wrong-price assertion.
+
+    const res = await request(app)
+      .post('/api/cart/calculate')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ latitude: p.lat, longitude: p.lng, items: [{ productId: 1, quantity: 2 }] });
+
+    expect(res.statusCode).toEqual(200);
+    // Priced from Near Village (id 1, charge 10) — area 1's zone.
+    expect(res.body.deliveryCharge).toBe(10);
+    expect(res.body.deliveryZone.id).toBe(1);
+
+    // 7 total: settings, products, areas, area-1 zone-match, area-1 pricing
+    // zones, exclusion zones, store-type derivation. Area 2's zones were
+    // never fetched — resolveAreaForPoint's loop returned as soon as area 1
+    // matched, and every actual delivery_zones query carries area_id = 1.
+    expect(pool.query).toHaveBeenCalledTimes(7);
+    const zoneQueryCalls = pool.query.mock.calls.filter(
+      ([sql]) => typeof sql === 'string' && sql.includes('FROM delivery_zones')
+    );
+    expect(zoneQueryCalls).toHaveLength(2); // zone-match + real pricing zones
+    for (const [sql, params] of zoneQueryCalls) {
+      expect(sql).toContain('area_id = ?');
+      expect(params).toContain(1);
+      expect(params).not.toContain(2);
+    }
+  });
 });
 
 describe('Delivery zone pricing — order creation', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    areaScope._resetCachesForTests();
   });
 
   it('rejects an out-of-range pin with OUT_OF_DELIVERY_RANGE', async () => {
     const p = pointAtKm(15);
     const mockConnection = makeConnection();
     pool.getConnection.mockResolvedValue(mockConnection);
+    // Area resolution reads through the outer `pool`, never the transaction
+    // connection — see orderController.js's comment.
+    queueAreaResolution();
     mockConnection.query
       .mockResolvedValueOnce([[{ blocked: 0 }]]) // user
       .mockResolvedValueOnce([[ZONE_SETTINGS]]) // settings
@@ -257,6 +353,7 @@ describe('Delivery zone pricing — order creation', () => {
     const p = pointAtKm(7);
     const mockConnection = makeConnection();
     pool.getConnection.mockResolvedValue(mockConnection);
+    queueAreaResolution();
     mockConnection.query
       .mockResolvedValueOnce([[{ blocked: 0 }]])
       .mockResolvedValueOnce([[ZONE_SETTINGS]])
@@ -283,6 +380,7 @@ describe('Delivery zone pricing — order creation', () => {
     const p = pointAtKm(7);
     const mockConnection = makeConnection();
     pool.getConnection.mockResolvedValue(mockConnection);
+    queueAreaResolution();
     mockConnection.query
       .mockResolvedValueOnce([[{ blocked: 0 }]])
       .mockResolvedValueOnce([[ZONE_SETTINGS]])
@@ -338,6 +436,14 @@ describe('Delivery zone pricing — order creation', () => {
   it('rejects an order with no coordinates while zone pricing is on', async () => {
     const mockConnection = makeConnection();
     pool.getConnection.mockResolvedValue(mockConnection);
+    // Unlike cartController (which reads req.body directly, staying
+    // undefined when absent), the order route's validator normalizes a
+    // missing latitude/longitude to `null` before the controller ever sees
+    // it — Number(null) is 0, which IS finite, so resolveAreaForPoint does
+    // NOT short-circuit here. It runs its full 2-query check (against
+    // 0°N 0°E, which matches nothing), then resolveAreaIdForPricing falls
+    // back to the default area from that same cached areas list.
+    queueAreaResolution();
     mockConnection.query
       .mockResolvedValueOnce([[{ blocked: 0 }]])
       .mockResolvedValueOnce([[ZONE_SETTINGS]])

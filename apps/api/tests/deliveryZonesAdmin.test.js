@@ -54,6 +54,15 @@ const ZONE_ROW = {
 describe('Admin delivery zones CRUD', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    // Every zone write now also calls notifyZonesChanged -> recomputeAreaBbox
+    // (TASK 10), which issues its own loadActiveZones + UPDATE areas queries
+    // after whatever a given test explicitly mocked. None of these tests
+    // assert on that bbox recompute, so a harmless default fallback (rather
+    // than every create/update/delete test appending extra
+    // mockResolvedValueOnce calls it doesn't care about) keeps them focused
+    // on what they're actually testing. Explicit mockResolvedValueOnce
+    // chains below still take priority — this only catches calls beyond them.
+    pool.query.mockImplementation(async () => [[], {}]);
   });
 
   it('lists zones with dual-cased fields', async () => {
@@ -110,10 +119,13 @@ describe('Admin delivery zones CRUD', () => {
     expect(res.body.data.name).toBe('Main Village');
     expect(res.body.data.parentZoneId).toBeNull();
 
+    // area_id is now the first bound param (INSERT INTO delivery_zones
+    // (area_id, name, boundary, parent_zone_id, ...)).
     const insertParams = pool.query.mock.calls[0][1];
-    expect(insertParams[0]).toBe('Main Village');
-    expect(JSON.parse(insertParams[1])).toEqual(SQUARE_BOUNDARY);
-    expect(insertParams[2]).toBeNull(); // parent_zone_id
+    expect(insertParams[0]).toBe(1); // area_id
+    expect(insertParams[1]).toBe('Main Village');
+    expect(JSON.parse(insertParams[2])).toEqual(SQUARE_BOUNDARY);
+    expect(insertParams[3]).toBeNull(); // parent_zone_id
   });
 
   it('creates a zone nested inside a parent', async () => {
@@ -131,7 +143,7 @@ describe('Admin delivery zones CRUD', () => {
     expect(res.body.data.parentZoneId).toBe(1);
 
     const insertParams = pool.query.mock.calls[1][1];
-    expect(insertParams[2]).toBe(1); // parent_zone_id
+    expect(insertParams[3]).toBe(1); // parent_zone_id (area_id, name, boundary, parent_zone_id, ...)
   });
 
   it('rejects a boundary with fewer than 3 points', async () => {
