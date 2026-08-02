@@ -1186,26 +1186,63 @@ explicitly NOT this task's "report handlers").
 
 ## Phase D — Shared libraries
 
-### [ ] TASK 18 — Library tables + image dedupe
+### [x] TASK 18 — Library tables + image dedupe
 **Spec:** §2.5, §2.6, §6.5 · **Files:** `[api] src/db/migrate.js`,
 `src/controllers/imageController.js`, `src/utils/imageStorage.js`
 
-- [ ] 18.1 `product_library` — `id, name, description, image_id, unit_id, variant_prompt,
-      default_store_type, default_category_slug, suggested_price,
-      status ENUM('draft','published'), archived`, timestamps.
-- [ ] 18.2 `library_variants` — `id, library_product_id, label, display_order, is_default`.
-- [ ] 18.3 `products.library_product_id INT NULL` + index `(library_product_id)` (propagation
-      fan-out, §3.3). `product_variants.library_variant_id INT NULL` + index. Both at end of row.
-- [ ] 18.4 `images.sha256 CHAR(64) NULL` + **non-unique** index. Production already holds duplicate
-      uploads; a UNIQUE index fails the migration outright (§2.6).
-- [ ] 18.5 Hash on upload; return the existing row instead of inserting a duplicate.
-- [ ] 18.6 Batched backfill of `sha256` on existing rows. **Populates the column only** — never
-      deletes, never merges.
-- [ ] 18.7 **Extend `getUsedImageIds` (`imageController.js:15-43`) with `product_library.image_id` in
-      this same commit** (§6.5). It scans a hard-coded list of six tables and `products.image_id` has
-      no FK — a missed table means deleting an image the library still needs.
-- [ ] 18.8 **No auto-promotion** of existing products into the library. They stay local-only until an
-      admin promotes them in TASK 19.
+- [x] 18.1 `product_library` created exactly as specced: `id, name, description, image_id, unit_id,
+      variant_prompt, default_store_type, default_category_slug, suggested_price,
+      status ENUM('draft','published') DEFAULT 'draft', archived` + timestamps. `unit_id` is a bare
+      nullable `INT` with no FK yet — the real `units` table doesn't exist until TASK 23 (§2.7);
+      same forward-declared-nullable pattern `products.shop_id`/`group_id` already use.
+- [x] 18.2 `library_variants` created: `id, library_product_id, label, display_order, is_default` +
+      timestamps, `FOREIGN KEY (library_product_id) REFERENCES product_library(id) ON DELETE CASCADE`.
+- [x] 18.3 `products.library_product_id INT NULL` and `product_variants.library_variant_id INT NULL`
+      both added via plain `ensureColumn` (no `AFTER` clause — MySQL appends to the end of the row by
+      default, satisfying "at end of row" without needing to say so explicitly). Both indexed
+      (`idx_products_library_product`, `idx_product_variants_library_variant`) for the propagation
+      fan-out `UPDATE ... WHERE library_product_id = ?` TASK 19 will run.
+- [x] 18.4 `images.sha256 CHAR(64) NULL` + non-unique `idx_images_sha256`. Live-verified: `ALTER TABLE`
+      succeeded against the real dev DB with its existing 10 rows (a unique index would have needed
+      every existing hash to already be distinct, unverified until the backfill below actually ran).
+- [x] 18.5 `uploadImage` now hashes the **raw upload buffer** (before optimization/thumbnailing) and
+      checks `images.sha256` first — a hit skips processing, storage, and the INSERT entirely, not just
+      the DB write, returning the existing row with `deduplicated: true` (200). A miss proceeds exactly
+      as before, now also storing the computed `sha256` on insert (`deduplicated: false`, 201).
+- [x] 18.6 `backfillImageHashes()` in `migrate.js`: batched (200/loop) `SELECT ... WHERE sha256 IS NULL`,
+      reads each row's actual stored bytes (new `imageStorage.getStoredBuffer` — disk `readFileSync` or
+      the new `s3.downloadBuffer`, added for this), hashes, and writes back. Populates only — no row is
+      ever deleted or merged, even when two rows land on the same hash (§2.6's own rule). A single
+      unreadable file (moved/deleted underneath the DB row) is logged and marked with `sha256 = ''`
+      (distinct from `NULL`) so the batch loop terminates instead of retrying the same broken row
+      forever — one dedupe miss on a broken row is an acceptable trade for a migration that always
+      finishes. Live-verified against the real dev DB: all 10 pre-existing images (all `storage_type =
+      'disk'`) hashed successfully on the first run (real 64-char hex values, confirmed via direct
+      query), and the second migration run correctly did nothing (idempotent — no re-hash, no log line).
+- [x] 18.7 `getUsedImageIds` extended with a 7th scan, `product_library.image_id`, in this exact commit
+      — verified live (`getImages`/`cleanupOrphanedImage` both route through the same function) and by
+      a new dedicated test proving a library-only image is reported in-use and blocks cleanup.
+- [x] 18.8 Confirmed: nothing in this commit reads from or writes to `products`/`product_variants` to
+      backfill `library_product_id`/`library_variant_id` — both tables start (and stay, after this
+      task) with every row's library columns `NULL`. `product_library` itself starts empty. Promotion
+      is entirely TASK 19's job.
+
+**Test churn:** 2 test files broke from the new 7th `getUsedImageIds` query consuming a mock slot: TASK
+15's guardrail ALLOWLIST entry for `imageController.js`'s settings scan needed its line number bumped
+(33, was 27 — new comment lines shifted it) rather than a real new violation, and
+`tests/settingsArea.test.js`'s `getUsedImageIds` test needed one more queued `mockResolvedValueOnce` for
+the `product_library` call. Added `tests/imageDedup.test.js` (new): dedupe-hit skips the INSERT entirely,
+a miss inserts with a real computed sha256, and a library-only image blocks `cleanupOrphanedImage`.
+
+**Live verification (local dev DB, migration re-run clean and idempotent):** `product_library`/
+`library_variants` tables created empty; `products.library_product_id`/`product_variants.library_variant_id`
+both present, indexed, and `NULL` on every existing row (confirmed via `SHOW COLUMNS`/`DESCRIBE`);
+`images.sha256` backfilled on all 10 existing rows with real hashes on the first run, silent no-op on
+the second. Full Jest suite (93/93 suites, 1004/1005 tests, 1 pre-existing skip) covers the upload/dedupe
+HTTP flow via mocks (no admin JWT session available locally, same constraint as every prior task).
+
+**Guardrail:** unaffected — `product_library`/`library_variants` are global tables, never in
+`SCOPED_TABLES`. Remaining informational violation count: 239 (unchanged from TASK 17).
 
 **Commit:** `feat: AREA TASK 18 — product library tables + image dedupe`
 
