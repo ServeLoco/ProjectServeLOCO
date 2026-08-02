@@ -1400,22 +1400,57 @@ aren't in `SWEPT_TABLES` yet.
 
 **Commit:** `feat: AREA TASK 20 — library edit propagation`
 
-### [ ] TASK 21 — Category + store-mode libraries
+### [x] TASK 21 — Category + store-mode libraries
 **Spec:** §2.7 · **Files:** `[api] src/db/migrate.js`, `src/utils/productLibrary.js` (reuse),
 `src/controllers/categoryController.js`, `storeModeController.js`, `imageController.js`
 
-- [ ] 21.1 `category_library (id, name, slug, type, image_id, archived)`;
-      `store_mode_library (id, slug, label, icon_image_id, is_system, archived)`.
-- [ ] 21.2 `categories.library_category_id` and `store_modes.library_store_mode_id`, both nullable
-      + indexed.
-- [ ] 21.3 Propagate identity (name/slug/icon) via the **same** batched mechanism as TASK 20.
-      **Do not write a second propagation path** (§4.5).
-- [ ] 21.4 `active`, `display_order`, `is_default` are strictly per-area and **never** propagated.
-- [ ] 21.5 NULL library link = local-only, fully editable, exactly as today.
-- [ ] 21.6 **Extend `getUsedImageIds` with `category_library.image_id` and
-      `store_mode_library.icon_image_id` in this same commit** (§6.5).
-- [ ] 21.7 Test: renaming a library category reaches both areas and changes neither area's
-      `display_order`.
+- [x] 21.1 `category_library (id, name, slug, type, image_id, archived)` and `store_mode_library (id,
+      slug, label, icon_image_id, is_system, archived)` created exactly as specced, timestamps added.
+- [x] 21.2 `categories.library_category_id` and `store_modes.library_store_mode_id`, both nullable
+      `ensureColumn` + `ensureIndex` (`idx_categories_library_category`,
+      `idx_store_modes_library_store_mode`) — no FK, same forward-declared-nullable pattern as
+      `products.library_product_id`.
+- [x] 21.3 `propagateCategoryLibraryEdit(conn, libraryCategoryId)` and
+      `propagateStoreModeLibraryEdit(conn, libraryStoreModeId)` added to `productLibrary.js` — same
+      shape as TASK 20's `propagateLibraryEdit` (re-read the library row fresh, one explicit-column-list
+      `UPDATE ... WHERE library_*_id = ?`, affected-area list from one `SELECT DISTINCT area_id`), not a
+      copy-pasted second mechanism. Categories/store-modes have no child collection like variants, so
+      there's no add/remove pass — identity propagation only. **No new admin CRUD/materialize-to-area
+      endpoints added for either library in this task** — the checklist's own bullets (21.1-21.7) ask
+      for the tables + propagation mechanism + image-cleanup safety, not a TASK-19-equivalent full CRUD
+      surface (TASK 19's own bullets explicitly listed `GET/POST/PATCH /admin/library` etc.; TASK 21's
+      don't list any new route at all) — `categoryController.js`/`storeModeController.js` needed no
+      changes beyond confirming their existing create/update paths already leave the new
+      `library_*_id` columns `NULL` by default (21.5), which they do, unchanged.
+- [x] 21.4 Confirmed by test and live verification: neither propagation function's UPDATE column list
+      ever mentions `active`, `display_order`, or `is_default`.
+- [x] 21.5 Confirmed: a `NULL` `library_category_id`/`library_store_mode_id` row is never touched by
+      either propagation function (both `UPDATE`s are scoped `WHERE library_*_id = ?`, never matching
+      `NULL`) — local-only categories/store-modes stay fully editable exactly as today, no code path
+      changed for them at all.
+- [x] 21.6 `getUsedImageIds` (`imageController.js`) extended with `category_library.image_id` and
+      `store_mode_library.icon_image_id` in this same commit, alongside TASK 18's `product_library.image_id`
+      — now 9 scans total.
+- [x] 21.7 New tests (`propagateCategoryLibraryEdit`/`propagateStoreModeLibraryEdit`, 4 cases) assert
+      the exact generated SQL text/params and confirm `display_order`/`active`/`is_default` never
+      appear in either UPDATE's column list. Live-verified end-to-end against the real dev DB too:
+      created a temp library category + a temp library store mode, each linked to one real area-1 row,
+      renamed both library items, propagated, and confirmed the area rows picked up the new
+      name/label while `active`/`display_order` stayed byte-identical — cleaned up afterward, no
+      orphaned rows.
+
+**Test churn:** 2 test files broke, both the same TASK-18-established root cause (a new
+`getUsedImageIds` scan shifts the guardrail's allowlisted line number and consumes one more mock slot in
+`tests/settingsArea.test.js`) — not a new pattern, same fix shape as TASK 18's.
+
+**Live verification (local dev DB, migration re-run clean):** `category_library`/`store_mode_library`
+created empty; `categories.library_category_id`/`store_modes.library_store_mode_id` present, indexed,
+`NULL` on every existing row. Full category/store-mode propagation round trip proven against real
+MySQL (see 21.7). Full Jest suite: 95/95 suites, 1024/1025 tests, 1 pre-existing skip.
+
+**Guardrail:** informational violation count: 247 (up from 245) — the 2 new sites are
+`propagateCategoryLibraryEdit`/`propagateStoreModeLibraryEdit`'s own identity UPDATEs, deliberately
+cross-area by design (same reasoning as TASK 20's count increase), not gaps.
 
 **Commit:** `feat: AREA TASK 21 — category and store-mode libraries`
 
