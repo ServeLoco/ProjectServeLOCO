@@ -14,6 +14,7 @@ const dashboardRoutes = require('../src/routes/dashboardRoutes');
 const cartRoutes = require('../src/routes/cartRoutes');
 const { pool } = require('../src/db/mysql');
 const jwt = require('jsonwebtoken');
+const areaScope = require('../src/utils/areaScope');
 
 jest.mock('../src/db/mysql', () => ({
   pool: {
@@ -22,6 +23,14 @@ jest.mock('../src/db/mysql', () => ({
     escape: jest.fn(value => `'${value}'`)
   }
 }));
+
+const DEFAULT_AREA = { id: 1, code: 'A1', name: 'Area 1', active: 1, is_default: 1 };
+// productRoutes carries resolveCustomerArea (TASK 11) — unauthenticated,
+// no-pin requests resolve via its default-area fallback, one
+// `SELECT * FROM areas` before the real query. dashboardRoutes/cartRoutes
+// don't mount it yet (TASK 12/13), so only the "GET /api/products" tests
+// below need this.
+const mockDefaultAreaLookup = () => pool.query.mockResolvedValueOnce([[DEFAULT_AREA]]);
 
 const app = express();
 app.use(express.json());
@@ -78,16 +87,18 @@ const mockSectionRow = (overrides = {}) => ({
 describe('GET /api/products', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    areaScope._resetCachesForTests();
   });
 
   it('excludes closed-shop products by default and projects shop_is_open', async () => {
+    mockDefaultAreaLookup();
     pool.query.mockResolvedValueOnce([[mockProductRow()]]);
     mockProductHelpers();
 
     const res = await request(app).get('/api/products');
 
     expect(res.statusCode).toEqual(200);
-    const firstSql = pool.query.mock.calls[0][0];
+    const firstSql = pool.query.mock.calls[1][0];
     expect(firstSql).toContain('shop_is_open');
     expect(firstSql).toContain('LEFT JOIN shops sh ON sh.id = p.shop_id');
     expect(firstSql).toContain('s.is_open = 1');
@@ -96,13 +107,14 @@ describe('GET /api/products', () => {
   });
 
   it('includes closed-shop products with include_closed_shops=1 and surfaces shop_is_open: 0', async () => {
+    mockDefaultAreaLookup();
     pool.query.mockResolvedValueOnce([[mockProductRow({ shop_is_open: 0 })]]);
     mockProductHelpers();
 
     const res = await request(app).get('/api/products?include_closed_shops=1');
 
     expect(res.statusCode).toEqual(200);
-    const firstSql = pool.query.mock.calls[0][0];
+    const firstSql = pool.query.mock.calls[1][0];
     expect(firstSql).toContain('shop_is_open');
     expect(firstSql).not.toContain('s.is_open = 1');
     expect(firstSql).toContain('s.active = 1');
@@ -111,18 +123,20 @@ describe('GET /api/products', () => {
   });
 
   it('honours camelCase alias in request: includeClosedShops=1', async () => {
+    mockDefaultAreaLookup();
     pool.query.mockResolvedValueOnce([[mockProductRow({ shop_is_open: 0 })]]);
     mockProductHelpers();
 
     const res = await request(app).get('/api/products?includeClosedShops=1');
 
     expect(res.statusCode).toEqual(200);
-    const firstSql = pool.query.mock.calls[0][0];
+    const firstSql = pool.query.mock.calls[1][0];
     expect(firstSql).not.toContain('s.is_open = 1');
     expect(res.body.data.products[0]).toHaveProperty('shopIsOpen', 0);
   });
 
   it('applies the same shop-closed handling to offer product lists', async () => {
+    mockDefaultAreaLookup();
     // 1) offer validation
     pool.query.mockResolvedValueOnce([[{ store_type: 'packed', active: 1, deleted: 0, is_clickable: 1 }]]);
     // 2) offer_products query with closed shop
@@ -133,8 +147,8 @@ describe('GET /api/products', () => {
     const res = await request(app).get('/api/products?offerId=1&include_closed_shops=1');
 
     expect(res.statusCode).toEqual(200);
-    // The second query is the offer_products list; the first was offer validation.
-    const offerProductSql = pool.query.mock.calls[1][0];
+    // calls[0] is the area lookup, calls[1] is offer validation, calls[2] is offer_products.
+    const offerProductSql = pool.query.mock.calls[2][0];
     expect(offerProductSql).toContain('shop_is_open');
     expect(offerProductSql).not.toContain('s.is_open = 1');
     expect(offerProductSql).toContain('s.active = 1');
@@ -145,6 +159,7 @@ describe('GET /api/products', () => {
 describe('GET /api/dashboard and /api/dashboard/sections/:slug/items', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    areaScope._resetCachesForTests();
   });
 
   it('excludes closed-shop products in dashboard product_block by default', async () => {

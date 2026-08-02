@@ -3,12 +3,31 @@ const { emitToAllCustomers, emitToAdmins } = require('../realtime/socket');
 const { syncGlobalShopOpenState } = require('../utils/shops');
 const { isActiveMobileAdminPhone } = require('../utils/mobileAdmins');
 const { validateCoordinates } = require('../validators');
+const { requestAreaId } = require('../utils/areaScope');
 const {
   listShopActiveOrders,
   confirmShopOrder,
   rejectShopOrder,
   readyShopOrder,
 } = require('../services/shopOrderActions');
+
+// Product groups (unlike shops, riders — TASK 15) already carry a real
+// area_id column (TASK 3/11). Shops themselves aren't area-scoped by this
+// controller yet, so a group's area_id is stamped from the ACTING admin's
+// session, not derived from its shop. Rejects null (super_admin, no
+// X-Area-Id) and 'all' the same way every other single-area write does.
+const requireOneArea = (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required to manage product groups' });
+    return null;
+  }
+  if (areaId === 'all') {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Product groups cannot be managed for "all" areas at once — pick one area' });
+    return null;
+  }
+  return areaId;
+};
 
 // MySQL TIME columns come back as 'HH:MM:SS' — trim to 'HH:MM' for the API.
 const formatTime = (t) => (t ? String(t).slice(0, 5) : null);
@@ -479,6 +498,9 @@ const groupShape = (g) => ({
 
 // GET /api/admin/shops/:id/groups — this shop's product groups with member counts.
 const listShopGroups = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const shopId = Number(req.params.id);
   const shop = await loadShopOr404(shopId);
   if (!shop) {
@@ -488,15 +510,18 @@ const listShopGroups = async (req, res) => {
     `SELECT pg.id, pg.name, pg.active,
        (SELECT COUNT(*) FROM products p WHERE p.group_id = pg.id AND p.deleted = 0) AS product_count
      FROM product_groups pg
-     WHERE pg.shop_id = ?
+     WHERE pg.shop_id = ? AND pg.area_id = ?
      ORDER BY pg.name ASC`,
-    [shopId]
+    [shopId, areaId]
   );
   res.status(200).json({ groups: rows.map(groupShape) });
 };
 
 // POST /api/admin/shops/:id/groups — body { name }.
 const createShopGroup = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const shopId = Number(req.params.id);
   const shop = await loadShopOr404(shopId);
   if (!shop) {
@@ -507,8 +532,8 @@ const createShopGroup = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Group name is required' });
   }
   const [result] = await pool.query(
-    'INSERT INTO product_groups (shop_id, name) VALUES (?, ?)',
-    [shopId, String(name).trim()]
+    'INSERT INTO product_groups (area_id, shop_id, name) VALUES (?, ?, ?)',
+    [areaId, shopId, String(name).trim()]
   );
   const [rows] = await pool.query(
     'SELECT id, name, active, 0 AS product_count FROM product_groups WHERE id = ?',
@@ -518,15 +543,19 @@ const createShopGroup = async (req, res) => {
 };
 
 // PATCH /api/admin/shops/:id/groups/:groupId — body may contain name and/or
-// active. Scoped to this shop — a group id from another shop 404s.
+// active. Scoped to this shop AND area — a group id from another shop or
+// area 404s.
 const updateShopGroup = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const shopId = Number(req.params.id);
   const { groupId } = req.params;
   const { name, active } = req.body;
 
   const [existing] = await pool.query(
-    'SELECT id FROM product_groups WHERE id = ? AND shop_id = ?',
-    [groupId, shopId]
+    'SELECT id FROM product_groups WHERE id = ? AND shop_id = ? AND area_id = ?',
+    [groupId, shopId, areaId]
   );
   if (existing.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Group not found' });
@@ -562,11 +591,14 @@ const updateShopGroup = async (req, res) => {
 // DELETE /api/admin/shops/:id/groups/:groupId — member products become
 // ungrouped, not deleted.
 const deleteShopGroup = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const shopId = Number(req.params.id);
   const { groupId } = req.params;
   const [existing] = await pool.query(
-    'SELECT id FROM product_groups WHERE id = ? AND shop_id = ?',
-    [groupId, shopId]
+    'SELECT id FROM product_groups WHERE id = ? AND shop_id = ? AND area_id = ?',
+    [groupId, shopId, areaId]
   );
   if (existing.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Group not found' });
@@ -579,14 +611,17 @@ const deleteShopGroup = async (req, res) => {
 // PATCH /api/admin/shops/:id/products/:productId/group — body { group_id }
 // (null clears it). Validates the group belongs to this shop when non-null.
 const assignShopProductGroup = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const shopId = Number(req.params.id);
   const { productId } = req.params;
   const groupId = req.body.group_id !== undefined ? req.body.group_id : req.body.groupId;
 
   if (groupId !== null && groupId !== undefined) {
     const [groupRows] = await pool.query(
-      'SELECT id FROM product_groups WHERE id = ? AND shop_id = ?',
-      [groupId, shopId]
+      'SELECT id FROM product_groups WHERE id = ? AND shop_id = ? AND area_id = ?',
+      [groupId, shopId, areaId]
     );
     if (groupRows.length === 0) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Unknown group_id' });
@@ -594,8 +629,8 @@ const assignShopProductGroup = async (req, res) => {
   }
 
   const [result] = await pool.query(
-    'UPDATE products SET group_id = ? WHERE id = ? AND shop_id = ? AND deleted = 0',
-    [groupId || null, productId, shopId]
+    'UPDATE products SET group_id = ? WHERE id = ? AND shop_id = ? AND deleted = 0 AND area_id = ?',
+    [groupId || null, productId, shopId, areaId]
   );
   if (result.affectedRows === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Product not found' });

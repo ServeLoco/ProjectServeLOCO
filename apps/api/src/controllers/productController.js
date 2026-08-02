@@ -2,14 +2,22 @@ const { pool } = require('../db/mysql');
 const { normalizeStoreType } = require('../utils/storeMode');
 const { validatePagination, isNumericAmount } = require('../validators');
 const { cleanupOrphanedImage } = require('./imageController');
-const microCache = require('../utils/microCache');
+const { requestAreaId, bustAreaCaches } = require('../utils/areaScope');
 
-// Hardcoded to area 1 for now (TASK 11 makes products area-scoped); the
-// cache bust plumbing is area-shaped already.
-const PRODUCT_CACHE_AREA_ID_STOPGAP = 1;
-const bustProductCaches = () => {
-  microCache.bust('dashboard', PRODUCT_CACHE_AREA_ID_STOPGAP);
-  microCache.bust('categories', PRODUCT_CACHE_AREA_ID_STOPGAP);
+// Admin write/single-item endpoints reject null (super_admin, no
+// X-Area-Id) and 'all' — product management always targets exactly one
+// area.
+const requireOneArea = (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required to manage products' });
+    return null;
+  }
+  if (areaId === 'all') {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Products cannot be managed for "all" areas at once — pick one area' });
+    return null;
+  }
+  return areaId;
 };
 
 const isWithinTimeWindow = (from, until) => {
@@ -255,6 +263,10 @@ const syncProductFromDefaultVariant = async (connection, productId) => {
 };
 
 const getProducts = async (req, res) => {
+  // Catalog data (§2.4): a pin outside every zone (null areaId) gets an
+  // empty list, same as deliveryZonesController.listActiveZonesPublic and
+  // categoryController.getCategories — never another area's products.
+  const areaId = requestAreaId(req);
   const { categoryId, category_id, search, type, storeType, store_type, isCombo, is_combo, featured, limit, offset, offerId, offer_id } = req.query;
   const requestedType = type || storeType || store_type;
   // Pagination: limit+1 trick for hasMore (SQL page size, not post time-window filter length).
@@ -279,13 +291,18 @@ const getProducts = async (req, res) => {
     hasMore,
     has_more: hasMore,
   });
+
+  if (areaId === null || areaId === 'all') {
+    return res.status(200).json(productsResponse([], false));
+  }
+
   // A client can hold a stale/deactivated mode slug (e.g. web's
   // localStorage-persisted storeType) after an admin deactivates a custom
   // mode — fall back to 'all' instead of erroring the whole product list.
   let normalizedType = 'all';
   if (requestedType) {
     try {
-      normalizedType = await normalizeStoreType(requestedType, { allowAll: true });
+      normalizedType = await normalizeStoreType(requestedType, { allowAll: true, areaId });
     } catch {
       normalizedType = 'all';
     }
@@ -310,7 +327,12 @@ const getProducts = async (req, res) => {
   const availableClause = includeClosedShops ? '1=1' : 'p.available = 1';
 
   if (finalOfferId) {
-    // 1. Validate the offer
+    // 1. Validate the offer. `offers` isn't area-scoped by controllers yet
+    // (TASK 12 owns that) — offers.area_id already exists on the column
+    // (backfilled to area 1) but this lookup deliberately doesn't filter by
+    // it yet, matching the stopgap pattern. The joined PRODUCTS below ARE
+    // scoped, so an offer can never surface another area's products even
+    // before TASK 12 lands.
     const [offers] = await pool.query('SELECT store_type, active, deleted, is_clickable FROM offers WHERE id = ?', [finalOfferId]);
     if (offers.length === 0 || offers[0].deleted || !offers[0].active || !offers[0].is_clickable) {
       return res.status(200).json(productsResponse([], false));
@@ -326,9 +348,9 @@ const getProducts = async (req, res) => {
       JOIN products p ON op.product_id = p.id
       LEFT JOIN categories c ON p.category_id = c.id
       LEFT JOIN shops sh ON sh.id = p.shop_id
-      WHERE op.offer_id = ? AND op.active = 1 AND ${availableClause} AND p.deleted = 0 AND p.is_combo = 0 AND ${shopOpenClause} AND (p.group_id IS NULL OR EXISTS (SELECT 1 FROM product_groups g WHERE g.id = p.group_id AND g.active = 1))
+      WHERE op.offer_id = ? AND op.active = 1 AND ${availableClause} AND p.deleted = 0 AND p.is_combo = 0 AND p.area_id = ? AND ${shopOpenClause} AND (p.group_id IS NULL OR EXISTS (SELECT 1 FROM product_groups g WHERE g.id = p.group_id AND g.active = 1 AND g.area_id = p.area_id))
     `;
-    const params = [finalOfferId];
+    const params = [finalOfferId, areaId];
 
     if (normalizedType !== 'all') {
       query += ` AND c.type = ?`;
@@ -363,11 +385,11 @@ const getProducts = async (req, res) => {
   const productQuery = `SELECT p.id, p.name, p.price, p.unit, p.description, p.image_id, p.available, p.is_combo, p.featured, p.original_price, p.discount_label, p.available_from_time, p.available_until_time, p.category_id, c.name as category_name, c.type as category_type, c.display_order as cat_display_order, p.display_order as item_display_order, p.variant_prompt, p.shop_id, sh.name as shop_name, ${shopIsOpenProjection}
     FROM products p LEFT JOIN categories c ON p.category_id = c.id
     LEFT JOIN shops sh ON sh.id = p.shop_id
-    WHERE ${availableClause} AND p.deleted = 0 AND p.is_combo = 0 AND ${shopOpenClause} AND (p.group_id IS NULL OR EXISTS (SELECT 1 FROM product_groups g WHERE g.id = p.group_id AND g.active = 1))`;
+    WHERE ${availableClause} AND p.deleted = 0 AND p.is_combo = 0 AND p.area_id = ${Number(areaId)} AND ${shopOpenClause} AND (p.group_id IS NULL OR EXISTS (SELECT 1 FROM product_groups g WHERE g.id = p.group_id AND g.active = 1 AND g.area_id = p.area_id))`;
 
   const comboQuery = `SELECT p.id, p.name, p.price, p.unit, p.description, p.image_id, p.available, 1 as is_combo, p.featured, p.original_price, p.discount_label, NULL as category_id, NULL as category_name, p.store_type as category_type, 999 as cat_display_order, p.display_order as item_display_order
     FROM combos p
-    WHERE p.available = 1 AND p.deleted = 0`;
+    WHERE p.available = 1 AND p.deleted = 0 AND p.area_id = ${Number(areaId)}`;
 
   let finalQuery = '';
   const finalParams = [];
@@ -417,6 +439,14 @@ const getProducts = async (req, res) => {
   res.status(200).json(productsResponse(filteredRows, hasMore));
 };
 
+// Deliberately NOT area-scoped: unlike getProducts (a listing that could
+// enumerate another area's catalog), this is an id-scoped deep link used
+// from order history, cart, and push notifications — a customer whose pin
+// now resolves to Area 2 must still be able to open a product from an
+// Area 1 order they placed earlier. Product ids are globally unique, so
+// this never returns the wrong row, only possibly a row outside the
+// caller's current area, which the UI already treats as a normal
+// unavailable/out-of-area state.
 const getProductById = async (req, res) => {
   const { id } = req.params;
   const requestedCombo = req.query.type === 'combo' || req.query.isCombo === 'true' || req.query.is_combo === '1';
@@ -480,19 +510,22 @@ const getProductById = async (req, res) => {
 };
 
 const createProduct = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   // Normal products require category. Combos are bundles and do not require category.
   const { name, price, shop_price, category_id, unit, description, image_id, available, featured, display_order, original_price, discount_label, available_from_time, available_until_time, variants, variant_prompt, shop_id } = req.validatedData;
 
   const finalDisplayOrder = display_order !== undefined ? display_order : 0;
   if (finalDisplayOrder > 0) {
-    const [existing] = await pool.query('SELECT name FROM products WHERE category_id = ? AND display_order = ? AND deleted = 0 LIMIT 1', [category_id, finalDisplayOrder]);
+    const [existing] = await pool.query('SELECT name FROM products WHERE category_id = ? AND display_order = ? AND deleted = 0 AND area_id = ? LIMIT 1', [category_id, finalDisplayOrder, areaId]);
     if (existing.length > 0) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: `Display order ${finalDisplayOrder} is already used by ${existing[0].name} in this category.` });
     }
   }
 
   if (shop_id !== undefined && shop_id !== null) {
-    const [shopRows] = await pool.query('SELECT id FROM shops WHERE id = ?', [shop_id]);
+    const [shopRows] = await pool.query('SELECT id FROM shops WHERE id = ? AND area_id = ?', [shop_id, areaId]);
     if (shopRows.length === 0) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Unknown shop_id' });
     }
@@ -506,9 +539,9 @@ const createProduct = async (req, res) => {
   try {
     await connection.beginTransaction();
     const [result] = await connection.query(
-      'INSERT INTO products (name, price, shop_price, category_id, unit, description, image_id, available, is_combo, featured, display_order, original_price, discount_label, available_from_time, available_until_time, shop_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO products (area_id, name, price, shop_price, category_id, unit, description, image_id, available, is_combo, featured, display_order, original_price, discount_label, available_from_time, available_until_time, shop_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
-        name, price, shop_price === undefined ? null : shop_price, category_id, unit, description, image_id,
+        areaId, name, price, shop_price === undefined ? null : shop_price, category_id, unit, description, image_id,
         available !== undefined ? available : true,
         false,
         featured !== undefined ? featured : false,
@@ -529,16 +562,22 @@ const createProduct = async (req, res) => {
   } finally {
     connection.release();
   }
-  bustProductCaches();
+  await bustAreaCaches(areaId);
   res.status(201).json({ message: 'Product created', id: insertId });
 };
 
 const updateProduct = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   // Normal products require category. Combos are bundles and do not require category.
   const { id } = req.params;
   const { name, price, shop_price, category_id, unit, description, image_id, available, featured, display_order, original_price, discount_label, available_from_time, available_until_time, variants, variant_prompt, shop_id } = req.validatedData;
 
-  const [existing] = await pool.query('SELECT id, image_id, shop_id, shop_price FROM products WHERE id = ? AND deleted = 0', [id]);
+  // area_id in the WHERE, not just id: without this, an area_admin could
+  // PATCH another area's product by guessing its (globally sequential)
+  // numeric id.
+  const [existing] = await pool.query('SELECT id, image_id, shop_id, shop_price FROM products WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (existing.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Product not found' });
   }
@@ -554,14 +593,14 @@ const updateProduct = async (req, res) => {
 
   const finalDisplayOrder = display_order !== undefined ? display_order : 0;
   if (finalDisplayOrder > 0) {
-    const [orderExisting] = await pool.query('SELECT name FROM products WHERE category_id = ? AND display_order = ? AND id != ? AND deleted = 0 LIMIT 1', [category_id, finalDisplayOrder, id]);
+    const [orderExisting] = await pool.query('SELECT name FROM products WHERE category_id = ? AND display_order = ? AND id != ? AND deleted = 0 AND area_id = ? LIMIT 1', [category_id, finalDisplayOrder, id, areaId]);
     if (orderExisting.length > 0) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: `Display order ${finalDisplayOrder} is already used by ${orderExisting[0].name} in this category.` });
     }
   }
 
   if (finalShopId !== undefined && finalShopId !== null) {
-    const [shopRows] = await pool.query('SELECT id FROM shops WHERE id = ?', [finalShopId]);
+    const [shopRows] = await pool.query('SELECT id FROM shops WHERE id = ? AND area_id = ?', [finalShopId, areaId]);
     if (shopRows.length === 0) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Unknown shop_id' });
     }
@@ -576,7 +615,7 @@ const updateProduct = async (req, res) => {
   try {
     await connection.beginTransaction();
     await connection.query(
-      'UPDATE products SET name = ?, price = ?, shop_price = ?, category_id = ?, unit = ?, description = ?, image_id = ?, available = ?, is_combo = ?, featured = ?, display_order = ?, original_price = ?, discount_label = ?, available_from_time = ?, available_until_time = ?, shop_id = ? WHERE id = ?',
+      'UPDATE products SET name = ?, price = ?, shop_price = ?, category_id = ?, unit = ?, description = ?, image_id = ?, available = ?, is_combo = ?, featured = ?, display_order = ?, original_price = ?, discount_label = ?, available_from_time = ?, available_until_time = ?, shop_id = ? WHERE id = ? AND area_id = ?',
       [
         name, price, finalShopPrice, category_id, unit, description, image_id, available,
         false,
@@ -587,7 +626,7 @@ const updateProduct = async (req, res) => {
         available_from_time || null,
         available_until_time || null,
         finalShopId || null,
-        id
+        id, areaId
       ]
     );
     await syncProductVariants(connection, Number(id), variants, variant_prompt);
@@ -602,20 +641,23 @@ const updateProduct = async (req, res) => {
   if (previousImageId && String(previousImageId) !== String(image_id)) {
     await cleanupOrphanedImage(previousImageId);
   }
-  bustProductCaches();
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Product updated' });
 };
 
 const getAdminProducts = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { categoryId, category_id, search, available, isCombo, is_combo, featured, type, page, limit, shopId, shop_id } = req.query;
   const finalCategoryId = categoryId || category_id;
   const finalShopId = shopId || shop_id;
   const finalIsCombo = isCombo !== undefined ? isCombo : is_combo;
-  const normalizedType = type ? await normalizeStoreType(type, { allowAll: true }) : null;
+  const normalizedType = type ? await normalizeStoreType(type, { allowAll: true, areaId }) : null;
   const pagination = validatePagination(page, limit);
 
-  let whereClause = 'WHERE p.deleted = 0';
-  const params = [];
+  let whereClause = 'WHERE p.deleted = 0 AND p.area_id = ?';
+  const params = [areaId];
 
   if (finalCategoryId) {
     whereClause += ' AND p.category_id = ?';
@@ -694,15 +736,18 @@ const getAdminProducts = async (req, res) => {
 };
 
 const getAdminProductById = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const [rows] = await pool.query(`
-    SELECT p.*, c.name as category_name, p.shop_id, s.name as shop_name 
-    FROM products p 
-    LEFT JOIN categories c ON p.category_id = c.id 
-    LEFT JOIN shops s ON s.id = p.shop_id 
-    WHERE p.id = ?
-  `, [id]);
-  
+    SELECT p.*, c.name as category_name, p.shop_id, s.name as shop_name
+    FROM products p
+    LEFT JOIN categories c ON p.category_id = c.id
+    LEFT JOIN shops s ON s.id = p.shop_id
+    WHERE p.id = ? AND p.area_id = ?
+  `, [id, areaId]);
+
   if (rows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Product not found' });
   }
@@ -714,19 +759,25 @@ const getAdminProductById = async (req, res) => {
 };
 
 const deleteProduct = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
-  const [rows] = await pool.query('SELECT id, image_id FROM products WHERE id = ? AND deleted = 0', [id]);
+  const [rows] = await pool.query('SELECT id, image_id FROM products WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (rows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Product not found' });
   }
 
-  await pool.query('UPDATE products SET deleted = 1 WHERE id = ?', [id]);
+  await pool.query('UPDATE products SET deleted = 1 WHERE id = ? AND area_id = ?', [id, areaId]);
   await cleanupOrphanedImage(rows[0].image_id);
-  bustProductCaches();
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Product soft deleted' });
 };
 
 const updateProductAvailability = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const finalAvail = req.validatedData?.available;
   if (finalAvail === undefined) {
@@ -734,13 +785,13 @@ const updateProductAvailability = async (req, res) => {
   }
 
   const normalizedAvailable = finalAvail === true || finalAvail === 'true' || finalAvail === 1 || finalAvail === '1';
-  const [result] = await pool.query('UPDATE products SET available = ? WHERE id = ? AND deleted = 0', [normalizedAvailable ? 1 : 0, id]);
+  const [result] = await pool.query('UPDATE products SET available = ? WHERE id = ? AND deleted = 0 AND area_id = ?', [normalizedAvailable ? 1 : 0, id, areaId]);
   if (result.affectedRows === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Product not found' });
   }
-  
+
   const [updatedRows] = await pool.query('SELECT * FROM products WHERE id = ?', [id]);
-  bustProductCaches();
+  await bustAreaCaches(areaId);
   try {
     const { emitToAllCustomers } = require('../realtime/socket');
     const row = updatedRows[0] || {};
@@ -760,7 +811,14 @@ const updateProductAvailability = async (req, res) => {
 // Mirrors updateProductAvailability but scoped to one variant row, so turning
 // a size/pack off only hides that variant (VariantSheet already renders
 // variant.available === false as an "Out" pill) instead of the whole product.
+// product_variants has no area_id of its own (a child of products, scoped
+// through the FK like combo_items/offer_products) — the EXISTS clause below
+// is the cross-tenant guard: it makes sure `id`'s parent product actually
+// belongs to the caller's area before touching the variant.
 const updateVariantAvailability = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id, variantId } = req.params;
   const finalAvail = req.validatedData?.available;
   if (finalAvail === undefined) {
@@ -769,14 +827,15 @@ const updateVariantAvailability = async (req, res) => {
 
   const normalizedAvailable = finalAvail === true || finalAvail === 'true' || finalAvail === 1 || finalAvail === '1';
   const [result] = await pool.query(
-    'UPDATE product_variants SET available = ? WHERE id = ? AND product_id = ? AND deleted = 0',
-    [normalizedAvailable ? 1 : 0, variantId, id],
+    `UPDATE product_variants SET available = ? WHERE id = ? AND product_id = ? AND deleted = 0
+     AND EXISTS (SELECT 1 FROM products WHERE products.id = product_variants.product_id AND products.area_id = ?)`,
+    [normalizedAvailable ? 1 : 0, variantId, id, areaId],
   );
   if (result.affectedRows === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Variant not found' });
   }
 
-  bustProductCaches();
+  await bustAreaCaches(areaId);
   try {
     const { emitToAllCustomers } = require('../realtime/socket');
     // Same event name product-availability listeners already invalidate the
@@ -794,6 +853,9 @@ const updateVariantAvailability = async (req, res) => {
 };
 
 const updateProductImage = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const { imageId, image_id } = req.body;
   const finalImageId = imageId || image_id;
@@ -802,19 +864,19 @@ const updateProductImage = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Image ID required' });
   }
 
-  const [existing] = await pool.query('SELECT id, image_id FROM products WHERE id = ? AND deleted = 0', [id]);
+  const [existing] = await pool.query('SELECT id, image_id FROM products WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (existing.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Product not found' });
   }
   const previousImageId = existing[0].image_id;
 
-  await pool.query('UPDATE products SET image_id = ? WHERE id = ?', [finalImageId, id]);
+  await pool.query('UPDATE products SET image_id = ? WHERE id = ? AND area_id = ?', [finalImageId, id, areaId]);
   if (previousImageId && String(previousImageId) !== String(finalImageId)) {
     await cleanupOrphanedImage(previousImageId);
   }
 
   const [updatedRows] = await pool.query('SELECT * FROM products WHERE id = ?', [id]);
-  bustProductCaches();
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Product image updated', product: updatedRows[0] });
 };
 
@@ -833,6 +895,9 @@ module.exports = {
 };
 
 const bulkUpdateProducts = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { ids, updates } = req.body;
 
   if (!Array.isArray(ids) || ids.length === 0) {
@@ -866,7 +931,7 @@ const bulkUpdateProducts = async (req, res) => {
     if (!Number.isFinite(catId) || catId <= 0) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: '`category_id` must be a valid positive integer.' });
     }
-    const [cats] = await pool.query('SELECT id FROM categories WHERE id = ? AND deleted = 0', [catId]);
+    const [cats] = await pool.query('SELECT id FROM categories WHERE id = ? AND deleted = 0 AND area_id = ?', [catId, areaId]);
     if (cats.length === 0) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: `Category ID ${catId} does not exist or has been deleted.` });
     }
@@ -879,7 +944,7 @@ const bulkUpdateProducts = async (req, res) => {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: '`shop_id` must be a non-negative integer (0 clears the assignment).' });
     }
     if (rawShopId > 0) {
-      const [shopRows] = await pool.query('SELECT id FROM shops WHERE id = ?', [rawShopId]);
+      const [shopRows] = await pool.query('SELECT id FROM shops WHERE id = ? AND area_id = ?', [rawShopId, areaId]);
       if (shopRows.length === 0) {
         return res.status(400).json({ code: 'VALIDATION_ERROR', message: `Shop ID ${rawShopId} does not exist.` });
       }
@@ -887,7 +952,7 @@ const bulkUpdateProducts = async (req, res) => {
     updates.shop_id = rawShopId;
   }
 
-  const [existing] = await pool.query('SELECT id FROM products WHERE id IN (?) AND deleted = 0', [numericIds]);
+  const [existing] = await pool.query('SELECT id FROM products WHERE id IN (?) AND deleted = 0 AND area_id = ?', [numericIds, areaId]);
   const validIds = existing.map(r => r.id);
   const skipped = numericIds.length - validIds.length;
 
@@ -915,14 +980,17 @@ const bulkUpdateProducts = async (req, res) => {
     setValues.push(updates.shop_id === 0 ? null : updates.shop_id);
   }
 
-  setValues.push(validIds);
-  await pool.query(`UPDATE products SET ${setClauses.join(', ')} WHERE id IN (?)`, setValues);
+  setValues.push(validIds, areaId);
+  await pool.query(`UPDATE products SET ${setClauses.join(', ')} WHERE id IN (?) AND area_id = ?`, setValues);
 
-  bustProductCaches();
+  await bustAreaCaches(areaId);
   return res.status(200).json({ updated: validIds.length, skipped, errors: [] });
 };
 
 const bulkDeleteProducts = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { ids } = req.body;
 
   if (!Array.isArray(ids) || ids.length === 0) {
@@ -933,7 +1001,7 @@ const bulkDeleteProducts = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'No valid numeric product IDs provided.' });
   }
 
-  const [result] = await pool.query('UPDATE products SET deleted = 1 WHERE id IN (?) AND deleted = 0', [numericIds]);
+  const [result] = await pool.query('UPDATE products SET deleted = 1 WHERE id IN (?) AND deleted = 0 AND area_id = ?', [numericIds, areaId]);
   const deleted = result.affectedRows;
   const skipped = numericIds.length - deleted;
 
@@ -942,8 +1010,8 @@ const bulkDeleteProducts = async (req, res) => {
   if (deleted > 0) {
     try {
       const [softDeleted] = await pool.query(
-        'SELECT DISTINCT image_id FROM products WHERE id IN (?) AND image_id IS NOT NULL',
-        [numericIds]
+        'SELECT DISTINCT image_id FROM products WHERE id IN (?) AND image_id IS NOT NULL AND area_id = ?',
+        [numericIds, areaId]
       );
       const imageIds = softDeleted.map(r => r.image_id).filter(Boolean);
       for (const imageId of imageIds) {
@@ -954,7 +1022,7 @@ const bulkDeleteProducts = async (req, res) => {
     }
   }
 
-  bustProductCaches();
+  await bustAreaCaches(areaId);
   return res.status(200).json({ deleted, skipped, errors: [] });
 };
 
@@ -968,6 +1036,9 @@ const bulkDeleteProducts = async (req, res) => {
 // product limit). Omitted price/shopPrice on a row leaves that column
 // untouched; explicit null clears shopPrice.
 const updateProductPricing = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { rows } = req.body;
   if (!Array.isArray(rows) || rows.length === 0) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: '`rows` must be a non-empty array.' });
@@ -1032,11 +1103,14 @@ const updateProductPricing = async (req, res) => {
         if (row.price !== undefined) { sets.push('price = ?'); values.push(row.price); }
         if (row.shopPrice !== undefined) { sets.push('shop_price = ?'); values.push(row.shopPrice); }
         if (sets.length === 0) continue;
-        values.push(row.variantId, row.productId);
+        values.push(row.variantId, row.productId, areaId);
         // AND product_id = ? prevents a variantId from one product silently
-        // repricing a different product (cross-product id abuse).
+        // repricing a different product (cross-product id abuse). The EXISTS
+        // clause is the area guard — product_variants has no area_id of its
+        // own, so it's enforced through the parent product row.
         const [result] = await connection.query(
-          `UPDATE product_variants SET ${sets.join(', ')} WHERE id = ? AND product_id = ? AND deleted = 0`,
+          `UPDATE product_variants SET ${sets.join(', ')} WHERE id = ? AND product_id = ? AND deleted = 0
+           AND EXISTS (SELECT 1 FROM products WHERE products.id = product_variants.product_id AND products.area_id = ?)`,
           values
         );
         if (result.affectedRows === 0) {
@@ -1051,9 +1125,9 @@ const updateProductPricing = async (req, res) => {
         if (row.price !== undefined) { sets.push('price = ?'); values.push(row.price); }
         if (row.shopPrice !== undefined) { sets.push('shop_price = ?'); values.push(row.shopPrice); }
         if (sets.length === 0) continue;
-        values.push(row.productId);
+        values.push(row.productId, areaId);
         const [result] = await connection.query(
-          `UPDATE products SET ${sets.join(', ')} WHERE id = ? AND deleted = 0`,
+          `UPDATE products SET ${sets.join(', ')} WHERE id = ? AND deleted = 0 AND area_id = ?`,
           values
         );
         if (result.affectedRows === 0) {
@@ -1079,7 +1153,7 @@ const updateProductPricing = async (req, res) => {
     connection.release();
   }
 
-  bustProductCaches();
+  await bustAreaCaches(areaId);
   res.status(200).json({ updated, skipped: cleanRows.length - updated, errors });
 };
 

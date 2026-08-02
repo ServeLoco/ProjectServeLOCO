@@ -22,7 +22,7 @@ app.use(express.json());
 app.use('/api/admin', adminRoutes);
 
 const adminToken = jwt.sign(
-  { id: 'admin', role: 'admin' },
+  { id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 },
   process.env.JWT_SECRET || 'test_jwt_secret_that_is_long_enough'
 );
 
@@ -47,7 +47,7 @@ describe('Admin bulk product update — shop_id — PATCH /api/admin/products/bu
 
     const updateCall = pool.query.mock.calls[2];
     expect(updateCall[0]).toMatch(/shop_id = \?/);
-    expect(updateCall[1]).toEqual([5, [1, 2]]);
+    expect(updateCall[1]).toEqual([5, [1, 2], 1]);
   });
 
   it('rejects an unknown shop_id with 400 VALIDATION_ERROR', async () => {
@@ -78,7 +78,7 @@ describe('Admin bulk product update — shop_id — PATCH /api/admin/products/bu
 
     const updateCall = pool.query.mock.calls[1];
     expect(updateCall[0]).toMatch(/shop_id = \?/);
-    expect(updateCall[1]).toEqual([null, [1]]);
+    expect(updateCall[1]).toEqual([null, [1], 1]);
   });
 
   it('applies shop_id alongside other allowed fields', async () => {
@@ -98,6 +98,6 @@ describe('Admin bulk product update — shop_id — PATCH /api/admin/products/bu
     const updateCall = pool.query.mock.calls[2];
     expect(updateCall[0]).toMatch(/available = \?/);
     expect(updateCall[0]).toMatch(/shop_id = \?/);
-    expect(updateCall[1]).toEqual([1, 5, [1]]);
+    expect(updateCall[1]).toEqual([1, 5, [1], 1]);
   });
 });

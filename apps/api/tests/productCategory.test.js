@@ -19,11 +19,17 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/products', productRoutes);
 
 // Admin token for testing
-const token = jwt.sign({ id: 'admin', role: 'admin' }, process.env.JWT_SECRET || 'secret');
+const token = jwt.sign({ id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 }, process.env.JWT_SECRET || 'secret');
+
+const DEFAULT_AREA = { id: 1, code: 'A1', name: 'Area 1', active: 1, is_default: 1 };
+// Unauthenticated/no-pin public routes resolve via resolveCustomerArea's
+// default-area fallback — one `SELECT * FROM areas` before the real query.
+const mockDefaultAreaLookup = () => pool.query.mockResolvedValueOnce([[DEFAULT_AREA]]);
 
 describe('Product and Category Tests', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    require('../src/utils/areaScope')._resetCachesForTests();
   });
 
   it('should create a category', async () => {
@@ -40,7 +46,8 @@ describe('Product and Category Tests', () => {
       });
 
     expect(res.statusCode).toEqual(201);
-    expect(pool.query).toHaveBeenCalledTimes(1);
+    // 1: category INSERT. 2: bustAreaCaches' bumpCatalogVersion UPDATE.
+    expect(pool.query).toHaveBeenCalledTimes(2);
   });
 
   it('should create a product', async () => {
@@ -70,10 +77,13 @@ describe('Product and Category Tests', () => {
     expect(res.statusCode).toEqual(201);
     expect(mockConn.query).toHaveBeenCalledTimes(1);
     expect(mockConn.commit).toHaveBeenCalledTimes(1);
-    expect(pool.query).not.toHaveBeenCalled();
+    // bustAreaCaches' bumpCatalogVersion runs a pool.query (not on the
+    // transaction connection) after commit.
+    expect(pool.query).toHaveBeenCalledTimes(1);
   });
 
   it('should fetch products', async () => {
+    mockDefaultAreaLookup();
     pool.query.mockResolvedValueOnce([[{ id: 1, name: 'Chips' }]]); // select products
     pool.query.mockResolvedValueOnce([[{ id: 1, name: 'Snacks' }]]); // select categories
 
@@ -84,6 +94,7 @@ describe('Product and Category Tests', () => {
   });
 
   it('should not include combos in default product/category lists', async () => {
+    mockDefaultAreaLookup();
     pool.query.mockResolvedValueOnce([[{ id: 1, name: 'Chips', is_combo: 0 }]]);
     pool.query.mockResolvedValueOnce([[]]);
 
@@ -91,9 +102,9 @@ describe('Product and Category Tests', () => {
 
     expect(res.statusCode).toEqual(200);
     expect(res.body.products).toHaveLength(1);
-    expect(pool.query.mock.calls[0][0]).toContain('p.is_combo = 0');
-    expect(pool.query.mock.calls[0][0]).not.toContain('UNION');
-    expect(pool.query.mock.calls[0][0]).not.toContain('FROM combos');
+    expect(pool.query.mock.calls[1][0]).toContain('p.is_combo = 0');
+    expect(pool.query.mock.calls[1][0]).not.toContain('UNION');
+    expect(pool.query.mock.calls[1][0]).not.toContain('FROM combos');
   });
 
   it('should reject creating a combo with zero or negative item quantities', async () => {

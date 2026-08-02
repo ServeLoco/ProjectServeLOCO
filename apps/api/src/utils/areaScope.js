@@ -209,11 +209,11 @@ async function recomputeAreaBbox(areaId) {
  * Fans out to every area-scoped cache. Partial today, by necessity:
  * microCache namespaces (dashboard/categories/delivery-zones) are
  * genuinely area-keyed as of TASK 4, so busting them by areaId works
- * correctly right now. bustSettingsCache()/invalidateStoreModeCache()
- * are still zero-arg and only ever bust area 1's stopgap key (TASK 9/11
- * parameterize them for real) — calling them here is forward-compatible
- * plumbing, not yet a real per-area bust. Documented rather than hidden,
- * so nobody mistakes this for already being fully area-scoped.
+ * correctly right now. bustSettingsCache() is still zero-arg and only
+ * ever busts area 1's stopgap key (TASK 12 parameterizes it for real) —
+ * calling it here is forward-compatible plumbing, not yet a real per-area
+ * bust. invalidateStoreModeCache(areaId) is real as of TASK 11. Documented
+ * rather than hidden, so nobody mistakes settings for already area-scoped.
  */
 function bustAreaCaches(areaId) {
   microCache.bust('dashboard', areaId);
@@ -231,10 +231,24 @@ function bustAreaCaches(areaId) {
   } catch (_) { /* settingsController not loaded in this context (e.g. a unit test) */ }
   try {
     const { invalidateStoreModeCache } = require('./storeMode');
-    invalidateStoreModeCache();
+    invalidateStoreModeCache(areaId);
   } catch (_) { /* storeMode not loaded in this context */ }
 
   return bumpCatalogVersion(areaId);
+}
+
+/**
+ * Seeds the two is_system store modes (packed, fast_food) for one area.
+ * INSERT IGNORE against uniq_store_modes_area_slug (area_id, slug) — safe
+ * to call repeatedly (migration reruns) and reused by clone-area (TASK 25)
+ * so a brand new area always opens with both legacy modes present.
+ */
+async function seedSystemStoreModes(areaId) {
+  await pool.query(
+    `INSERT IGNORE INTO store_modes (area_id, slug, label, display_order, active, is_system)
+     VALUES (?, 'packed', 'Packed Items', 1, TRUE, TRUE), (?, 'fast_food', 'Fast Food', 2, TRUE, TRUE)`,
+    [areaId, areaId]
+  );
 }
 
 // ---------------------------------------------------------------------
@@ -257,5 +271,6 @@ module.exports = {
   assertAreaAccess,
   bustAreaCaches,
   bumpCatalogVersion,
+  seedSystemStoreModes,
   _resetCachesForTests,
 };

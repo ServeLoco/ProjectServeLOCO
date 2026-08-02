@@ -3,6 +3,7 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const asyncHandler = require('../utils/asyncHandler');
 const { getStoreModes } = require('../controllers/storeModeController');
+const { resolveCustomerArea } = require('../middleware/areaMiddleware');
 
 const getLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -12,6 +13,6 @@ const getLimiter = rateLimit({
 
 router.use(getLimiter);
 
-router.get('/', asyncHandler(getStoreModes));
+router.get('/', resolveCustomerArea, asyncHandler(getStoreModes));
 
 module.exports = router;

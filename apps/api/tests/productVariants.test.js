@@ -14,6 +14,7 @@ const jwt = require('jsonwebtoken');
 const productRoutes = require('../src/routes/productRoutes');
 const adminRoutes = require('../src/routes/adminRoutes');
 const { pool } = require('../src/db/mysql');
+const areaScope = require('../src/utils/areaScope');
 
 jest.mock('../src/db/mysql', () => ({
   pool: {
@@ -23,7 +24,7 @@ jest.mock('../src/db/mysql', () => ({
 }));
 
 const adminToken = jwt.sign(
-  { id: 'admin', role: 'admin' },
+  { id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 },
   process.env.JWT_SECRET || 'secret'
 );
 
@@ -31,10 +32,22 @@ const readApp = express();
 readApp.use(express.json());
 readApp.use('/api/products', productRoutes);
 
+const DEFAULT_AREA = { id: 1, code: 'A1', name: 'Area 1', active: 1, is_default: 1 };
+// GET /api/products carries resolveCustomerArea (TASK 11) — unauthenticated,
+// no-pin request resolves via its default-area fallback, one
+// `SELECT * FROM areas` before the real query. GET /api/products/:id is
+// deliberately unscoped (deep-link/order-history compatibility), so it
+// needs no such mock.
+const mockDefaultAreaLookup = () => pool.query.mockResolvedValueOnce([[DEFAULT_AREA]]);
+
 describe('Product Variants — read paths', () => {
-  beforeEach(() => { jest.clearAllMocks(); });
+  beforeEach(() => {
+    jest.clearAllMocks();
+    areaScope._resetCachesForTests();
+  });
 
   it('getProducts embeds variants, hasVariants, has_variants, minPrice, min_price', async () => {
+    mockDefaultAreaLookup();
     pool.query.mockResolvedValueOnce([[
       { id: 1, name: 'Pizza', price: 349, is_combo: 0, available: 1, image_id: null, available_from_time: null, available_until_time: null },
       { id: 2, name: 'Burger', price: 99, is_combo: 0, available: 1, image_id: null, available_from_time: null, available_until_time: null },

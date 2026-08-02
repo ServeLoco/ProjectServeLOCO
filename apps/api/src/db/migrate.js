@@ -1887,6 +1887,24 @@ const migrate = async () => {
     await ensureUniqueIndex('admin_notifications', 'uniq_admin_inbox_area_event', 'area_id, type, related_id');
     console.log('[migrate] per-area unique keys in place.');
 
+    // ---- TASK 11 — store_modes seeded per area, not just area 1 ---------
+    // The original seed (above, table-creation time) only ever ran once
+    // and only covers whichever area existed when the table was first
+    // created (area 1). Any area created after that point starts with
+    // zero store_modes rows unless seeded here — INSERT IGNORE against
+    // uniq_store_modes_area_slug makes this idempotent across reruns.
+    {
+      const [areaRows] = await connection.query('SELECT id FROM areas');
+      for (const { id: areaIdToSeed } of areaRows) {
+        await connection.query(
+          `INSERT IGNORE INTO store_modes (area_id, slug, label, display_order, active, is_system)
+           VALUES (?, 'packed', 'Packed Items', 1, TRUE, TRUE), (?, 'fast_food', 'Fast Food', 2, TRUE, TRUE)`,
+          [areaIdToSeed, areaIdToSeed]
+        );
+      }
+    }
+    console.log('[migrate] store_modes is_system rows seeded per area.');
+
     // ---- TASK 9 — settings becomes genuinely one row per area ----------
     // `settings` was never a UNIQUE-key-enforced singleton — every query
     // just relied on there only ever being one row and used LIMIT 1. Now

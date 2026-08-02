@@ -21,7 +21,7 @@ app.use(express.json());
 app.use('/api/admin', adminRoutes);
 
 const adminToken = jwt.sign(
-  { id: 'admin', role: 'admin' },
+  { id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 },
   process.env.JWT_SECRET || 'test_jwt_secret_that_is_long_enough'
 );
 
@@ -87,7 +87,7 @@ describe('Admin shop groups — /api/admin/shops/:id/groups*', () => {
     expect(res.statusCode).toEqual(201);
     expect(res.body.group).toEqual(expect.objectContaining({ id: 5, name: 'Starters', active: true }));
     expect(pool.query).toHaveBeenNthCalledWith(2,
-      'INSERT INTO product_groups (shop_id, name) VALUES (?, ?)', [1, 'Starters']);
+      'INSERT INTO product_groups (area_id, shop_id, name) VALUES (?, ?, ?)', [1, 1, 'Starters']);
   });
 
   it('PATCH /shops/:id/groups/:groupId 404s when the group belongs to another shop', async () => {

@@ -45,7 +45,7 @@ const shopApp = express();
 shopApp.use(express.json());
 shopApp.use('/api/shop', shopRoutes);
 
-const adminToken = jwt.sign({ id: 'admin', role: 'admin' }, process.env.JWT_SECRET || 'secret');
+const adminToken = jwt.sign({ id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 }, process.env.JWT_SECRET || 'secret');
 const customerToken = (id) => jwt.sign({ id, role: 'customer' }, process.env.JWT_SECRET || 'test_jwt_secret_that_is_long_enough');
 
 beforeEach(() => {
@@ -135,7 +135,7 @@ describe('PATCH /api/admin/products/pricing', () => {
 
     const variantUpdateCall = mockConn.query.mock.calls[0];
     expect(variantUpdateCall[0]).toContain('WHERE id = ? AND product_id = ? AND deleted = 0');
-    expect(variantUpdateCall[1]).toEqual([50, 99, 1]);
+    expect(variantUpdateCall[1]).toEqual([50, 99, 1, 1]);
   });
 
   it('re-syncs products.price/shop_price from the default variant after a variant edit', async () => {
@@ -184,8 +184,8 @@ describe('PATCH /api/admin/products/pricing', () => {
 
     expect(res.statusCode).toEqual(200);
     const updateCall = mockConn.query.mock.calls[0];
-    expect(updateCall[0]).toBe('UPDATE products SET shop_price = ? WHERE id = ? AND deleted = 0');
-    expect(updateCall[1]).toEqual([null, 5]);
+    expect(updateCall[0]).toBe('UPDATE products SET shop_price = ? WHERE id = ? AND deleted = 0 AND area_id = ?');
+    expect(updateCall[1]).toEqual([null, 5, 1]);
   });
 });
 

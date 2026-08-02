@@ -2,11 +2,9 @@ const { pool } = require('../db/mysql');
 const { normalizeStoreType } = require('../utils/storeMode');
 const microCache = require('../utils/microCache');
 const { cleanupOrphanedImage } = require('./imageController');
+const { requestAreaId, bustAreaCaches } = require('../utils/areaScope');
 
 const CATEGORIES_TTL_MS = 30_000;
-// Hardcoded to area 1 for now (TASK 11 makes categories area-scoped); the
-// cache key/bust plumbing is area-shaped already.
-const CATEGORIES_AREA_ID_STOPGAP = 1;
 
 function slugify(value) {
   return String(value || '')
@@ -42,26 +40,35 @@ const attachImageUrls = async (rows) => {
   return rows;
 };
 
+// Public endpoint: catalog data, not settings metadata — a pin outside
+// every zone (null areaId) gets an empty list, same as
+// deliveryZonesController.listActiveZonesPublic, never another area's
+// categories (§2.4).
 const getCategories = async (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null || areaId === 'all') {
+    return res.status(200).json({ data: [], categories: [] });
+  }
+
   const type = req.query.type || req.query.storeType || req.query.store_type;
   const normalizedType = type
-    ? await normalizeStoreType(type, { allowAll: true })
+    ? await normalizeStoreType(type, { allowAll: true, areaId })
     : 'all';
-  const cacheKey = `categories:${CATEGORIES_AREA_ID_STOPGAP}:public:${normalizedType}`;
+  const cacheKey = `categories:${areaId}:public:${normalizedType}`;
   const cached = microCache.get(cacheKey);
   if (cached) {
     return res.status(200).json(cached);
   }
 
-  const params = [];
+  const params = [areaId];
   let query = `
     SELECT c.*, (
       SELECT COUNT(*)
       FROM products p
-      WHERE p.category_id = c.id AND p.deleted = 0 AND p.is_combo = 0
+      WHERE p.category_id = c.id AND p.deleted = 0 AND p.is_combo = 0 AND p.area_id = c.area_id
     ) as product_count
     FROM categories c
-    WHERE c.active = 1 AND c.deleted = 0
+    WHERE c.active = 1 AND c.deleted = 0 AND c.area_id = ?
   `;
 
   if (normalizedType !== 'all') {
@@ -78,18 +85,36 @@ const getCategories = async (req, res) => {
   res.status(200).json(body);
 };
 
+// Admin endpoint: rejects null (super_admin, no X-Area-Id) and 'all' —
+// category management always targets exactly one area.
+const requireOneArea = (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required to manage categories' });
+    return null;
+  }
+  if (areaId === 'all') {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Categories cannot be managed for "all" areas at once — pick one area' });
+    return null;
+  }
+  return areaId;
+};
+
 const getAdminCategories = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const type = req.query.type || req.query.storeType || req.query.store_type;
-  const normalizedType = type ? await normalizeStoreType(type, { allowAll: true }) : null;
-  const params = [];
+  const normalizedType = type ? await normalizeStoreType(type, { allowAll: true, areaId }) : null;
+  const params = [areaId];
   let query = `
     SELECT c.*, (
       SELECT COUNT(*)
       FROM products p
-      WHERE p.category_id = c.id AND p.deleted = 0 AND p.is_combo = 0
+      WHERE p.category_id = c.id AND p.deleted = 0 AND p.is_combo = 0 AND p.area_id = c.area_id
     ) as product_count
     FROM categories c
-    WHERE c.deleted = 0
+    WHERE c.deleted = 0 AND c.area_id = ?
   `;
 
   if (normalizedType && normalizedType !== 'all') {
@@ -105,10 +130,13 @@ const getAdminCategories = async (req, res) => {
 };
 
 const createCategory = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { name, type: rawType, image_id, active } = req.validatedData;
   let type;
   try {
-    type = await normalizeStoreType(rawType, { fallback: false });
+    type = await normalizeStoreType(rawType, { fallback: false, areaId });
   } catch (e) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: e.message });
   }
@@ -116,52 +144,56 @@ const createCategory = async (req, res) => {
   const displayOrder = req.validatedData.display_order ?? 0;
 
   if (displayOrder > 0) {
-    const [existing] = await pool.query('SELECT name FROM categories WHERE type = ? AND display_order = ? AND deleted = 0 LIMIT 1', [type, displayOrder]);
+    const [existing] = await pool.query('SELECT name FROM categories WHERE type = ? AND display_order = ? AND deleted = 0 AND area_id = ? LIMIT 1', [type, displayOrder, areaId]);
     if (existing.length > 0) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: `Display order ${displayOrder} is already used by ${existing[0].name} in ${type}.` });
     }
   }
 
   const [result] = await pool.query(
-    'INSERT INTO categories (name, slug, type, image_id, active, display_order) VALUES (?, ?, ?, ?, ?, ?)',
-    [name, slug, type, image_id, active !== undefined ? active : true, displayOrder]
+    'INSERT INTO categories (area_id, name, slug, type, image_id, active, display_order) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [areaId, name, slug, type, image_id, active !== undefined ? active : true, displayOrder]
   );
-  microCache.bust('categories', CATEGORIES_AREA_ID_STOPGAP);
-  microCache.bust('dashboard', CATEGORIES_AREA_ID_STOPGAP);
+  await bustAreaCaches(areaId);
   res.status(201).json({ message: 'Category created', id: result.insertId });
 };
 
 const updateCategory = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const { name, type: rawType, image_id, active } = req.validatedData;
   let type;
   try {
-    type = await normalizeStoreType(rawType, { fallback: false });
+    type = await normalizeStoreType(rawType, { fallback: false, areaId });
   } catch (e) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: e.message });
   }
   const slug = req.validatedData.slug || slugify(name);
   const displayOrder = req.validatedData.display_order ?? 0;
 
-  const [currentRows] = await pool.query('SELECT id, image_id FROM categories WHERE id = ? AND deleted = 0', [id]);
+  // area_id in the WHERE, not just id: without this, an area_admin could
+  // PATCH another area's category by guessing its (globally sequential)
+  // numeric id.
+  const [currentRows] = await pool.query('SELECT id, image_id FROM categories WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (currentRows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Category not found' });
   }
   const previousImageId = currentRows[0].image_id;
 
   if (displayOrder > 0) {
-    const [existing] = await pool.query('SELECT name FROM categories WHERE type = ? AND display_order = ? AND id != ? AND deleted = 0 LIMIT 1', [type, displayOrder, id]);
+    const [existing] = await pool.query('SELECT name FROM categories WHERE type = ? AND display_order = ? AND id != ? AND deleted = 0 AND area_id = ? LIMIT 1', [type, displayOrder, id, areaId]);
     if (existing.length > 0) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: `Display order ${displayOrder} is already used by ${existing[0].name} in ${type}.` });
     }
   }
 
   await pool.query(
-    'UPDATE categories SET name = ?, slug = ?, type = ?, image_id = ?, active = ?, display_order = ? WHERE id = ?',
-    [name, slug, type, image_id, active, displayOrder, id]
+    'UPDATE categories SET name = ?, slug = ?, type = ?, image_id = ?, active = ?, display_order = ? WHERE id = ? AND area_id = ?',
+    [name, slug, type, image_id, active, displayOrder, id, areaId]
   );
-  microCache.bust('categories', CATEGORIES_AREA_ID_STOPGAP);
-  microCache.bust('dashboard', CATEGORIES_AREA_ID_STOPGAP);
+  await bustAreaCaches(areaId);
   if (previousImageId && String(previousImageId) !== String(image_id)) {
     await cleanupOrphanedImage(previousImageId);
   }
@@ -169,15 +201,18 @@ const updateCategory = async (req, res) => {
 };
 
 const deleteCategory = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
-  const [currentRows] = await pool.query('SELECT id, image_id FROM categories WHERE id = ? AND deleted = 0', [id]);
+  const [currentRows] = await pool.query('SELECT id, image_id FROM categories WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (currentRows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Category not found' });
   }
 
   const [[productUsage]] = await pool.query(
-    'SELECT COUNT(*) as count FROM products WHERE category_id = ? AND deleted = 0',
-    [id]
+    'SELECT COUNT(*) as count FROM products WHERE category_id = ? AND deleted = 0 AND area_id = ?',
+    [id, areaId]
   );
   if (Number(productUsage.count) > 0) {
     return res.status(400).json({
@@ -199,10 +234,9 @@ const deleteCategory = async (req, res) => {
     });
   }
 
-  await pool.query('UPDATE categories SET deleted = 1 WHERE id = ?', [id]);
+  await pool.query('UPDATE categories SET deleted = 1 WHERE id = ? AND area_id = ?', [id, areaId]);
   await cleanupOrphanedImage(currentRows[0].image_id);
-  microCache.bust('categories', CATEGORIES_AREA_ID_STOPGAP);
-  microCache.bust('dashboard', CATEGORIES_AREA_ID_STOPGAP);
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Category soft deleted' });
 };
 

@@ -409,22 +409,24 @@ const getMyGroups = async (req, res) => {
     `SELECT pg.id, pg.name, pg.active,
        (SELECT COUNT(*) FROM products p WHERE p.group_id = pg.id AND p.deleted = 0) AS product_count
      FROM product_groups pg
-     WHERE pg.shop_id = ?
+     WHERE pg.shop_id = ? AND pg.area_id = ?
      ORDER BY pg.name ASC`,
-    [req.shop.id]
+    [req.shop.id, req.shop.area_id]
   );
   res.status(200).json({ groups: rows.map(groupShape) });
 };
 
-// POST /groups — body { name }.
+// POST /groups — body { name }. area_id is stamped from the shop's own row
+// (shops isn't gated by an admin X-Area-Id session here — this is the
+// self-service shop-owner flow, TASK 15 covers shops.area_id itself).
 const createMyGroup = async (req, res) => {
   const { name } = req.body;
   if (!name || !String(name).trim()) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Group name is required' });
   }
   const [result] = await pool.query(
-    'INSERT INTO product_groups (shop_id, name) VALUES (?, ?)',
-    [req.shop.id, String(name).trim()]
+    'INSERT INTO product_groups (area_id, shop_id, name) VALUES (?, ?, ?)',
+    [req.shop.area_id, req.shop.id, String(name).trim()]
   );
   const [rows] = await pool.query(
     'SELECT id, name, active, 0 AS product_count FROM product_groups WHERE id = ?',
@@ -434,14 +436,14 @@ const createMyGroup = async (req, res) => {
 };
 
 // PATCH /groups/:id — body may contain name and/or active. Scoped to this
-// shop — a group id from another shop 404s, never trusted by id alone.
+// shop AND area — a group id from another shop 404s, never trusted by id alone.
 const updateMyGroup = async (req, res) => {
   const { id } = req.params;
   const { name, active } = req.body;
 
   const [existing] = await pool.query(
-    'SELECT id FROM product_groups WHERE id = ? AND shop_id = ?',
-    [id, req.shop.id]
+    'SELECT id FROM product_groups WHERE id = ? AND shop_id = ? AND area_id = ?',
+    [id, req.shop.id, req.shop.area_id]
   );
   if (existing.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Group not found' });
@@ -478,8 +480,8 @@ const updateMyGroup = async (req, res) => {
 const deleteMyGroup = async (req, res) => {
   const { id } = req.params;
   const [existing] = await pool.query(
-    'SELECT id FROM product_groups WHERE id = ? AND shop_id = ?',
-    [id, req.shop.id]
+    'SELECT id FROM product_groups WHERE id = ? AND shop_id = ? AND area_id = ?',
+    [id, req.shop.id, req.shop.area_id]
   );
   if (existing.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Group not found' });
@@ -497,8 +499,8 @@ const assignMyProductGroup = async (req, res) => {
 
   if (groupId !== null && groupId !== undefined) {
     const [groupRows] = await pool.query(
-      'SELECT id FROM product_groups WHERE id = ? AND shop_id = ?',
-      [groupId, req.shop.id]
+      'SELECT id FROM product_groups WHERE id = ? AND shop_id = ? AND area_id = ?',
+      [groupId, req.shop.id, req.shop.area_id]
     );
     if (groupRows.length === 0) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Unknown group_id' });

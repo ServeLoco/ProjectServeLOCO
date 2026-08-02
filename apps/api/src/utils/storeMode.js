@@ -14,26 +14,28 @@ const LEGACY_ALIASES = {
   fast: 'fast_food'
 };
 
-// Key is already area-shaped (`active_slugs:<areaId>`) even though the
-// query below isn't scoped to an area yet — that's TASK 11 (H4: store_type
-// is a free string validated against a per-area list once store_modes
-// itself is per-area). This plumbing means that swap only needs to replace
-// the hardcoded STOPGAP below with a real areaId, not touch the cache key
-// format or the exported function signatures (still zero-arg — every
-// current caller stays untouched until TASK 11 threads areaId through).
+// Every caller in this codebase that hasn't been threaded through with a
+// real req.areaId yet falls back to this stopgap — same pattern as TASK 4's
+// microCache work. Callers within TASK 11's own file list (productController,
+// categoryController, comboController, bulkImportController) now pass a real
+// areaId; the rest (settingsController, dashboardController, cartController,
+// couponController) still get area 1 until the tasks that own THEM
+// (TASK 12/13/14) thread it through — H4's area-scoped validation already
+// applies for the callers that matter most today (catalog writes).
 const STORE_MODE_AREA_ID_STOPGAP = 1;
 const cacheKeyForArea = (areaId) => `active_slugs:${areaId}`;
 const cache = createTtlCache({ ttlMs: 30_000 });
 
 /**
- * Loads the set of currently-active store mode slugs from the DB, cached for
- * 30s. Falls back to the two legacy system modes if the table is briefly
- * unreachable (e.g. mid-migration) so validation never hard-fails startup.
+ * Loads the set of currently-active store mode slugs for ONE area, cached
+ * for 30s. Falls back to the two legacy system modes if the table is
+ * briefly unreachable (e.g. mid-migration) so validation never hard-fails
+ * startup.
  */
-const loadActiveSlugs = async () => {
-  return cache.wrap(cacheKeyForArea(STORE_MODE_AREA_ID_STOPGAP), async () => {
+const loadActiveSlugs = async (areaId = STORE_MODE_AREA_ID_STOPGAP) => {
+  return cache.wrap(cacheKeyForArea(areaId), async () => {
     try {
-      const [rows] = await pool.query('SELECT slug FROM store_modes WHERE active = TRUE');
+      const [rows] = await pool.query('SELECT slug FROM store_modes WHERE active = TRUE AND area_id = ?', [areaId]);
       const slugs = new Set(rows.map(r => r.slug));
       if (slugs.size === 0) return new Set(['packed', 'fast_food']);
       return slugs;
@@ -44,14 +46,15 @@ const loadActiveSlugs = async () => {
 };
 
 /** Call after any admin store-mode create/update/deactivate so reads see it immediately. */
-const invalidateStoreModeCache = () => cache.del(cacheKeyForArea(STORE_MODE_AREA_ID_STOPGAP));
+const invalidateStoreModeCache = (areaId = STORE_MODE_AREA_ID_STOPGAP) => cache.del(cacheKeyForArea(areaId));
 
-/** Returns the active store mode slugs (excludes the 'all' sentinel) as an array. */
-const getActiveStoreModeSlugs = async () => Array.from(await loadActiveSlugs());
+/** Returns the active store mode slugs for an area (excludes the 'all' sentinel) as an array. */
+const getActiveStoreModeSlugs = async (areaId = STORE_MODE_AREA_ID_STOPGAP) => Array.from(await loadActiveSlugs(areaId));
 
 // The two original hardcoded modes are is_system rows that can never be
 // deactivated (see storeModeController.updateStoreMode), so membership here
-// is always valid without a DB round-trip.
+// is always valid without a DB round-trip — true in every area, since
+// TASK 11 seeds is_system rows per area.
 const SYSTEM_SLUGS = new Set(['packed', 'fast_food']);
 const isSystemModeSlug = (slug) => SYSTEM_SLUGS.has(slug);
 
@@ -62,10 +65,12 @@ const isSystemModeSlug = (slug) => SYSTEM_SLUGS.has(slug);
  * @param {Object} options Options for normalization.
  * @param {string|false} [options.fallback] A fallback mode if value is not provided (e.g. 'packed'). If false, throws error on missing.
  * @param {boolean} [options.allowAll] Whether 'all' is a valid mode (useful for legacy APIs before full cleanup).
+ * @param {number} [options.areaId] Which area's active store modes to validate against (H4) —
+ *   defaults to the stopgap area until the caller has been threaded through with a real one.
  * @returns {Promise<string>} The canonical store mode slug (or 'all' if allowed).
  */
 const normalizeStoreType = async (value, options = {}) => {
-  const { fallback = 'packed', allowAll = false } = options;
+  const { fallback = 'packed', allowAll = false, areaId = STORE_MODE_AREA_ID_STOPGAP } = options;
 
   if (!value) {
     if (fallback === false) {
@@ -85,7 +90,7 @@ const normalizeStoreType = async (value, options = {}) => {
     return LEGACY_ALIASES[normalizedValue];
   }
 
-  const activeSlugs = await loadActiveSlugs();
+  const activeSlugs = await loadActiveSlugs(areaId);
   if (activeSlugs.has(normalizedValue)) {
     return normalizedValue;
   }

@@ -1,5 +1,6 @@
 const { pool } = require('../db/mysql');
 const { invalidateStoreModeCache } = require('../utils/storeMode');
+const { requestAreaId } = require('../utils/areaScope');
 
 const RESERVED_SLUGS = new Set(['all']);
 const SLUG_PATTERN = /^[a-z][a-z0-9_]{1,30}$/;
@@ -26,14 +27,41 @@ const withIconUrl = (row) => {
   };
 };
 
+// Rejects null (super_admin, no X-Area-Id) and 'all' — store mode
+// management always targets exactly one area (§2.10).
+const requireOneArea = (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required to manage store modes' });
+    return null;
+  }
+  if (areaId === 'all') {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Store modes cannot be managed for "all" areas at once — pick one area' });
+    return null;
+  }
+  return areaId;
+};
+
 // Public endpoint: GET /api/store-modes — active modes for the customer/web capsule.
 const getStoreModes = async (req, res) => {
+  // Store modes gate which dashboard/products a customer can even reach,
+  // so this is catalog data, not settings metadata (§2.4) — a pin outside
+  // every zone (null) gets an empty list, same as listActiveZonesPublic,
+  // not a fallback to the default area's modes. Only a cold app open with
+  // no pin yet resolves to a real area via resolveCustomerArea's own
+  // default-area fallback.
+  const areaId = requestAreaId(req);
+  if (areaId === null || areaId === 'all') {
+    return res.status(200).json({ data: [], storeModes: [] });
+  }
+
   const [rows] = await pool.query(
     `SELECT sm.id, sm.slug, sm.label, sm.display_order, sm.is_default, i.url AS icon_image_url
      FROM store_modes sm
      LEFT JOIN images i ON i.id = sm.icon_image_id
-     WHERE sm.active = TRUE
-     ORDER BY sm.display_order ASC, sm.id ASC`
+     WHERE sm.active = TRUE AND sm.area_id = ?
+     ORDER BY sm.display_order ASC, sm.id ASC`,
+    [areaId]
   );
   const data = rows.map(withIconUrl);
   res.status(200).json({ data, storeModes: data });
@@ -41,11 +69,16 @@ const getStoreModes = async (req, res) => {
 
 // Admin endpoint: GET /api/admin/store-modes — all modes including inactive.
 const getAdminStoreModes = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const [rows] = await pool.query(
     `SELECT sm.*, i.url AS icon_image_url
      FROM store_modes sm
      LEFT JOIN images i ON i.id = sm.icon_image_id
-     ORDER BY sm.display_order ASC, sm.id ASC`
+     WHERE sm.area_id = ?
+     ORDER BY sm.display_order ASC, sm.id ASC`,
+    [areaId]
   );
   res.status(200).json({ data: rows.map(withIconUrl) });
 };
@@ -53,6 +86,9 @@ const getAdminStoreModes = async (req, res) => {
 const isValidImageId = (id) => /^\d+$/.test(String(id));
 
 const createStoreMode = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { slug, label } = req.body;
   const iconImageId = pickImageIdField(req.body);
   const cleanSlug = String(slug || '').trim().toLowerCase();
@@ -72,27 +108,30 @@ const createStoreMode = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Label is required' });
   }
 
-  const [[existing]] = await pool.query('SELECT id FROM store_modes WHERE slug = ?', [cleanSlug]);
+  const [[existing]] = await pool.query('SELECT id FROM store_modes WHERE slug = ? AND area_id = ?', [cleanSlug, areaId]);
   if (existing) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: `A mode with slug "${cleanSlug}" already exists` });
   }
 
-  const [[{ activeCount }]] = await pool.query('SELECT COUNT(*) as activeCount FROM store_modes WHERE active = TRUE');
+  const [[{ activeCount }]] = await pool.query('SELECT COUNT(*) as activeCount FROM store_modes WHERE active = TRUE AND area_id = ?', [areaId]);
   if (Number(activeCount) >= MAX_ACTIVE_MODES) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: `Cannot have more than ${MAX_ACTIVE_MODES} active store modes at once. Deactivate one first.` });
   }
 
-  const [[{ maxOrder }]] = await pool.query('SELECT COALESCE(MAX(display_order), 0) as maxOrder FROM store_modes');
+  const [[{ maxOrder }]] = await pool.query('SELECT COALESCE(MAX(display_order), 0) as maxOrder FROM store_modes WHERE area_id = ?', [areaId]);
 
   const [result] = await pool.query(
-    'INSERT INTO store_modes (slug, label, display_order, active, is_system, icon_image_id) VALUES (?, ?, ?, TRUE, FALSE, ?)',
-    [cleanSlug, cleanLabel, Number(maxOrder) + 1, iconImageId != null ? iconImageId : null]
+    'INSERT INTO store_modes (area_id, slug, label, display_order, active, is_system, icon_image_id) VALUES (?, ?, ?, ?, TRUE, FALSE, ?)',
+    [areaId, cleanSlug, cleanLabel, Number(maxOrder) + 1, iconImageId != null ? iconImageId : null]
   );
-  invalidateStoreModeCache();
+  invalidateStoreModeCache(areaId);
   res.status(201).json({ message: 'Store mode created', id: result.insertId });
 };
 
 const updateStoreMode = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const { label, display_order, active } = req.body;
   const iconImageId = pickImageIdField(req.body);
@@ -102,7 +141,10 @@ const updateStoreMode = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Invalid icon_image_id' });
   }
 
-  const [[existing]] = await pool.query('SELECT * FROM store_modes WHERE id = ?', [id]);
+  // area_id in the WHERE, not just id: without this, an area_admin could
+  // PATCH another area's store mode by guessing its (globally sequential)
+  // numeric id.
+  const [[existing]] = await pool.query('SELECT * FROM store_modes WHERE id = ? AND area_id = ?', [id, areaId]);
   if (!existing) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Store mode not found' });
   }
@@ -116,19 +158,22 @@ const updateStoreMode = async (req, res) => {
   }
 
   if (active === true && !existing.active) {
-    const [[{ activeCount }]] = await pool.query('SELECT COUNT(*) as activeCount FROM store_modes WHERE active = TRUE');
+    const [[{ activeCount }]] = await pool.query('SELECT COUNT(*) as activeCount FROM store_modes WHERE active = TRUE AND area_id = ?', [areaId]);
     if (Number(activeCount) >= MAX_ACTIVE_MODES) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: `Cannot have more than ${MAX_ACTIVE_MODES} active store modes at once. Deactivate one first.` });
     }
   }
 
   if (active === false) {
+    // offers isn't area-scoped yet (TASK 12), so its slot in this usage
+    // count stays unscoped for now — categories/combos (this task's own
+    // scope) are correctly scoped to this area.
     const [[usage]] = await pool.query(
       `SELECT
-        (SELECT COUNT(*) FROM categories WHERE type = ? AND deleted = 0) +
-        (SELECT COUNT(*) FROM combos WHERE store_type = ? AND deleted = 0) +
+        (SELECT COUNT(*) FROM categories WHERE type = ? AND deleted = 0 AND area_id = ?) +
+        (SELECT COUNT(*) FROM combos WHERE store_type = ? AND deleted = 0 AND area_id = ?) +
         (SELECT COUNT(*) FROM offers WHERE store_type = ? AND deleted = 0) as count`,
-      [existing.slug, existing.slug, existing.slug]
+      [existing.slug, areaId, existing.slug, areaId, existing.slug]
     );
     if (Number(usage.count) > 0 && !req.body.force) {
       return res.status(400).json({
@@ -173,14 +218,16 @@ const updateStoreMode = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'No valid fields provided' });
   }
 
-  // Only one mode may be default at a time — clear the others first.
+  // Only one mode may be default at a time, WITHIN this area — clear the
+  // others first. Scoped by area_id: without it, setting area 2's default
+  // would silently clear area 1's default too.
   if (isDefault === true) {
-    await pool.query('UPDATE store_modes SET is_default = FALSE WHERE id != ?', [id]);
+    await pool.query('UPDATE store_modes SET is_default = FALSE WHERE id != ? AND area_id = ?', [id, areaId]);
   }
 
-  params.push(id);
-  await pool.query(`UPDATE store_modes SET ${updates.join(', ')} WHERE id = ?`, params);
-  invalidateStoreModeCache();
+  params.push(id, areaId);
+  await pool.query(`UPDATE store_modes SET ${updates.join(', ')} WHERE id = ? AND area_id = ?`, params);
+  invalidateStoreModeCache(areaId);
   res.status(200).json({ message: 'Store mode updated' });
 };
 

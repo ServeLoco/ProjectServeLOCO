@@ -3,13 +3,21 @@ const { validatePagination } = require('../validators');
 const { isPositiveInteger } = require('../validators');
 const { normalizeStoreType } = require('../utils/storeMode');
 const { cleanupOrphanedImage } = require('./imageController');
-const microCache = require('../utils/microCache');
+const { requestAreaId, bustAreaCaches } = require('../utils/areaScope');
 
-// Hardcoded to area 1 for now (TASK 11 makes combos area-scoped); the
-// cache bust plumbing is area-shaped already.
-const COMBO_CACHE_AREA_ID_STOPGAP = 1;
-const bustDashboardCache = () => {
-  microCache.bust('dashboard', COMBO_CACHE_AREA_ID_STOPGAP);
+// Admin write/single-item endpoints reject null (super_admin, no
+// X-Area-Id) and 'all' — combo management always targets exactly one area.
+const requireOneArea = (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required to manage combos' });
+    return null;
+  }
+  if (areaId === 'all') {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Combos cannot be managed for "all" areas at once — pick one area' });
+    return null;
+  }
+  return areaId;
 };
 
 const resolveImageUrls = async (rows) => {
@@ -101,12 +109,12 @@ const createValidationError = (message) => {
   return error;
 };
 
-const saveComboItems = async (comboId, comboItems, connection = pool, comboStoreType = null) => {
+const saveComboItems = async (comboId, comboItems, connection = pool, comboStoreType = null, areaId) => {
   if (!Array.isArray(comboItems)) return;
 
   await connection.query('DELETE FROM combo_items WHERE combo_id = ?', [comboId]);
 
-  const rows = await validateComboItems(comboItems, comboStoreType);
+  const rows = await validateComboItems(comboItems, comboStoreType, { areaId });
 
   if (rows.length === 0) return;
 
@@ -117,7 +125,9 @@ const saveComboItems = async (comboId, comboItems, connection = pool, comboStore
   );
 };
 
-const validateComboItems = async (comboItems, comboStoreType, { required = true } = {}) => {
+// `areaId` scopes the product-existence check (H5) — without it, a combo in
+// area 2 could bundle a product id that actually belongs to area 1.
+const validateComboItems = async (comboItems, comboStoreType, { required = true, areaId } = {}) => {
   if (!Array.isArray(comboItems)) {
     if (required) {
       throw createValidationError('Please add at least one product to the combo.');
@@ -149,8 +159,10 @@ const validateComboItems = async (comboItems, comboStoreType, { required = true 
   }
 
   const [products] = await pool.query(
-    'SELECT p.id, p.name, p.is_combo, p.deleted, p.available, c.type as category_type FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id IN (?)',
-    [rows.map(row => row.product_id)]
+    `SELECT p.id, p.name, p.is_combo, p.deleted, p.available, c.type as category_type
+     FROM products p LEFT JOIN categories c ON p.category_id = c.id
+     WHERE p.id IN (?)${areaId != null ? ' AND p.area_id = ?' : ''}`,
+    areaId != null ? [rows.map(row => row.product_id), areaId] : [rows.map(row => row.product_id)]
   );
   const productById = new Map(products.map(product => [Number(product.id), product]));
 
@@ -174,15 +186,18 @@ const validateComboItems = async (comboItems, comboStoreType, { required = true 
 };
 
 const getAdminCombos = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { search, available, featured, store_type, storeType, page, limit } = req.query;
   const finalStoreType = store_type || storeType;
   const pagination = validatePagination(page, limit);
 
-  let whereClause = "WHERE deleted = 0";
-  const params = [];
+  let whereClause = "WHERE deleted = 0 AND area_id = ?";
+  const params = [areaId];
 
   if (finalStoreType) {
-    const normalizedStoreType = await normalizeStoreType(finalStoreType, { allowAll: true });
+    const normalizedStoreType = await normalizeStoreType(finalStoreType, { allowAll: true, areaId });
     if (normalizedStoreType !== 'all') {
       whereClause += ' AND store_type = ?';
       params.push(normalizedStoreType);
@@ -235,13 +250,16 @@ const getAdminCombos = async (req, res) => {
 };
 
 const getAdminComboById = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const [rows] = await pool.query(`
-    SELECT * 
-    FROM combos 
-    WHERE id = ? AND deleted = 0
-  `, [id]);
-  
+    SELECT *
+    FROM combos
+    WHERE id = ? AND deleted = 0 AND area_id = ?
+  `, [id, areaId]);
+
   if (rows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Combo not found' });
   }
@@ -254,18 +272,21 @@ const getAdminComboById = async (req, res) => {
 };
 
 const createCombo = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { name, price, unit, description, image_id, available, featured, display_order, original_price, discount_label, combo_items, store_type: rawStoreType } = req.validatedData;
   let store_type;
   try {
-    store_type = await normalizeStoreType(rawStoreType, { fallback: false });
+    store_type = await normalizeStoreType(rawStoreType, { fallback: false, areaId });
   } catch (e) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: e.message });
   }
   const finalDisplayOrder = display_order !== undefined ? display_order : 0;
-  const validatedComboItems = await validateComboItems(combo_items, store_type);
+  const validatedComboItems = await validateComboItems(combo_items, store_type, { areaId });
 
   if (finalDisplayOrder > 0) {
-    const [existing] = await pool.query('SELECT name FROM combos WHERE display_order = ? AND store_type = ? AND deleted = 0 LIMIT 1', [finalDisplayOrder, store_type]);
+    const [existing] = await pool.query('SELECT name FROM combos WHERE display_order = ? AND store_type = ? AND deleted = 0 AND area_id = ? LIMIT 1', [finalDisplayOrder, store_type, areaId]);
     if (existing.length > 0) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: `Display order ${finalDisplayOrder} is already used by ${existing[0].name} in this mode.` });
     }
@@ -275,9 +296,9 @@ const createCombo = async (req, res) => {
   await connection.beginTransaction();
   try {
     const [result] = await connection.query(
-      'INSERT INTO combos (name, price, unit, description, image_id, available, featured, display_order, original_price, discount_label, store_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO combos (area_id, name, price, unit, description, image_id, available, featured, display_order, original_price, discount_label, store_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
-        name, price, unit, description, image_id, 
+        areaId, name, price, unit, description, image_id,
         available !== undefined ? available : true,
         featured !== undefined ? featured : false,
         finalDisplayOrder,
@@ -286,9 +307,9 @@ const createCombo = async (req, res) => {
         store_type
       ]
     );
-    await saveComboItems(result.insertId, validatedComboItems, connection, store_type);
+    await saveComboItems(result.insertId, validatedComboItems, connection, store_type, areaId);
     await connection.commit();
-    bustDashboardCache();
+    await bustAreaCaches(areaId);
     res.status(201).json({ message: 'Combo created', id: result.insertId });
   } catch (error) {
     await connection.rollback();
@@ -299,18 +320,24 @@ const createCombo = async (req, res) => {
 };
 
 const updateCombo = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const { name, price, unit, description, image_id, available, featured, display_order, original_price, discount_label, combo_items, store_type: rawStoreType } = req.validatedData;
   let store_type;
   if (rawStoreType) {
     try {
-      store_type = await normalizeStoreType(rawStoreType, { fallback: false });
+      store_type = await normalizeStoreType(rawStoreType, { fallback: false, areaId });
     } catch (e) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: e.message });
     }
   }
 
-  const [existing] = await pool.query('SELECT id, store_type, image_id FROM combos WHERE id = ? AND deleted = 0', [id]);
+  // area_id in the WHERE, not just id: without this, an area_admin could
+  // PATCH another area's combo by guessing its (globally sequential)
+  // numeric id.
+  const [existing] = await pool.query('SELECT id, store_type, image_id FROM combos WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (existing.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Combo not found' });
   }
@@ -318,19 +345,19 @@ const updateCombo = async (req, res) => {
   const existingCombo = existing[0];
   const previousImageId = existingCombo.image_id;
   const targetStoreType = store_type || existingCombo.store_type;
-  const validatedComboItems = await validateComboItems(combo_items, targetStoreType, { required: combo_items !== undefined });
+  const validatedComboItems = await validateComboItems(combo_items, targetStoreType, { required: combo_items !== undefined, areaId });
 
   if (combo_items === undefined && targetStoreType !== existingCombo.store_type) {
     const [existingItems] = await pool.query(
       'SELECT product_id, quantity, display_order FROM combo_items WHERE combo_id = ? ORDER BY display_order ASC, id ASC',
       [id]
     );
-    await validateComboItems(existingItems, targetStoreType, { required: existingItems.length > 0 });
+    await validateComboItems(existingItems, targetStoreType, { required: existingItems.length > 0, areaId });
   }
 
   const finalDisplayOrder = display_order !== undefined ? display_order : 0;
   if (finalDisplayOrder > 0) {
-    const [orderExisting] = await pool.query('SELECT name FROM combos WHERE display_order = ? AND store_type = ? AND id != ? AND deleted = 0 LIMIT 1', [finalDisplayOrder, targetStoreType, id]);
+    const [orderExisting] = await pool.query('SELECT name FROM combos WHERE display_order = ? AND store_type = ? AND id != ? AND deleted = 0 AND area_id = ? LIMIT 1', [finalDisplayOrder, targetStoreType, id, areaId]);
     if (orderExisting.length > 0) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: `Display order ${finalDisplayOrder} is already used by ${orderExisting[0].name} in this mode.` });
     }
@@ -340,20 +367,20 @@ const updateCombo = async (req, res) => {
   await connection.beginTransaction();
   try {
     await connection.query(
-      'UPDATE combos SET name = ?, price = ?, unit = ?, description = ?, image_id = ?, available = ?, featured = ?, display_order = ?, original_price = ?, discount_label = ?, store_type = ? WHERE id = ?',
+      'UPDATE combos SET name = ?, price = ?, unit = ?, description = ?, image_id = ?, available = ?, featured = ?, display_order = ?, original_price = ?, discount_label = ?, store_type = ? WHERE id = ? AND area_id = ?',
       [
-        name, price, unit, description, image_id, 
+        name, price, unit, description, image_id,
         available !== undefined ? available : true,
         featured !== undefined ? featured : false,
         finalDisplayOrder,
         original_price || null,
         discount_label || null,
         targetStoreType,
-        id
+        id, areaId
       ]
     );
     if (combo_items !== undefined) {
-      await saveComboItems(id, validatedComboItems, connection, targetStoreType);
+      await saveComboItems(id, validatedComboItems, connection, targetStoreType, areaId);
     }
     await connection.commit();
   } catch (error) {
@@ -367,24 +394,30 @@ const updateCombo = async (req, res) => {
     await cleanupOrphanedImage(previousImageId);
   }
 
-  bustDashboardCache();
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Combo updated' });
 };
 
 const deleteCombo = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
-  const [existing] = await pool.query('SELECT id, image_id FROM combos WHERE id = ? AND deleted = 0', [id]);
+  const [existing] = await pool.query('SELECT id, image_id FROM combos WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (existing.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Combo not found' });
   }
 
-  await pool.query('UPDATE combos SET deleted = 1 WHERE id = ?', [id]);
+  await pool.query('UPDATE combos SET deleted = 1 WHERE id = ? AND area_id = ?', [id, areaId]);
   await cleanupOrphanedImage(existing[0].image_id);
-  bustDashboardCache();
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Combo soft deleted' });
 };
 
 const updateComboAvailability = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const finalAvail = req.validatedData?.available;
   if (finalAvail === undefined) {
@@ -392,13 +425,13 @@ const updateComboAvailability = async (req, res) => {
   }
 
   const normalizedAvailable = finalAvail === true || finalAvail === 'true' || finalAvail === 1 || finalAvail === '1';
-  const [result] = await pool.query('UPDATE combos SET available = ? WHERE id = ? AND deleted = 0', [normalizedAvailable ? 1 : 0, id]);
+  const [result] = await pool.query('UPDATE combos SET available = ? WHERE id = ? AND deleted = 0 AND area_id = ?', [normalizedAvailable ? 1 : 0, id, areaId]);
   if (result.affectedRows === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Combo not found' });
   }
-  
+
   const [updatedRows] = await pool.query('SELECT * FROM combos WHERE id = ?', [id]);
-  bustDashboardCache();
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Combo availability updated', combo: updatedRows[0] });
 };
 

@@ -7,7 +7,22 @@ const { pool } = require('../db/mysql');
 const config = require('../config/env');
 const s3 = require('../config/s3');
 const { normalizeStoreType } = require('../utils/storeMode');
-const microCache = require('../utils/microCache');
+const { requestAreaId, bustAreaCaches } = require('../utils/areaScope');
+
+// Bulk import always targets exactly one area — rejects null (super_admin,
+// no X-Area-Id) and 'all'.
+const requireOneArea = (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required for bulk import' });
+    return null;
+  }
+  if (areaId === 'all') {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Bulk import cannot target "all" areas at once — pick one area' });
+    return null;
+  }
+  return areaId;
+};
 
 const GENERIC_ERROR = 'Something went wrong. Please try again later.';
 const UPLOAD_DIR = path.join(__dirname, '../../', config.UPLOAD_DIR);
@@ -22,10 +37,10 @@ const MAX_ZIP_UNCOMPRESSED_BYTES = 50 * 1024 * 1024; // 50 MB
 // entry with a compression ratio typical of a zip-bomb, before decompressing.
 const MAX_COMPRESSION_RATIO = 200;
 
-const normaliseMode = async (raw) => {
+const normaliseMode = async (raw, areaId) => {
   if (!raw) return null;
   try {
-    return await normalizeStoreType(raw, { fallback: false });
+    return await normalizeStoreType(raw, { fallback: false, areaId });
   } catch {
     return null;
   }
@@ -103,7 +118,7 @@ const cleanupFiles = async (filenames) => { for (const f of filenames) await del
  * validRows: rows ready to commit (action = create|update)
  * skippedRows: rows with a reason why they were skipped
  */
-const validateRows = async (rawRows, zipEntryMap, categoryMap, categoryNameMap) => {
+const validateRows = async (rawRows, zipEntryMap, categoryMap, categoryNameMap, areaId) => {
   const validRows = [];
   const skippedRows = [];
   const seenImageFiles = new Map();
@@ -130,7 +145,7 @@ const validateRows = async (rawRows, zipEntryMap, categoryMap, categoryNameMap) 
 
     // ── mode (optional for validation)
     const modeRaw = String(raw.mode || '').trim();
-    const normalisedMode = modeRaw ? await normaliseMode(modeRaw) : null;
+    const normalisedMode = modeRaw ? await normaliseMode(modeRaw, areaId) : null;
     if (modeRaw && !normalisedMode)
       skipReasons.push(`unrecognised mode '${modeRaw}'. Accepted: packed, packed items, fast, fast food, fast_food, or any active store mode slug`);
 
@@ -247,7 +262,9 @@ const validateRows = async (rawRows, zipEntryMap, categoryMap, categoryNameMap) 
     let keepExistingImage = false;
 
     if (explicitId) {
-      const [found] = await pool.query('SELECT id, image_id FROM products WHERE id = ? AND deleted = 0 LIMIT 1', [explicitId]);
+      // area_id in the WHERE: an id column typed into the CSV must not let
+      // an import in one area silently edit another area's product.
+      const [found] = await pool.query('SELECT id, image_id FROM products WHERE id = ? AND deleted = 0 AND area_id = ? LIMIT 1', [explicitId, areaId]);
       if (found.length === 0) {
         skippedRows.push({ row: rowNum, name, category: resolvedCategoryName, reason: `product ID ${explicitId} not found` });
         continue;
@@ -258,8 +275,8 @@ const validateRows = async (rawRows, zipEntryMap, categoryMap, categoryNameMap) 
     } else {
       // Fall back to name+category match
       const [found] = await pool.query(
-        'SELECT id, image_id FROM products WHERE name = ? AND category_id = ? AND deleted = 0 LIMIT 1',
-        [name, resolvedCategoryId]
+        'SELECT id, image_id FROM products WHERE name = ? AND category_id = ? AND deleted = 0 AND area_id = ? LIMIT 1',
+        [name, resolvedCategoryId, areaId]
       );
       if (found.length > 0) {
         action = 'update';
@@ -341,7 +358,7 @@ const validateRows = async (rawRows, zipEntryMap, categoryMap, categoryNameMap) 
 // Shared parse logic
 // ─────────────────────────────────────────────
 
-const parseAndValidate = async (req) => {
+const parseAndValidate = async (req, areaId) => {
   const csvFile = req.files?.csvFile?.[0];
   const zipFile = req.files?.imagesZip?.[0];
 
@@ -392,8 +409,9 @@ const parseAndValidate = async (req) => {
     }
   }
 
-  // Load categories
-  const [catRows] = await pool.query('SELECT id, name, type FROM categories WHERE deleted = 0');
+  // Load categories — scoped to this import's area (H8): a CSV imported
+  // into area 2 must only match/resolve against area 2's categories.
+  const [catRows] = await pool.query('SELECT id, name, type FROM categories WHERE deleted = 0 AND area_id = ?', [areaId]);
   const categoryMap = {};
   const categoryNameMap = {}; // lowercase name → array of category objects
   for (const c of catRows) {
@@ -403,7 +421,7 @@ const parseAndValidate = async (req) => {
     categoryNameMap[key].push(c);
   }
 
-  const { validRows, skippedRows } = await validateRows(rawRows, zipEntryMap, categoryMap, categoryNameMap);
+  const { validRows, skippedRows } = await validateRows(rawRows, zipEntryMap, categoryMap, categoryNameMap, areaId);
 
   return { rawRows, validRows, skippedRows, zipEntryMap, categoryMap };
 };
@@ -413,8 +431,11 @@ const parseAndValidate = async (req) => {
 // ─────────────────────────────────────────────
 
 const previewBulkImport = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   try {
-    const { rawRows, validRows, skippedRows } = await parseAndValidate(req);
+    const { rawRows, validRows, skippedRows } = await parseAndValidate(req, areaId);
 
     const createCount = validRows.filter(r => r._action === 'create').length;
     const updateCount = validRows.filter(r => r._action === 'update').length;
@@ -451,11 +472,14 @@ const previewBulkImport = async (req, res) => {
 };
 
 const commitBulkImport = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const savedFiles = [];
   let connection;
 
   try {
-    const { validRows, skippedRows, zipEntryMap } = await parseAndValidate(req);
+    const { validRows, skippedRows, zipEntryMap } = await parseAndValidate(req, areaId);
 
     if (validRows.length === 0) {
       return res.status(422).json({
@@ -525,30 +549,32 @@ const commitBulkImport = async (req, res) => {
       }
 
       if (row._action === 'create') {
+        // H8: imports land in the admin's current area.
         await connection.query(
-          `INSERT INTO products (name, price, category_id, unit, description, image_id, available, is_combo, featured, display_order, original_price, discount_label)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [row.name, row.price, row.category_id, row.unit, row.description, newImageId,
+          `INSERT INTO products (area_id, name, price, category_id, unit, description, image_id, available, is_combo, featured, display_order, original_price, discount_label)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [areaId, row.name, row.price, row.category_id, row.unit, row.description, newImageId,
            row.available ? 1 : 0, 0, row.featured ? 1 : 0, row.display_order, row.original_price, row.discount_label]
         );
         created++;
       } else {
+        // area_id in the WHERE: row._existingId was already resolved
+        // against THIS area in validateRows, but re-asserting it here
+        // keeps the write itself safe even if that ever changes.
         await connection.query(
           `UPDATE products SET name = ?, price = ?, category_id = ?, unit = ?, description = ?,
            image_id = ?, available = ?, featured = ?, display_order = ?, original_price = ?, discount_label = ?
-           WHERE id = ? AND deleted = 0`,
+           WHERE id = ? AND deleted = 0 AND area_id = ?`,
           [row.name, row.price, row.category_id, row.unit, row.description, newImageId,
            row.available ? 1 : 0, row.featured ? 1 : 0, row.display_order, row.original_price, row.discount_label,
-           row._existingId]
+           row._existingId, areaId]
         );
         updated++;
       }
     }
 
     await connection.commit();
-    // Hardcoded to area 1 for now (TASK 11 makes bulk import area-scoped).
-    microCache.bust('dashboard', 1);
-    microCache.bust('categories', 1);
+    await bustAreaCaches(areaId);
     connection.release();
 
     return res.status(201).json({

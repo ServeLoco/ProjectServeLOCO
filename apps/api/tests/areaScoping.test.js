@@ -53,6 +53,15 @@ const SWEPT_TABLES = [
   'settings', // TASK 9
   'delivery_zones', // TASK 10
   'delivery_exclusion_zones', // TASK 10
+  // categories/products/combos/store_modes/product_groups are NOT here yet
+  // even though TASK 11 fully scoped its own file list — cartController.js,
+  // orderController.js, dashboardController.js, analyticsController.js and
+  // settingsController.js's radius-pricing product/category reads (all
+  // owned by TASK 12/13/17) still reference these tables unscoped. Unlike
+  // settings/delivery_zones (single-owner tables TASK 9/10 swept
+  // completely), these five are referenced across many files owned by
+  // different future tasks — add them here only once every remaining site
+  // across the whole codebase is done, not just this task's own files.
 ];
 
 // { file: relative path from apps/api, line: 1-indexed, reason: why this is OK }

@@ -37,6 +37,7 @@ describe('Combo Transactional Update', () => {
     mockConnection.query.mockRejectedValueOnce(new Error('Insert failed'));
 
     const req = {
+      areaId: 1,
       validatedData: {
         name: 'My Combo',
         combo_items: [{ product_id: 1, quantity: 1 }],
