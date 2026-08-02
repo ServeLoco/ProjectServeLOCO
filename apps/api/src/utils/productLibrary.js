@@ -67,6 +67,16 @@ const materializeToArea = async (conn, {
     [libraryProductId]
   );
 
+  // products.unit is still the free-text column it always was (22.6, no
+  // response shape change) — resolve the library's unit_id to that string
+  // once here, at materialization time, rather than joining `units` on
+  // every catalog read.
+  let unitText = null;
+  if (lib.unit_id != null) {
+    const [unitRows] = await conn.query('SELECT name FROM units WHERE id = ?', [lib.unit_id]);
+    unitText = unitRows[0]?.name || null;
+  }
+
   const finalPrice = price != null ? Number(price) : (lib.suggested_price != null ? Number(lib.suggested_price) : 0);
 
   const [result] = await conn.query(
@@ -74,11 +84,7 @@ const materializeToArea = async (conn, {
       available, is_combo, featured, display_order, shop_id, variant_prompt, library_product_id)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
-      areaId, lib.name, finalPrice, shopPrice, categoryId,
-      // No `unit` text to copy yet — product_library only carries unit_id,
-      // a forward-declared pointer to the units table TASK 23 builds. Left
-      // NULL here, same as any product created without one today.
-      null,
+      areaId, lib.name, finalPrice, shopPrice, categoryId, unitText,
       lib.description, lib.image_id,
       available ? 1 : 0, false, false, displayOrder, shopId, lib.variant_prompt, libraryProductId,
     ]
@@ -168,10 +174,16 @@ const propagateLibraryEdit = async (conn, libraryProductId) => {
 
   // 1. Identity — one statement, explicit column list always (§6.7: never a
   // spread of the request body — one stray column would overwrite every
-  // area's pricing in a single UPDATE).
+  // area's pricing in a single UPDATE). unit_id resolves to the same
+  // free-text products.unit column materializeToArea writes (22.6).
+  let unitText = null;
+  if (lib.unit_id != null) {
+    const [unitRows] = await conn.query('SELECT name FROM units WHERE id = ?', [lib.unit_id]);
+    unitText = unitRows[0]?.name || null;
+  }
   await conn.query(
     'UPDATE products SET name = ?, description = ?, image_id = ?, unit = ? WHERE library_product_id = ?',
-    [lib.name, lib.description, lib.image_id, null, libraryProductId]
+    [lib.name, lib.description, lib.image_id, unitText, libraryProductId]
   );
 
   // 2. Variant labels — one JOIN-based UPDATE covers every area's variants

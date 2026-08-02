@@ -699,6 +699,46 @@ const migrate = async () => {
     // same shape as the product library indexes just above.
     await ensureIndex('categories', 'idx_categories_library_category', 'library_category_id');
     await ensureIndex('store_modes', 'idx_store_modes_library_store_mode', 'library_store_mode_id');
+
+    // Search must stop being a full table scan (TASK 22, §3.11) — a leading
+    // '%term%' LIKE cannot use any index. FULLTEXT on both the per-area
+    // products table (customer/admin search, area-scoped) and the global
+    // library (admin "find a product to add" search, one index instead of
+    // N per-area copies).
+    const ensureFulltextIndex = async (tableName, indexName, columns) => {
+      const [rows] = await connection.query(
+        `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ? LIMIT 1`,
+        [config.MYSQL_DATABASE, tableName, indexName]
+      );
+      if (rows.length === 0) {
+        await connection.query(`ALTER TABLE ${tableName} ADD FULLTEXT INDEX ${indexName} (${columns})`);
+      }
+    };
+    await ensureFulltextIndex('products', 'ft_products_name', 'name');
+    await ensureFulltextIndex('product_library', 'ft_product_library_name', 'name');
+
+    // Units lookup (TASK 22.5, §2.7) — product_library.unit_id points at
+    // this; products.unit keeps its own free-text column and value
+    // unchanged (22.6, no response shape change) — this table is additive,
+    // not a rewrite of the existing per-product column. No FK from
+    // product_library.unit_id, same rationale as every other library
+    // linkage column in this codebase (shop_id, group_id,
+    // library_product_id, ...) — deletion policy stays in application code.
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS units (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(50) NOT NULL UNIQUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    // Small, one-shot backfill: distinct existing products.unit strings, not
+    // a per-row migration — realistically tens of values, not thousands.
+    await connection.query(`
+      INSERT IGNORE INTO units (name)
+      SELECT DISTINCT TRIM(unit) FROM products WHERE unit IS NOT NULL AND TRIM(unit) != ''
+    `);
+    console.log('Units table ready.');
     // Dashboard section item lookups by section + type + active.
     await ensureIndex('dashboard_section_items', 'idx_dsi_section_type_active', 'section_id, item_type, active');
     await ensureIndex('orders', 'idx_orders_rider', 'rider_id, status');

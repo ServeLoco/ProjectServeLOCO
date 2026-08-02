@@ -6,6 +6,7 @@ const { pool } = require('../db/mysql');
 const { validatePagination } = require('../validators');
 const { requestAreaId, bustAreaCaches } = require('../utils/areaScope');
 const { materializeToArea, syncLibraryVariants, propagateLibraryEdit, LibraryError } = require('../utils/productLibrary');
+const { decideSearchMode } = require('../utils/search');
 
 // add-to-area targets exactly one area — an area_admin's own (resolveAdminArea
 // already pins that), or a super_admin's explicit X-Area-Id. Never 'all': a
@@ -43,7 +44,9 @@ const libraryRowShape = (row) => ({
 
 // GET /admin/library?search=&status=&archived=&page=&limit=
 // Read-only browse — any admin (area or super) may see the whole library;
-// writes are the restricted part (19.3).
+// writes are the restricted part (19.3). search hits product_library — one
+// global FULLTEXT index instead of N per-area copies (TASK 22.4, §3.11):
+// this is admin's "find a product to add" lookup.
 const getLibrary = async (req, res) => {
   const { search, status, archived } = req.query;
   const pagination = validatePagination(req.query.page, req.query.limit);
@@ -52,8 +55,16 @@ const getLibrary = async (req, res) => {
   const where = [];
   const params = [];
   if (search) {
-    where.push('name LIKE ?');
-    params.push(`%${search}%`);
+    const decision = decideSearchMode(search);
+    if (decision.mode === 'none') {
+      where.push('1=0');
+    } else if (decision.mode === 'like') {
+      where.push('name LIKE ?');
+      params.push(`%${decision.term}%`);
+    } else {
+      where.push('MATCH(name) AGAINST (? IN BOOLEAN MODE)');
+      params.push(decision.term);
+    }
   }
   if (status) {
     where.push('status = ?');

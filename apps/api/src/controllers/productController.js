@@ -3,6 +3,7 @@ const { normalizeStoreType } = require('../utils/storeMode');
 const { validatePagination, isNumericAmount } = require('../validators');
 const { cleanupOrphanedImage } = require('./imageController');
 const { requestAreaId, bustAreaCaches } = require('../utils/areaScope');
+const { decideSearchMode } = require('../utils/search');
 
 // Admin write/single-item endpoints reject null (super_admin, no
 // X-Area-Id) and 'all' — product management always targets exactly one
@@ -399,12 +400,23 @@ const getProducts = async (req, res) => {
   let finalQuery = '';
   const finalParams = [];
 
+  // products has a FULLTEXT index (TASK 22, §3.11); combos does not, so
+  // combos search stays on LIKE regardless of term length — same fallback
+  // path, just permanent for that subquery rather than short-term-only.
+  const buildSearchClause = (rawTerm, isComboType) => {
+    if (isComboType) return ` AND p.name LIKE ${pool.escape('%' + String(rawTerm).trim() + '%')}`;
+    const decision = decideSearchMode(rawTerm);
+    if (decision.mode === 'none') return ' AND 1=0';
+    if (decision.mode === 'like') return ` AND p.name LIKE ${pool.escape('%' + decision.term + '%')}`;
+    return ` AND MATCH(p.name) AGAINST (${pool.escape(decision.term)} IN BOOLEAN MODE)`;
+  };
+
   const buildSubQuery = (baseQuery, isComboType) => {
     let q = baseQuery;
     if (finalCategoryId && !isComboType) q += ` AND p.category_id = ${pool.escape(finalCategoryId)}`;
     if (normalizedType !== 'all' && !isComboType) q += ` AND c.type = ${pool.escape(normalizedType)}`;
     if (normalizedType !== 'all' && isComboType) q += ` AND p.store_type = ${pool.escape(normalizedType)}`;
-    if (search) q += ` AND p.name LIKE ${pool.escape('%' + search + '%')}`;
+    if (search) q += buildSearchClause(search, isComboType);
     if (featured !== undefined) q += ` AND p.featured = ${featured === 'true' || featured === '1' ? 1 : 0}`;
     return q;
   };
@@ -681,8 +693,16 @@ const getAdminProducts = async (req, res) => {
   }
 
   if (search) {
-    whereClause += ' AND p.name LIKE ?';
-    params.push(`%${search}%`);
+    const decision = decideSearchMode(search);
+    if (decision.mode === 'none') {
+      whereClause += ' AND 1=0';
+    } else if (decision.mode === 'like') {
+      whereClause += ' AND p.name LIKE ?';
+      params.push(`%${decision.term}%`);
+    } else {
+      whereClause += ' AND MATCH(p.name) AGAINST (? IN BOOLEAN MODE)';
+      params.push(decision.term);
+    }
   }
 
   if (normalizedType && normalizedType !== 'all') {
