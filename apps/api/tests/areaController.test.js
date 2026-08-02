@@ -24,9 +24,17 @@ jest.mock('../src/controllers/settingsController', () => ({
 jest.mock('bcrypt', () => ({
   hash: jest.fn().mockResolvedValue('hashed-password'),
 }));
+// materializeToArea (§4.5) is the one shared writer of library-linked
+// products/variants, already covered by its own tests/productLibrary.test.js
+// — cloneArea's own test only needs to assert it's CALLED with the right
+// remapped params, not re-verify its internals.
+jest.mock('../src/utils/productLibrary', () => ({
+  materializeToArea: jest.fn(),
+}));
 
 const areaScope = require('../src/utils/areaScope');
 const { createSettingsForArea } = require('../src/controllers/settingsController');
+const { materializeToArea } = require('../src/utils/productLibrary');
 const bcrypt = require('bcrypt');
 
 const app = express();
@@ -225,7 +233,7 @@ describe('Area + admin management (TASK 24)', () => {
       expect(conn.rollback).toHaveBeenCalled();
     });
 
-    it('clones categories, store modes, library-linked products + variants, offers + offer_products, and dashboard sections + items', async () => {
+    it('clones categories, store modes, library-linked products + variants (via materializeToArea), offers + offer_products, and dashboard sections + items', async () => {
       areaScope.getAreaById.mockResolvedValueOnce(AREA_2).mockResolvedValueOnce(AREA_1);
 
       const sourceCategory = { id: 10, name: 'Fruits', slug: 'fruits', type: 'packed', image_id: null, active: 1, display_order: 0, library_category_id: null };
@@ -245,6 +253,8 @@ describe('Area + admin management (TASK 24)', () => {
       };
       const sourceSectionItem = { id: 80, section_id: 70, item_type: 'product', item_id: 30, display_order: 0, active: 1 };
 
+      materializeToArea.mockResolvedValueOnce({ productId: 130, alreadyLinked: false });
+
       const conn = makeConn([
         [[{ cnt: 0 }]], // categories count
         [[{ cnt: 0 }]], // products count
@@ -253,9 +263,8 @@ describe('Area + admin management (TASK 24)', () => {
         [[sourceStoreMode]], // source store modes
         [{ affectedRows: 1 }], // INSERT IGNORE store mode
         [[sourceProduct]], // source library-linked products
-        [{ insertId: 130 }], // INSERT product
-        [[sourceVariant]], // SELECT variants for product 30
-        [{ insertId: 140 }], // INSERT variant
+        [[sourceVariant]], // SELECT variants for product 30 (feeds variantPrices)
+        // materializeToArea itself is mocked — no raw connection.query call for the INSERT
         [[sourceOffer]], // source offers
         [{ insertId: 150 }], // INSERT offer
         [[sourceOfferProduct]], // SELECT offer_products for offer 50
@@ -288,21 +297,44 @@ describe('Area + admin management (TASK 24)', () => {
         expect.stringContaining('INSERT INTO categories'),
         [2, 'Fruits', 'fruits', 'packed', null, 1, 0, null]
       );
-      // Product insert remaps category_id to the newly-cloned category (110),
-      // never the source's own id (10) — that would point at the wrong area.
-      const productInsertCall = conn.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO products'));
-      expect(productInsertCall[1][3]).toEqual(110); // category_id position
-      expect(productInsertCall[1][0]).toEqual(2); // area_id
+      // materializeToArea is called with the remapped category_id (110), the
+      // TARGET area, and the library id (never the source's own product id) —
+      // identity fields (name/description/image/unit) are deliberately NOT
+      // passed, since materializeToArea always pulls those fresh from the
+      // current library row (§2.5), not a frozen snapshot of the source.
+      expect(materializeToArea).toHaveBeenCalledWith(conn, expect.objectContaining({
+        libraryProductId: 999,
+        areaId: 2,
+        categoryId: 110,
+        price: 50,
+        shopPrice: null,
+        available: true,
+        displayOrder: 0,
+        variantPrices: { 5: 50 },
+      }));
+      // offer_products and dashboard_section_items both remap product_id/item_id
+      // through materializeToArea's returned productId (130), not the source's (30).
+      expect(conn.query).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT IGNORE INTO offer_products'),
+        [150, 130, 0, 1]
+      );
+      expect(conn.query).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT IGNORE INTO dashboard_section_items'),
+        [170, 'product', 130, 0, 1]
+      );
     });
 
-    it('applies a price multiplier to cloned product/variant prices', async () => {
+    it('applies a price multiplier to the price/shopPrice/variantPrices passed into materializeToArea, and flat-copies original_price/discount_label/featured afterward', async () => {
       areaScope.getAreaById.mockResolvedValueOnce(AREA_2).mockResolvedValueOnce(AREA_1);
       const sourceProduct = {
         id: 30, name: 'Apple', price: 50, category_id: 10, unit: 'kg', description: null, image_id: null,
-        available: 1, is_combo: 0, featured: 0, display_order: 0, original_price: 60, discount_label: null,
+        available: 1, is_combo: 0, featured: 1, display_order: 0, original_price: 60, discount_label: 'SALE',
         library_product_id: 999, shop_price: 40, variant_prompt: null,
       };
+      const sourceVariant = { id: 40, product_id: 30, label: '1kg', price: 20, original_price: null, available: 1, is_default: 1, display_order: 0, shop_price: null, library_variant_id: 5 };
       const sourceCategory = { id: 10, name: 'Fruits', slug: 'fruits', type: 'packed', image_id: null, active: 1, display_order: 0, library_category_id: null };
+      materializeToArea.mockResolvedValueOnce({ productId: 130, alreadyLinked: false });
+
       const conn = makeConn([
         [[{ cnt: 0 }]],
         [[{ cnt: 0 }]],
@@ -310,8 +342,8 @@ describe('Area + admin management (TASK 24)', () => {
         [{ insertId: 110 }],
         [[]], // no store modes
         [[sourceProduct]],
-        [{ insertId: 130 }],
-        [[]], // no variants
+        [[sourceVariant]], // variantPrices source
+        [{ affectedRows: 1 }], // follow-up UPDATE (original_price/discount_label/featured)
         [[]], // no offers
         [[]], // no sections
       ]);
@@ -323,10 +355,15 @@ describe('Area + admin management (TASK 24)', () => {
         .send({ priceMultiplier: 1.5 });
 
       expect(res.statusCode).toEqual(201);
-      const productInsertCall = conn.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO products'));
-      expect(productInsertCall[1][2]).toEqual(75); // price 50 * 1.5
-      expect(productInsertCall[1][11]).toEqual(90); // original_price 60 * 1.5
-      expect(productInsertCall[1][14]).toEqual(60); // shop_price 40 * 1.5
+      expect(materializeToArea).toHaveBeenCalledWith(conn, expect.objectContaining({
+        price: 75, // 50 * 1.5
+        shopPrice: 60, // 40 * 1.5
+        variantPrices: { 5: 30 }, // 20 * 1.5
+      }));
+      expect(conn.query).toHaveBeenCalledWith(
+        'UPDATE products SET original_price = ?, discount_label = ?, featured = ? WHERE id = ?',
+        [90, 'SALE', true, 130] // 60 * 1.5
+      );
     });
   });
 

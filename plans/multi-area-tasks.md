@@ -1681,6 +1681,22 @@ hand for the emit, not a change to any WHERE clause).
       both products and variants, rounded to 2dp. `shop_id`/`group_id` are deliberately never copied onto
       a cloned product (§2.8 — shops aren't cloned, so a copied `shop_id` would point at nothing, or worse,
       at a different area's real shop).
+      **Corrected after the initial commit, before moving on:** the first pass hand-rolled a raw `INSERT
+      INTO products` for the library-linked clone instead of calling `materializeToArea` — caught while
+      reading §4.5's DRY contract for TASK 25 context (its own header comment in `productLibrary.js`
+      literally names "clone-area (TASK 24)" as a required caller, alongside add-from-library and bulk
+      add-to-areas). Fixed in a same-day follow-up commit: `cloneArea` now calls `materializeToArea(conn,
+      { libraryProductId, areaId, categoryId, price, shopPrice, available, displayOrder, variantPrices })`
+      per product — `variantPrices` built from the source's own variants keyed by `library_variant_id`
+      (a source variant with no `library_variant_id`, i.e. a local-only customization, has nothing to key
+      an override by and is correctly not carried over). This makes identity fields (name, description,
+      image, unit, variant labels) come from the **current** library row rather than a frozen snapshot of
+      the source area's copy — genuinely correct per §2.5, not just DRY-compliant — and keeps the
+      `products.price` ⇄ default-variant mirror invariant enforced in the one place that already owns it
+      (`syncProductVariants`, called internally by `materializeToArea`). `original_price`/`discount_label`/
+      `featured` are area-owned display fields `materializeToArea` doesn't manage, so those three still get
+      a small explicit follow-up `UPDATE` after materialization — everything else routes through the
+      shared materializer. Re-verified live end to end with a real library product + variant (see below).
 - [x] 24.6 Confirmed by construction, not just by omission: the clone function's own query list touches
       only `categories`, `store_modes`, `products`, `product_variants`, `offers`, `offer_products`,
       `dashboard_sections`, `dashboard_section_items` — `orders`, `order_items`, `users`, `riders`,
@@ -1707,7 +1723,16 @@ immediately 409s; (8) creating an `area_admin` bound to the new area, and reject
 payload that also set an `areaId`, both worked; (9) `updateAdmin` applied a `displayName` change. Every
 row this script created (test area, its settings/store-modes/categories/products/offers/sections, the
 test admin) was deleted afterward and the flag reset to `0` — confirmed 0 remain and Area 1 is
-unaffected.
+unaffected. **Re-verified live a second time** after the `materializeToArea` correction above
+(`scratchpad/verifyTask24clone.js`, also deleted after use): created a real `product_library` row + one
+`library_variants` row, materialized a linked product into Area 1 by hand, cloned into a fresh area with
+`priceMultiplier: 2` — the clone reported `productsCloned: 1`, the cloned row's price was genuinely
+90 (45 × 2), its variant carried the correct `library_variant_id` link, and — visible proof the fix
+matters — `description` came through as the library row's own text while `unit` came back `null` (this
+library row was never given a `unit_id`), confirming identity is now sourced from the current library
+row through `materializeToArea`, not copied from the source area's product snapshot. All test rows
+(library product, library variant, source product/variant, cloned area and everything under it) deleted
+afterward, flag reset to `0`, confirmed 0 remain.
 
 **Test churn:** new `tests/areaController.test.js` (25 cases) — the §6.6 gate at both flag states, the
 one-transaction create (asserting `createSettingsForArea`/`seedSystemStoreModes` are called with the
@@ -1719,13 +1744,14 @@ update including every role/area invariant branch and the duplicate-username/sho
 and a super_admin-vs-area_admin 403 check across both route groups. Full Jest suite: 98/98 suites,
 1064/1065 tests, 1 pre-existing skip. `npm run lint`: clean.
 
-**Guardrail:** informational violation count: 246 (was 244 at TASK 23) — `cloneArea`'s child-row reads
-(`product_variants` by `product_id`, `offer_products` by `offer_id`, `dashboard_section_items` by
-`section_id`) filter by a parent id that was itself already resolved from an area-scoped row earlier in
-the same transaction, the same trusted-child-id pattern already used everywhere else in this codebase
-(e.g. variant toggles joining through `products` to confirm area) — the guardrail's static scan can't see
-that trust chain and counts them anyway; never a real cross-area leak, still purely informational/never-
-failing.
+**Guardrail:** informational violation count: 247 (was 244 at TASK 23) — `cloneArea`'s child-row reads
+(`product_variants` by `product_id` — now only the pre-materialize `variantPrices` lookup, one fewer raw
+query than the original hand-rolled version but the same shape — plus `offer_products` by `offer_id` and
+`dashboard_section_items` by `section_id`) filter by a parent id that was itself already resolved from an
+area-scoped row earlier in the same transaction, the same trusted-child-id pattern already used
+everywhere else in this codebase (e.g. variant toggles joining through `products` to confirm area) — the
+guardrail's static scan can't see that trust chain and counts them anyway; never a real cross-area leak,
+still purely informational/never-failing.
 
 **Commit:** `feat: AREA TASK 24 — super admin endpoints, clone-area, creation gate`
 

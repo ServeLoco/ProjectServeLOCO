@@ -9,6 +9,7 @@ const {
   invalidateAreasCache,
   seedSystemStoreModes,
 } = require('../utils/areaScope');
+const { materializeToArea } = require('../utils/productLibrary');
 
 const shapeArea = (row) => ({
   id: row.id,
@@ -225,6 +226,16 @@ const cloneArea = async (req, res) => {
     }
 
     // ---- library-linked products + variants ---------------------------
+    // materializeToArea (src/utils/productLibrary.js) is the ONLY writer of
+    // products.library_product_id (§4.5 — "one library→area materializer",
+    // do not invent a second one) — reused here exactly as add-from-library
+    // and bulk-add-to-areas already do, so identity fields (name,
+    // description, image, unit, variant labels) come from the CURRENT
+    // library row rather than a frozen snapshot of the source area's copy,
+    // and the products.price <-> default-variant mirror invariant is
+    // enforced in the one place that already owns it (syncProductVariants).
+    // shop_id/group_id are never passed — cloned products start unassigned
+    // (shops/groups are never cloned, §2.8).
     const [sourceProducts] = await connection.query(
       'SELECT * FROM products WHERE area_id = ? AND deleted = 0 AND library_product_id IS NOT NULL',
       [sourceAreaId]
@@ -233,38 +244,50 @@ const cloneArea = async (req, res) => {
     for (const prod of sourceProducts) {
       const newCategoryId = categoryIdMap.get(prod.category_id);
       if (!newCategoryId) continue; // category wasn't cloned (deleted at source) — skip, never dangling FK
-      const [insertResult] = await connection.query(
-        `INSERT INTO products (area_id, name, price, category_id, unit, description, image_id, available,
-           is_combo, featured, display_order, original_price, discount_label, library_product_id,
-           shop_price, variant_prompt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          targetAreaId, prod.name, applyMultiplier(prod.price), newCategoryId, prod.unit, prod.description,
-          prod.image_id, prod.available, prod.is_combo, prod.featured, prod.display_order,
-          prod.original_price != null ? applyMultiplier(prod.original_price) : null, prod.discount_label,
-          prod.library_product_id, prod.shop_price != null ? applyMultiplier(prod.shop_price) : null,
-          prod.variant_prompt,
-          // shop_id and group_id are deliberately omitted — cloned products
-          // start unassigned (shops/groups are never cloned, §6.6/§2.8).
-        ]
+
+      const [sourceVariants] = await connection.query(
+        'SELECT * FROM product_variants WHERE product_id = ? AND deleted = 0', [prod.id]
       );
-      productIdMap.set(prod.id, insertResult.insertId);
-    }
-    for (const [oldProductId, newProductId] of productIdMap) {
-      const [variants] = await connection.query('SELECT * FROM product_variants WHERE product_id = ? AND deleted = 0', [oldProductId]);
-      for (const variant of variants) {
+      const variantPrices = {};
+      for (const variant of sourceVariants) {
+        // materializeToArea only creates one variant row per CURRENT
+        // library_variants row — a local-only variant with no
+        // library_variant_id has nothing to key an override price by, so it
+        // is not (and cannot be) carried over.
+        if (variant.library_variant_id != null) {
+          variantPrices[variant.library_variant_id] = applyMultiplier(variant.price);
+        }
+      }
+
+      const { productId: newProductId } = await materializeToArea(connection, {
+        libraryProductId: prod.library_product_id,
+        areaId: targetAreaId,
+        categoryId: newCategoryId,
+        price: applyMultiplier(prod.price),
+        shopPrice: prod.shop_price != null ? applyMultiplier(prod.shop_price) : null,
+        available: Boolean(prod.available),
+        displayOrder: prod.display_order,
+        variantPrices,
+      });
+
+      // original_price/discount_label/featured are area-owned display
+      // fields materializeToArea doesn't manage (it only sets identity +
+      // the fields it's explicitly given) — a plain follow-up UPDATE keeps
+      // materializeToArea the sole INSERT/variant-sync path while still
+      // giving this a genuine flat copy of the source's promotional state.
+      if (prod.original_price != null || prod.discount_label != null || prod.featured) {
         await connection.query(
-          `INSERT INTO product_variants (product_id, label, price, original_price, available, is_default, display_order, shop_price, library_variant_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          'UPDATE products SET original_price = ?, discount_label = ?, featured = ? WHERE id = ?',
           [
-            newProductId, variant.label, applyMultiplier(variant.price),
-            variant.original_price != null ? applyMultiplier(variant.original_price) : null,
-            variant.available, variant.is_default, variant.display_order,
-            variant.shop_price != null ? applyMultiplier(variant.shop_price) : null,
-            variant.library_variant_id,
+            prod.original_price != null ? applyMultiplier(prod.original_price) : null,
+            prod.discount_label,
+            Boolean(prod.featured),
+            newProductId,
           ]
         );
       }
+
+      productIdMap.set(prod.id, newProductId);
     }
 
     // ---- offers + offer_products ---------------------------------------
