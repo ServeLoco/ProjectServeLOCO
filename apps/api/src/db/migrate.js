@@ -367,6 +367,11 @@ const migrate = async () => {
     // as "—" in admin), deliberately distinct from 0.00 which means the shop
     // supplies the item free. Commission = price - shop_price, always derived.
     await ensureColumn('products', 'shop_price', 'shop_price DECIMAL(10, 2) NULL AFTER price');
+    // Library linkage (TASK 18, §2.5) — NULL means "local-only product",
+    // exactly as today. No FK: product_library is a brand new, still-empty
+    // table at migration time, and every other cross-domain FK-less column
+    // on this table (shop_id, group_id) already sets that precedent.
+    await ensureColumn('products', 'library_product_id', 'library_product_id INT NULL');
     console.log('Products table ready.');
 
     // Product Variants Table — purchasable child rows (sizes/types) of a
@@ -395,7 +400,53 @@ const migrate = async () => {
     // products.shop_price, which mirrors the DEFAULT variant's value (see
     // syncProductVariants) exactly like products.price already does.
     await ensureColumn('product_variants', 'shop_price', 'shop_price DECIMAL(10, 2) NULL AFTER price');
+    // Library linkage (TASK 18, §2.5) — NULL means this variant belongs to a
+    // local-only product, or was added directly in an area and never synced
+    // to a library variant. No FK, same reasoning as products.library_product_id.
+    await ensureColumn('product_variants', 'library_variant_id', 'library_variant_id INT NULL');
     console.log('Product variants table ready.');
+
+    // Product library (TASK 18, §2.5) — global identity (name/description/
+    // image/unit/variant labels) shared across every area; price/availability/
+    // category/shop placement stay per-area on `products`/`product_variants`
+    // (materializeToArea, TASK 19). No auto-promotion of existing products —
+    // this table starts empty (18.8).
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS product_library (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        description TEXT,
+        image_id VARCHAR(255) NULL,
+        unit_id INT NULL,
+        variant_prompt VARCHAR(100) NULL,
+        default_store_type VARCHAR(50) NULL,
+        default_category_slug VARCHAR(100) NULL,
+        suggested_price DECIMAL(10, 2) NULL,
+        status ENUM('draft', 'published') NOT NULL DEFAULT 'draft',
+        archived BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('Product library table ready.');
+
+    // Library variant labels (e.g. "500g" / "1kg") — global, mirrored into a
+    // real product_variants row per area on materialization, same identity-
+    // vs-commerce split as the parent table.
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS library_variants (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        library_product_id INT NOT NULL,
+        label VARCHAR(100) NOT NULL,
+        display_order INT NOT NULL DEFAULT 0,
+        is_default BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (library_product_id) REFERENCES product_library(id) ON DELETE CASCADE,
+        INDEX idx_library_variant_product (library_product_id)
+      );
+    `);
+    console.log('Library variants table ready.');
 
     await connection.query(`
       CREATE TABLE IF NOT EXISTS product_combo_items (
@@ -599,6 +650,10 @@ const migrate = async () => {
     await ensureIndex('products', 'idx_products_deleted_available_category', 'deleted, available, category_id');
     await ensureIndex('products', 'idx_products_shop', 'shop_id');
     await ensureIndex('products', 'idx_products_group', 'group_id');
+    // Library propagation fan-out (TASK 18/19, §3.3): materializeToArea and
+    // library edits both look up "every products row for this library item".
+    await ensureIndex('products', 'idx_products_library_product', 'library_product_id');
+    await ensureIndex('product_variants', 'idx_product_variants_library_variant', 'library_variant_id');
     // Dashboard section item lookups by section + type + active.
     await ensureIndex('dashboard_section_items', 'idx_dsi_section_type_active', 'section_id, item_type, active');
     await ensureIndex('orders', 'idx_orders_rider', 'rider_id, status');
@@ -1578,7 +1633,55 @@ const migrate = async () => {
     `);
     // Optional 320px WebP thumbnail URL (nullable for legacy images until backfill).
     await ensureColumn('images', 'thumb_url', 'thumb_url TEXT NULL AFTER url');
+    // Content hash for upload-time dedupe (TASK 18, §2.6). NON-unique on
+    // purpose — production already holds duplicate uploads, and a UNIQUE
+    // index would fail this migration outright. Historical duplicates are
+    // reported (admin Images page), never auto-merged.
+    await ensureColumn('images', 'sha256', 'sha256 CHAR(64) NULL');
+    await ensureIndex('images', 'idx_images_sha256', 'sha256');
     console.log('Images table ready.');
+
+    // Batched backfill: hash every existing image row that predates sha256
+    // (18.6). Populates the column ONLY — never deletes, never merges rows,
+    // even when two rows land on the identical hash. A single unreadable file
+    // (moved/deleted from disk or S3 out from under us) is logged and
+    // skipped, not fatal to the whole migration — this column is dedupe
+    // metadata, not something existing functionality depends on.
+    const backfillImageHashes = async () => {
+      const crypto = require('crypto');
+      const { getStoredBuffer } = require('../utils/imageStorage');
+      const BATCH_SIZE = 200;
+      let totalHashed = 0;
+      let totalSkipped = 0;
+      for (;;) {
+        const [rows] = await connection.query(
+          `SELECT id, filename, storage_type FROM images
+           WHERE sha256 IS NULL
+           ORDER BY id
+           LIMIT ${BATCH_SIZE}`
+        );
+        if (rows.length === 0) break;
+        for (const row of rows) {
+          try {
+            const buffer = await getStoredBuffer(row.storage_type, row.filename);
+            const hash = crypto.createHash('sha256').update(buffer).digest('hex');
+            await connection.query('UPDATE images SET sha256 = ? WHERE id = ?', [hash, row.id]);
+            totalHashed += 1;
+          } catch (e) {
+            console.error(`[migrate] could not hash image id=${row.id} (${row.filename}):`, e.message);
+            // Mark it hashed-but-empty so the batch loop terminates instead of
+            // retrying the same unreadable row forever; a real dedupe miss on
+            // one broken row is fine, an infinite migration loop is not.
+            await connection.query("UPDATE images SET sha256 = '' WHERE id = ?", [row.id]);
+            totalSkipped += 1;
+          }
+        }
+      }
+      if (totalHashed > 0 || totalSkipped > 0) {
+        console.log(`[migrate] image sha256 backfill: ${totalHashed} hashed, ${totalSkipped} skipped (unreadable)`);
+      }
+    };
+    await backfillImageHashes();
 
     // Admin session revocation + brute-force lockout — single row (there is
     // one shared owner admin account, not a users table).

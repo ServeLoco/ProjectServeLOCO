@@ -31,6 +31,22 @@ async function storeBuffer(filename, buffer, mimeType) {
 }
 
 /**
+ * Read back stored bytes by storage type + key or public URL (TASK 18 — the
+ * sha256 backfill needs to hash existing images' actual content). Throws on
+ * failure so the caller can skip/report that one row rather than hash nothing.
+ */
+async function getStoredBuffer(storageType, filenameOrUrl) {
+  const key = String(filenameOrUrl).includes('://')
+    ? path.basename(String(filenameOrUrl).split('?')[0])
+    : filenameOrUrl;
+
+  if (storageType === 's3' || config.STORAGE_DRIVER === 's3') {
+    return s3.downloadBuffer(key);
+  }
+  return fs.readFileSync(path.join(uploadDir, key));
+}
+
+/**
  * Best-effort delete by storage type + key or public URL.
  */
 async function deleteStored(storageType, filenameOrUrl) {
@@ -50,6 +66,7 @@ async function deleteStored(storageType, filenameOrUrl) {
 module.exports = {
   storeBuffer,
   deleteStored,
+  getStoredBuffer,
   ensureUploadDir,
   uploadDir,
 };

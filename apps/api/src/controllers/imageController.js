@@ -1,4 +1,5 @@
 const path = require('path');
+const crypto = require('crypto');
 const { pool } = require('../db/mysql');
 const config = require('../config/env');
 const { processUploadedImage, thumbFilenameFor } = require('../utils/imageThumbs');
@@ -14,11 +15,16 @@ const buildFilename = (fieldname, ext) => {
 
 // `images` is global (shared/deduplicated across every area, §2.5/§2.6),
 // so "is this image used anywhere" is deliberately a CROSS-AREA scan —
-// none of these six queries filter by area_id, on purpose. The settings
+// none of these seven queries filter by area_id, on purpose. The settings
 // one specifically used to carry a `LIMIT 1`, which only ever checked
 // area 1's UPI QR image; every other area's would report as unused and
 // get deleted by cleanupOrphanedImage/the admin Images page (§6.4). Fixed
 // by dropping the LIMIT — addUsage already iterates every row returned.
+//
+// product_library.image_id (TASK 18, §6.5) MUST stay in this same list —
+// products.image_id has no FK to images, so a missed table here means
+// deleting an image the library still needs, silently breaking it for
+// every area that later adds that library item.
 const getUsedImageIds = async () => {
   const [products] = await pool.query('SELECT DISTINCT image_id FROM products WHERE image_id IS NOT NULL AND deleted = 0');
   const [categories] = await pool.query('SELECT DISTINCT image_id FROM categories WHERE image_id IS NOT NULL AND deleted = 0');
@@ -26,6 +32,7 @@ const getUsedImageIds = async () => {
   const [offers] = await pool.query('SELECT DISTINCT image_id FROM offers WHERE image_id IS NOT NULL AND deleted = 0');
   const [settings] = await pool.query('SELECT upi_qr_image_id FROM settings WHERE upi_qr_image_id IS NOT NULL');
   const [storeModes] = await pool.query('SELECT DISTINCT icon_image_id FROM store_modes WHERE icon_image_id IS NOT NULL');
+  const [productLibrary] = await pool.query('SELECT DISTINCT image_id FROM product_library WHERE image_id IS NOT NULL');
 
   const used = new Set();
   const usageMap = {};
@@ -45,6 +52,7 @@ const getUsedImageIds = async () => {
   addUsage(offers, 'Offer');
   addUsage(settings, 'Settings', 'upi_qr_image_id');
   addUsage(storeModes, 'Store Mode', 'icon_image_id');
+  addUsage(productLibrary, 'Product Library');
 
   return { used, usageMap };
 };
@@ -127,12 +135,29 @@ const uploadImage = async (req, res) => {
   }
 
   const { buffer, originalname, detectedExt } = req.file;
+
+  // Dedupe on the raw upload bytes, before any processing (§2.6/18.5) — a
+  // hit skips optimization + storage entirely, not just the DB insert. Two
+  // areas (or the same area twice) uploading the identical file end up
+  // sharing one stored object instead of N copies.
+  const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+  const [existingRows] = await pool.query('SELECT * FROM images WHERE sha256 = ? LIMIT 1', [sha256]);
+  if (existingRows.length > 0) {
+    const normalized = normalizeImage(existingRows[0]);
+    return res.status(200).json({
+      message: 'Image already exists — reusing existing upload',
+      deduplicated: true,
+      data: normalized,
+      image: normalized
+    });
+  }
+
   const stored = await processAndStoreUpload(buffer, detectedExt, originalname);
   const altText = req.body.altText || '';
 
   const [result] = await pool.query(
-    `INSERT INTO images (filename, original_name, mime_type, size, storage_type, url, alt_text, thumb_url)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO images (filename, original_name, mime_type, size, storage_type, url, alt_text, thumb_url, sha256)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       stored.filename,
       stored.safeOriginalName,
@@ -142,6 +167,7 @@ const uploadImage = async (req, res) => {
       stored.url,
       altText,
       stored.thumbUrl,
+      sha256,
     ]
   );
   const [savedRows] = await pool.query('SELECT * FROM images WHERE id = ?', [result.insertId]);
@@ -149,6 +175,7 @@ const uploadImage = async (req, res) => {
 
   res.status(201).json({
     message: 'Image uploaded successfully',
+    deduplicated: false,
     data: normalized,
     image: normalized
   });

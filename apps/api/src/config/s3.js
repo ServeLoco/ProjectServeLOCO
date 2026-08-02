@@ -1,4 +1,4 @@
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const config = require('./env');
 
 // Lazily create a single S3 client. Credentials come from env (AWS_ACCESS_KEY_ID /
@@ -46,6 +46,26 @@ const uploadBuffer = async (key, buffer, mimeType) => {
 };
 
 /**
+ * Download an object's bytes from S3 (TASK 18 — hashing existing images for
+ * the sha256 dedupe backfill). Throws on failure — unlike deleteObject, the
+ * caller needs to know a read failed so it can skip that row rather than
+ * silently hash nothing.
+ * @param {string} key
+ * @returns {Promise<Buffer>}
+ */
+const downloadBuffer = async (key) => {
+  const res = await getClient().send(new GetObjectCommand({
+    Bucket: config.S3_BUCKET,
+    Key: key,
+  }));
+  const chunks = [];
+  for await (const chunk of res.Body) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+};
+
+/**
  * Delete an object from S3 by key. Never throws — logs and resolves so callers
  * can fire-and-forget during cleanup without breaking the main flow.
  * @param {string} key
@@ -62,4 +82,4 @@ const deleteObject = async (key) => {
   }
 };
 
-module.exports = { uploadBuffer, deleteObject, publicUrl };
+module.exports = { uploadBuffer, deleteObject, downloadBuffer, publicUrl };
