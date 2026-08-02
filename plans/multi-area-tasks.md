@@ -650,13 +650,77 @@ TASK 12+ land.
 
 **Commit:** `feat: AREA TASK 11 — per-area catalog`
 
-### [ ] TASK 12 — Dashboard sections + offers (47 sites)
+### [x] TASK 12 — Dashboard sections + offers (47 sites)
 **Files:** `[api] src/controllers/dashboardController.js`, `offerRoutes.js` + offer handlers
 
-- [ ] 12.1 `dashboard_sections`, `dashboard_section_items`, `offers`, `offer_products`.
-- [ ] 12.2 Cache key → `dashboard:<areaId>:<storeType>:closed=<0|1>`.
-- [ ] 12.3 All 50 query sites in `dashboardController.js` scoped; section fan-out unchanged.
-- [ ] 12.4 Test: area 2's dashboard returns only area 2's sections and items.
+- [x] 12.1 `dashboard_sections`, `dashboard_section_items`, `offers`, `offer_products` all threaded
+      with real `area_id`. `dashboard_sections`/`offers` columns already existed (TASK 3's generic
+      sweep, including `dashboard_sections`' `idx_section_area_store_slug` composite unique key —
+      confirmed already correct, no migration changes needed this task). `dashboard_section_items`/
+      `offer_products` are child tables with no `area_id` of their own — scoped through their parent's
+      FK (`dashboard_sections.area_id` / `offers.area_id`), same EXISTS/JOIN pattern used for
+      `product_variants`/`combo_items` in TASK 11.
+- [x] 12.2 Cache key is `dashboard:<areaId>:<storeType>:closed=<0|1>` — was hardcoded to
+      `DASHBOARD_AREA_ID_STOPGAP` (always 1), now built from the resolved `req.areaId`.
+- [x] 12.3 Every query site in `dashboardController.js` scoped: `getExpectedStoreType`,
+      `getLinkedItemInfo`, `ensureUniqueSectionSlug`, `ensureModeSpecificOfferBannerSections`,
+      `hydrateSectionItem` all gained a real `areaId` param; public `getDashboard`/`getSectionItems`
+      resolve `req.areaId` strictly (§2.4 catalog rule — empty dashboard / 404 for a pin outside every
+      zone, never a default-area fallback, matching `getProducts`); every admin CRUD/reorder endpoint
+      (`getAdminSections`, `getAdminSectionById`, `createAdminSection`, `updateAdminSection`,
+      `deleteAdminSection`, `addAdminSectionItem`, `updateAdminSectionItem`, `deleteAdminSectionItem`,
+      `reorderAdminSections`, `reorderAdminSectionItems`) requires exactly one area and carries
+      cross-tenant `WHERE id = ? AND area_id = ?` guards (including a JOIN-through-parent guard for
+      the two section-*item* endpoints, since `dashboard_section_items` has no `area_id` column of its
+      own). Section fan-out (`buildSection`'s per-type sub-queries in both `getDashboard` and
+      `getSectionItems`) unchanged in shape — each of the 4 branches (offer_banner/category_grid/
+      product_block/combo_block) just gained `AND <table>.area_id = ?` on its JOINed target table.
+      `offers` CRUD (`settingsController.js`: `getActiveOffer`, `createOffer`, `updateOffer`,
+      `getAdminOffers`, `deleteOffer`, `getOfferProducts`, `addOfferProduct`, `removeOfferProduct`,
+      `reorderOfferProducts`) got the same treatment — public `getActiveOffer` follows the strict
+      catalog rule too (promo banner content, not settings metadata). `offerRoutes.js`,
+      `dashboardRoutes.js` gained `resolveCustomerArea` on their public GETs (admin routes already had
+      `requireAdmin` from TASK 8).
+- [x] 12.4 No real area 2 exists yet in this rollout (§6.6 gate blocks a second area until TASK 30's
+      isolation sweep passes), so this is proven at the unit level instead of against live prod data —
+      `tests/dashboardAreaIsolation.test.js` drives the real `resolveCustomerArea` + `getDashboard`
+      code path with two synthetic areas sharing a colliding section id/slug, and asserts every query
+      MySQL actually receives is scoped to the resolved area (not just that the mocked response looks
+      right). Same proof pattern as TASK 10.6's delivery-zone isolation perf test.
+
+**Also fixed, beyond the checklist's own scope:**
+- Found the same gap as TASK 11: `offerRoutes.js` and `dashboardRoutes.js` never had
+  `resolveCustomerArea` mounted at all — without this fix `req.areaId` would have been undefined on
+  every public dashboard/offer request in production.
+- `getActiveOffer` is shared by both the public `/api/offers/active` route and the admin
+  `/api/admin/offers/active` route (same handler, different middleware ahead of it) — the strict
+  §2.4 catalog rule applies identically either way, since `requestAreaId(req)` just reads whichever
+  middleware resolved it.
+- Went back and closed out the two `offers`-table stopgaps TASK 11 had explicitly deferred to this
+  task: `productController.js`'s `finalOfferId` branch now validates the offer itself with
+  `AND area_id = ?` (an offerId from another area now 404s the same as a nonexistent one, instead of
+  being validated globally while only the joined products stayed scoped), and
+  `storeModeController.js`'s deactivation usage-count query now scopes its `offers` subquery by area
+  too, alongside the `categories`/`combos` subqueries TASK 11 already scoped.
+
+**Test churn:** 6 test files broke from this sweep — `dashboard.test.js`, `dashboardAdmin.test.js`,
+`dashboardAdminHeader.test.js`, `dashboardCurated.test.js`, `productShopClosed.test.js`,
+`adminValidation.test.js` — same two established root causes as TASK 9-11: pre-TASK-7 admin JWTs
+missing `adminRole`/`areaId`, and public dashboard GETs now consuming an extra `pool.query` call for
+`resolveCustomerArea`'s default-area lookup (fixed with the same explicit-mock + call-index-shift +
+`areaScope._resetCachesForTests()` pattern). One new wrinkle: `addAdminSectionItem`'s success-path
+test needed an extra queued mock for `bustAreaCaches`'s `bumpCatalogVersion` UPDATE landing between
+the section-item INSERT and the hydration re-fetch — the same class of "one more pool.query call now
+happens" fallout as TASK 11's bulk-endpoint tests.
+
+**Live verification (local dev DB, migration re-run clean):** `GET /api/dashboard?storeType=packed`
+and `GET /api/offers/active?storeType=packed` both return real area-1-scoped sections/offers with the
+new `area_id` joins in place. `SELECT COUNT(DISTINCT area_id)` confirms `dashboard_sections`/`offers`
+are both correctly `area_id = 1`.
+
+**Guardrail:** `dashboard_sections`/`offers` still not added to `SWEPT_TABLES` — `cartController.js`/
+`orderController.js` (TASK 13) still reference `offers`/`dashboard_section_items`-adjacent data
+unscoped. Remaining informational violation count: 292.
 
 **Commit:** `feat: AREA TASK 12 — per-area dashboard and offers`
 
