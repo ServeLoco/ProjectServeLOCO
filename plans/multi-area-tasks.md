@@ -1246,27 +1246,88 @@ HTTP flow via mocks (no admin JWT session available locally, same constraint as 
 
 **Commit:** `feat: AREA TASK 18 — product library tables + image dedupe`
 
-### [ ] TASK 19 — Library CRUD, add-from-library, promote
+### [x] TASK 19 — Library CRUD, add-from-library, promote
 **Spec:** §4.5 · **Files:** `[api] src/utils/productLibrary.js` (new),
 `src/controllers/libraryController.js` (new), `src/routes/adminRoutes.js`
 
-- [ ] 19.1 `materializeToArea(conn, {libraryProductId, areaId, categoryId, price, shopId, ...})` —
-      **the only writer of `products.library_product_id`**. Reuses the existing
-      `syncProductVariants` path so the `products.price` ⇄ default-variant mirror cannot drift.
-- [ ] 19.2 `GET /admin/library` — search/filter/paginate; each row reports which areas carry it.
-- [ ] 19.3 `POST /admin/library`, `PATCH /admin/library/:id`, `POST /admin/library/:id/archive`.
-      All `requireSuperAdmin`.
-- [ ] 19.4 `POST /admin/library/:id/add-to-area` — `areaId`, `categoryId`, `storeType`, `price`,
-      optional `shopId`, `shopPrice`, per-variant prices. One transaction. Any admin may call it for
-      **their own** area.
-- [ ] 19.5 Idempotent: adding an item the area already has returns the existing product with an
-      "already linked" flag, never a duplicate.
-- [ ] 19.6 `POST /admin/library/:id/add-to-areas` — fan out to many areas in one transaction with a
-      per-area price map.
-- [ ] 19.7 `POST /admin/products/:id/promote-to-library` — lift name/image/variants into a new
-      library item and link the source. Touches no other area's rows.
-- [ ] 19.8 Test: materialize into two areas at different prices; both carry identical
-      name/image/variant labels.
+- [x] 19.1 `materializeToArea(conn, {libraryProductId, areaId, categoryId, price, shopId, shopPrice,
+      available, displayOrder, variantPrices})` — the only writer of `products.library_product_id`
+      (confirmed by grep: it's the sole `library_product_id = ?`/`INSERT ... library_product_id` site
+      outside `promoteProductToLibrary`, which links the SOURCE product directly, not via this
+      function). Reuses `productController.js`'s own `syncProductVariants` (newly exported for this)
+      so the `products.price` ⇄ default-variant mirror is enforced in exactly one place. Idempotent
+      (existing link check first), validates the target category/shop actually belong to `areaId`,
+      and rejects an archived library item. `syncProductVariants` itself gained a `library_variant_id`
+      field on each variant object — guarded the same way `shop_price` already was (only touched when
+      explicitly sent), so the normal product-editor PATCH path (which never sends it) can't
+      accidentally clear an existing link on an unrelated edit.
+- [x] 19.2 `GET /admin/library` — `search`/`status`/`archived` filters, paginated; a second batch
+      query (`SELECT DISTINCT library_product_id, area_id FROM products WHERE library_product_id IN
+      (?) AND deleted = 0`) attaches each row's `areaIds`. Deliberately global/cross-area — the whole
+      point is showing which areas carry each item — and read-only for any admin, not
+      `requireSuperAdmin` (writes to the library are restricted; browsing it is not).
+- [x] 19.3 `POST /admin/library`, `PATCH /admin/library/:id`, `POST /admin/library/:id/archive` — all
+      gated `requireAdmin, requireSuperAdmin` (the route's first real usage of `requireSuperAdmin`
+      anywhere in the codebase — it existed since TASK 8 but nothing had wired it into a route yet).
+      Archive only ever sets `archived = 1` on the library row; confirmed it never touches `products`.
+- [x] 19.4 `POST /admin/library/:id/add-to-area` — `categoryId`, `price`, optional `shopId`/
+      `shopPrice`/`available`/`displayOrder`/`variantPrices` (an object keyed by
+      `library_variants.id`). **Deliberately no separate `storeType` param**: `categories.type` already
+      **is** the store type (confirmed against `migrate.js`'s `categories` schema — there is no
+      product-level store-type column, only category-level), so validating `categoryId` belongs to
+      this area already validates placement; a second, independent `storeType` field would just be a
+      second source of truth for the same fact. One transaction (`pool.getConnection` +
+      begin/commit/rollback around the single `materializeToArea` call); any admin may call it, scoped
+      to their own area via the same `requestAreaId`/reject-`'all'` pattern used everywhere else in
+      this sweep (`libraryController.js`'s own `requireOneArea`, distinct from `productController.js`'s
+      same-named helper — same shape, different file, matching the established per-file duplication
+      precedent rather than a shared cross-file import).
+- [x] 19.5 Confirmed live and by test: re-calling add-to-area for an already-linked area returns 200 +
+      `alreadyLinked: true` with the existing product, never a second row.
+- [x] 19.6 `POST /admin/library/:id/add-to-areas` — `requireSuperAdmin` (fan-out is cross-area reach).
+      Body `{ areas: { "<areaId>": { categoryId, price, ... } } }`; loops `materializeToArea` per area
+      inside ONE transaction, so a bad area config rolls back every area's insert, not just its own —
+      no area is left half-added.
+- [x] 19.7 `POST /admin/products/:id/promote-to-library` — gated `requireSuperAdmin` too (not
+      explicitly required by 19.7's own bullet text, but creating a library item — which this
+      functionally is — is `requireSuperAdmin` everywhere else in this task, per 19.3; treated as the
+      same authorship boundary rather than a special case). Reads the source product `FOR UPDATE`,
+      rejects a product that's already linked (`409 ALREADY_LINKED`), creates one `product_library` row
+      + one `library_variants` row per existing variant, then links the SOURCE product/variants back
+      via `library_product_id`/`library_variant_id`. Confirmed: touches only the source product's own
+      row and its own variants — no other area's `products` row is read or written anywhere in this path.
+- [x] 19.8 New test (`materializeToArea` unit test): the same library item materialized into area 1 at
+      price 12 and area 2 at price 15 produces two `products` rows with byte-identical `name`,
+      `description`, and `image_id` INSERT params but the area-specific `price`/`category_id`, and two
+      `product_variants` rows both labeled `'Single Pack'`. Live-verified end-to-end against the real
+      dev DB too: materialized a temp library item (2 variants) into area 1, confirmed the resulting
+      `products`/`product_variants` rows carry the correct `library_product_id`/`library_variant_id`
+      links, re-called it and got `alreadyLinked: true` with no duplicate row, then cleaned up — no
+      orphaned rows left.
+
+**Test churn:** 2 test files broke. `tests/topItemsReport.test.js` mocks `authMiddleware` entirely
+(bare passthrough, no real `resolveAdminArea`) and didn't have a `requireSuperAdmin` export at all —
+once `adminRoutes.js` started requiring it for the new library/promote routes, the mocked module
+returned `undefined`, and `router.post(path, requireAdmin, undefined, ...)` threw at require time,
+failing the whole suite file. Fixed by adding a passthrough `requireSuperAdmin` to that file's own
+mock. `tests/settingsArea.test.js`/`tests/areaScoping.test.js` were TASK 18 leftovers, not new here.
+Added `tests/productLibrary.test.js` (new): `materializeToArea`'s idempotency/validation/19.8 cases,
+plus route-level tests for add-to-area (idempotent 200) and promote-to-library (creates + links back,
+rejects an already-linked product).
+
+**Live verification (local dev DB):** see 19.8 above — full `materializeToArea` round trip against
+real MySQL, including the idempotent re-call and cleanup. Full HTTP flow through the new admin routes
+covered by the Jest suite instead (94/94 suites, 1012/1013 tests, 1 pre-existing skip) — no admin JWT
+session available locally, same constraint as every prior task.
+
+**Guardrail:** informational violation count: 242 (up from 239) — all 3 new sites are legitimate,
+already-reasoned-through patterns, not gaps: `getLibrary`'s cross-area `products` scan (deliberately
+shows every area a library item is in, same shape as `imageController.js`'s allowlisted cross-area
+scan), `promoteProductToLibrary`'s source-product read (`requireSuperAdmin`-gated, same universal-reach
+reasoning as every other super-admin-only action in this sweep), and a trusted-id re-select after an
+INSERT (the same pattern used throughout TASK 11-18). None of these are in `SWEPT_TABLES` yet, so
+none fail the guardrail; not added to the allowlist since `products`/`categories` aren't swept as a
+whole yet either — revisit once TASK 30's final audit sweeps those tables for real.
 
 **Commit:** `feat: AREA TASK 19 — library CRUD, add-from-library, promote`
 
