@@ -199,21 +199,30 @@ const syncProductVariants = async (connection, productId, variants, variantPromp
       // older clients don't send it, and silently nulling it would erase what
       // we owe the shop. Sending an explicit null still clears it.
       const sendsShopPrice = v.shop_price !== undefined;
+      // library_variant_id is the same story, for the same reason: the
+      // normal product editor never sends it (it's an internal library
+      // linkage field, not user-editable there) — only materializeToArea
+      // (TASK 19) passes it, when stamping a newly-materialized variant's
+      // link back to its library_variants row. Omitting it must leave an
+      // existing link untouched, not silently clear it on every unrelated edit.
+      const sendsLibraryVariantId = v.library_variant_id !== undefined;
       if (v.id) {
         payloadIds.add(Number(v.id));
         // AND product_id = ? prevents cross-product id abuse.
         await connection.query(
-          `UPDATE product_variants SET label = ?, price = ?, ${sendsShopPrice ? 'shop_price = ?, ' : ''}original_price = ?, available = ?, is_default = ?, display_order = ?, deleted = 0 WHERE id = ? AND product_id = ?`,
+          `UPDATE product_variants SET label = ?, price = ?, ${sendsShopPrice ? 'shop_price = ?, ' : ''}original_price = ?, available = ?, is_default = ?, display_order = ?, ${sendsLibraryVariantId ? 'library_variant_id = ?, ' : ''}deleted = 0 WHERE id = ? AND product_id = ?`,
           [
             v.label, v.price,
             ...(sendsShopPrice ? [v.shop_price] : []),
-            v.original_price, v.available ? 1 : 0, v.is_default ? 1 : 0, v.display_order, v.id, productId,
+            v.original_price, v.available ? 1 : 0, v.is_default ? 1 : 0, v.display_order,
+            ...(sendsLibraryVariantId ? [v.library_variant_id] : []),
+            v.id, productId,
           ]
         );
       } else {
         const [insertResult] = await connection.query(
-          'INSERT INTO product_variants (product_id, label, price, shop_price, original_price, available, is_default, display_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [productId, v.label, v.price, sendsShopPrice ? v.shop_price : null, v.original_price, v.available ? 1 : 0, v.is_default ? 1 : 0, v.display_order]
+          'INSERT INTO product_variants (product_id, label, price, shop_price, original_price, available, is_default, display_order, library_variant_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [productId, v.label, v.price, sendsShopPrice ? v.shop_price : null, v.original_price, v.available ? 1 : 0, v.is_default ? 1 : 0, v.display_order, v.library_variant_id ?? null]
         );
         payloadIds.add(Number(insertResult.insertId));
       }
@@ -887,7 +896,11 @@ module.exports = {
   updateProductAvailability,
   updateVariantAvailability,
   updateProductImage,
-  attachVariants
+  attachVariants,
+  // Exported for productLibrary.js's materializeToArea (TASK 19, §4.5) — the
+  // ONLY other caller allowed to reuse this, so the products.price <->
+  // default-variant mirror invariant is enforced in exactly one place.
+  syncProductVariants,
 };
 
 const bulkUpdateProducts = async (req, res) => {

@@ -15,7 +15,8 @@ jest.mock('../src/middleware/authMiddleware', () => ({
     req.admin = { id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 };
     req.areaId = 1;
     next();
-  }
+  },
+  requireSuperAdmin: (req, res, next) => next(),
 }));
 
 const app = express();

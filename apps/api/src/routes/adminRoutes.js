@@ -60,7 +60,16 @@ const {
   reorderAdminSections,
   reorderAdminSectionItems
 } = require('../controllers/dashboardController');
-const { requireAdmin, requireCustomer } = require('../middleware/authMiddleware');
+const { requireAdmin, requireCustomer, requireSuperAdmin } = require('../middleware/authMiddleware');
+const {
+  getLibrary,
+  createLibraryProduct,
+  updateLibraryProduct,
+  archiveLibraryProduct,
+  addLibraryProductToArea,
+  addLibraryProductToAreas,
+  promoteProductToLibrary,
+} = require('../controllers/libraryController');
 const { validate, isString, isId, isBoolean, isNumericAmount, isPositiveInteger, isNonNegativeInteger, validatePagination, normalizeField } = require('../validators');
 const asyncHandler = require('../utils/asyncHandler');
 const rateLimit = require('express-rate-limit');
@@ -798,6 +807,19 @@ router.delete('/products/:id', requireAdmin, asyncHandler(deleteProduct));
 router.patch('/products/:id/availability', requireAdmin, validate(productAvailabilitySchema), asyncHandler(updateProductAvailability));
 router.patch('/products/:id/variants/:variantId/availability', requireAdmin, validate(variantAvailabilitySchema), asyncHandler(updateVariantAvailability));
 router.patch('/products/:id/image', requireAdmin, validate(productImageSchema), asyncHandler(updateProductImage));
+// requireSuperAdmin: creating a library item (whether via POST /library or
+// by lifting an existing product into one) is a global-authorship action.
+router.post('/products/:id/promote-to-library', requireAdmin, requireSuperAdmin, asyncHandler(promoteProductToLibrary));
+
+// Product library (TASK 19, §4.5) — identity is global, commerce is per-area.
+// GET is any admin (browse-only); writes to the library itself are
+// requireSuperAdmin; add-to-area is any admin for their OWN area only.
+router.get('/library', requireAdmin, asyncHandler(getLibrary));
+router.post('/library', requireAdmin, requireSuperAdmin, asyncHandler(createLibraryProduct));
+router.patch('/library/:id', requireAdmin, requireSuperAdmin, asyncHandler(updateLibraryProduct));
+router.post('/library/:id/archive', requireAdmin, requireSuperAdmin, asyncHandler(archiveLibraryProduct));
+router.post('/library/:id/add-to-area', requireAdmin, asyncHandler(addLibraryProductToArea));
+router.post('/library/:id/add-to-areas', requireAdmin, requireSuperAdmin, asyncHandler(addLibraryProductToAreas));
 // Bulk import: ?preview=true for dry-run, no query param for commit
 router.post('/products/bulk-import', requireAdmin, bulkUpload, asyncHandler(async (req, res) => {
   if (req.query.preview === 'true') {
