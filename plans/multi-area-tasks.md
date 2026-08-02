@@ -403,21 +403,67 @@ then cleaned up the throwaway admin rows and reset `admin_auth_state`.
 > byte-identical, run `npm test`. Expect test-fixture churn to exceed source churn (H3) — fix
 > fixtures properly, never by loosening an assertion.
 
-### [ ] TASK 9 — Settings (27 sites)
+### [x] TASK 9 — Settings (27 sites)
 **Spec:** §6.4 · **Files:** `[api] src/controllers/settingsController.js`,
-`src/controllers/imageController.js`, everything `grep -rn "FROM settings" src/` finds
+`src/controllers/imageController.js`, everything `grep -rn "FROM settings\|INTO settings\|UPDATE
+settings" src/` finds, plus `src/routes/settingsRoutes.js`, `src/db/migrate.js`,
+`tests/areaScoping.test.js`, `tests/settingsArea.test.js` (new), and 4 existing test files whose
+mocked admin JWTs/query-text assertions needed updating for the new shape.
 
-- [ ] 9.1 **Find sites by grep, not by file** — `grep -rn "FROM settings" src/`. There are 27.
-- [ ] 9.2 `getSettings` / `updateSettings` select and write by `area_id`.
-- [ ] 9.3 Auto-create a settings row whenever an area is created (used by TASK 24).
-- [ ] 9.4 **`imageController.js:20`** — `getUsedImageIds` reads `settings.upi_qr_image_id` with
-      `LIMIT 1`. Make it scan **all** areas' rows, or every area but the first loses its payment QR
-      to the orphan cleaner (§6.4).
-- [ ] 9.5 Replace `microCache.bust('dashboard')` calls in this file with `bustAreaCaches(areaId)`.
-- [ ] 9.6 Un-skip the guardrail test for `settings`.
-- [ ] 9.7 Test: two settings rows exist; area 1's read never returns area 2's values; both areas'
-      UPI images report as in-use.
+- [x] 9.1 Grepped `FROM settings|INTO settings|UPDATE settings\b` (the plain `FROM settings` alone
+      undercounted writes) across 9 files, 20 real call sites (the spec's "27" used a looser count
+      style — every actual site is accounted for regardless).
+- [x] 9.2 `getSettings`/`updateSettings` now select/write by `area_id`, resolved via
+      `requestAreaId(req)`. `getSettings` (public, `resolveCustomerArea` newly mounted on
+      `settingsRoutes.js`) falls back to the **default area** when `req.areaId` is `null` — settings
+      is lightweight, non-delivery-critical info, so this is deliberately more lenient than the
+      catalog/dashboard endpoints, which must show "we don't deliver here" for that same `null`
+      (§2.4). `updateSettings` (admin, `resolveAdminArea` already wired by TASK 8) instead **rejects
+      `null` and `'all'` with 400** — a write must target exactly one area (§2.10).
+- [x] 9.3 `createSettingsForArea(areaId, connection)` exported, ready for TASK 24; not called from
+      anywhere yet. **Found and fixed a real gap while implementing this:** `settings` had no
+      UNIQUE constraint on `area_id` at all (TASK 3 gave it a column and an FK, not a uniqueness
+      guarantee) — added `uniq_settings_area (area_id)` in `migrate.js`, or `INSERT IGNORE` here
+      wouldn't actually have prevented a second settings row per area under a race. Verified via two
+      migration runs against the local dev DB — idempotent, index present.
+- [x] 9.4 `imageController.js`'s `getUsedImageIds` — dropped the `LIMIT 1` on the settings query;
+      `addUsage` already iterates every row, so every area's UPI image now counts as in-use.
+- [x] 9.5 All 8 `microCache.bust('dashboard', 1)` sites in `settingsController.js` replaced. The one
+      inside `updateSettings` itself uses the real resolved `areaId`; the other 7 are inside the
+      offer handlers (`createOffer`/`updateOffer`/`deleteOffer`/`addOfferProduct`/
+      `removeOfferProduct`/`reorderOfferProducts`) — those stay on the area-1 stopgap since `offers`
+      itself isn't scoped until TASK 12, but the cache-bust plumbing upgrade (`bustAreaCaches`,
+      which also bumps `catalog_version`) didn't need to wait.
+- [x] 9.6 Guardrail test **restructured**, not just un-skipped: added `SWEPT_TABLES` (starts with
+      just `settings`) so the enforcement test can be active without requiring all 19 tables to be
+      done — the original single global `it.skip` couldn't have been un-skipped until TASK 17.
+      `settings` violations: 18 → 0. Total remaining (informational, non-failing): 419.
+- [x] 9.7 New `tests/settingsArea.test.js` (7 tests): area 1 and area 2 reads hit distinct
+      `WHERE area_id = ?` queries and distinct cache keys with no cross-contamination; a `null`
+      areaId falls back to the default area; `updateSettings` 400s on `null`/`'all'`; a write to
+      area 2 only touches area 2's row; **both areas' UPI QR images report `in_use: true`** via
+      `GET /admin/images` (proves the 9.4 fix).
 
+**Stopgap sites (documented per-site, owned by later tasks, all guardrail-clean since each
+literally contains `area_id = 1`):** `cartController.js` ×3 and `orderController.js` ×1 (TASK 13),
+`deliveryZonesController.js` ×1 (TASK 10), `utils/shops.js` ×3 and `utils/riders.js` ×2 (TASK 15),
+`adminController.js` ×1 (TASK 17), `services/shopOrderActions.js` ×1 (TASK 13).
+
+**Test churn from this task (H3, as expected):** `tests/ridersUtils.test.js` (2 SQL-text
+assertions), `tests/settingsDeliveryGate.test.js` (token shape + 2 SQL-text assertions),
+`tests/deliveryZonesAdmin.test.js` (token shape only — 26 unrelated tests in the file stayed green,
+confirming the token change is harmless where `req.areaId` isn't read), `tests/
+shopGlobalStatusSync.test.js` (6 SQL-text assertions), `tests/settingsOffers.test.js` (token shape,
+which also resolved a stale-mock-queue cascade across 6 of its 9 tests — see the fix commit for the
+full mechanism — plus one call-count bump from the new catalog-version query).
+
+**Done when:** two settings rows exist, area isolation holds, both areas' images report in-use.
+**Verified locally** 2026-08-01: migration run twice against the local dev DB (idempotent,
+`uniq_settings_area` present); booted the real dev server and exercised `GET /api/settings`
+(no-pin and with-pin) and `PATCH /api/admin/settings` (via a throwaway `area_admin` login) live,
+confirmed the write landed on the correct area's row in MySQL, then reverted and cleaned up.
+`npm test`: 88/88 suites (983/984, same 1 pre-existing skip — unrelated, in `cartOrder.test.js`,
+predates this session). `npx eslint` clean on all 17 touched files.
 **Commit:** `feat: AREA TASK 9 — per-area settings`
 
 ### [ ] TASK 10 — Delivery zones, exclusion zones, pricing (18 sites)
