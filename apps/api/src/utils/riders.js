@@ -52,15 +52,17 @@ const getRiderForUser = async (userId) => {
 };
 
 /**
- * Count riders who are admin-active and toggled online.
- * Busy-ness is ignored (plan §12 — delivery gate follows online state only).
+ * Count riders who are admin-active and toggled online, scoped to one area —
+ * a rider in area 2 must never count toward area 1's delivery gate.
  */
-const countActiveRiders = async () => {
+const countActiveRiders = async (areaId) => {
   const [rows] = await pool.query(
     `SELECT COUNT(*) AS cnt
      FROM riders r
      WHERE r.active = 1
-       AND r.is_online = 1`
+       AND r.is_online = 1
+       AND r.area_id = ?`,
+    [areaId]
   );
   return Number(rows[0]?.cnt) || 0;
 };
@@ -73,12 +75,14 @@ const countActiveRiders = async () => {
  * used by the radius rings in selectEligibleRider. These extra fields are
  * internal to the assignment engine — riderShape (what clients see) is left
  * alone so rider coordinates never leak into an API response by accident.
+ *
+ * areaId is required — an area 2 order must never offer to an area 1 rider.
  */
-const listEligibleRiders = async ({ excludeIds = [] } = {}) => {
+const listEligibleRiders = async ({ excludeIds = [], areaId } = {}) => {
   const exclude = (excludeIds || []).map(Number).filter((n) => Number.isFinite(n) && n > 0);
-  // Freshness param is bound before the exclude list — keep this order in sync
-  // with the placeholders below.
-  const params = [RIDER_LOCATION_MAX_AGE_SEC];
+  // Freshness param is bound before the area/exclude params — keep this order
+  // in sync with the placeholders below.
+  const params = [RIDER_LOCATION_MAX_AGE_SEC, areaId];
   let excludeClause = '';
   if (exclude.length > 0) {
     excludeClause = `AND r.id NOT IN (${exclude.map(() => '?').join(',')})`;
@@ -95,6 +99,7 @@ const listEligibleRiders = async ({ excludeIds = [] } = {}) => {
      FROM riders r
      WHERE r.active = 1
        AND r.is_online = 1
+       AND r.area_id = ?
        AND NOT EXISTS (
          SELECT 1 FROM rider_order_offers ro
          WHERE ro.rider_id = r.id AND ro.status = 'pending'
@@ -299,17 +304,17 @@ const selectEligibleRider = async (riders, opts = {}) => {
 };
 
 /**
- * Auto-manage settings.delivery_available from online rider count (D12).
- * 0 active online riders → OFF; ≥1 → ON. Then re-sync shop_open via shops util.
+ * Auto-manage settings.delivery_available from online rider count (D12),
+ * scoped to one area — a rider coming online in area 2 must never flip
+ * area 1's delivery gate. Then re-sync shop_open via shops util, same area.
  * Never throws.
  */
-const syncDeliveryAvailabilityFromRiders = async () => {
+const syncDeliveryAvailabilityFromRiders = async (areaId) => {
   try {
-    const activeCount = await countActiveRiders();
+    const activeCount = await countActiveRiders(areaId);
     const desired = activeCount > 0 ? 1 : 0;
 
-    // stopgap area 1 (TASK 15 scopes rider availability by area)
-    const [settingsRows] = await pool.query('SELECT delivery_available FROM settings WHERE area_id = 1 LIMIT 1');
+    const [settingsRows] = await pool.query('SELECT delivery_available FROM settings WHERE area_id = ? LIMIT 1', [areaId]);
     if (settingsRows.length === 0) return { changed: false, activeCount, deliveryAvailable: Boolean(desired) };
 
     const current = settingsRows[0].delivery_available ? 1 : 0;
@@ -317,8 +322,8 @@ const syncDeliveryAvailabilityFromRiders = async () => {
 
     if (current !== desired) {
       const [result] = await pool.query(
-        'UPDATE settings SET delivery_available = ? WHERE delivery_available != ? AND area_id = 1',
-        [desired, desired]
+        'UPDATE settings SET delivery_available = ? WHERE delivery_available != ? AND area_id = ?',
+        [desired, desired, areaId]
       );
       changed = result.affectedRows > 0;
     }
@@ -326,12 +331,14 @@ const syncDeliveryAvailabilityFromRiders = async () => {
     if (changed) {
       try {
         const { bustSettingsCache } = require('../controllers/settingsController');
-        bustSettingsCache();
+        bustSettingsCache(areaId);
       } catch (_) {
         // best-effort
       }
 
       try {
+        // Not yet area-scoped on the socket layer (per-area rooms land in
+        // TASK 23) — every customer gets this event regardless of area.
         const { emitToAllCustomers } = require('../realtime/socket');
         emitToAllCustomers('settings.delivery_available.updated', {
           deliveryAvailable: Boolean(desired),
@@ -342,8 +349,8 @@ const syncDeliveryAvailabilityFromRiders = async () => {
       }
 
       // Existing master-gate side effect: delivery off forces shop_open closed, etc.
-      const { syncGlobalShopOpenState } = require('./shops');
-      await syncGlobalShopOpenState();
+      const { syncAreaShopOpenState } = require('./shops');
+      await syncAreaShopOpenState(areaId);
     }
 
     return { changed, activeCount, deliveryAvailable: Boolean(desired) };

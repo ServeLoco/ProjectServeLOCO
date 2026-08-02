@@ -37,7 +37,7 @@ jest.mock('../src/utils/shops', () => ({
   notifyShopsOrderCancelled: jest.fn(),
   notifyShopsRiderAssigned: jest.fn(),
   notifyShopsRiderAssignmentFailed: jest.fn(),
-  syncGlobalShopOpenState: jest.fn().mockResolvedValue(undefined),
+  syncAreaShopOpenState: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock('../src/controllers/settingsController', () => ({
   bustSettingsCache: jest.fn(),
@@ -52,7 +52,7 @@ const adminInbox = require('../src/utils/adminNotifications');
 const notificationService = require('../src/utils/notificationService');
 const { emitToAllCustomers } = require('../src/realtime/socket');
 const { bustSettingsCache } = require('../src/controllers/settingsController');
-const { syncGlobalShopOpenState } = require('../src/utils/shops');
+const { syncAreaShopOpenState } = require('../src/utils/shops');
 
 function makeConn(responses) {
   const conn = {
@@ -93,15 +93,15 @@ describe('UAT 14.1 / 14.10 — delivery_available follows rider online count', (
       .mockResolvedValueOnce([[{ delivery_available: 1 }]])
       .mockResolvedValueOnce([{ affectedRows: 1 }]);
 
-    const r = await syncDeliveryAvailabilityFromRiders();
+    const r = await syncDeliveryAvailabilityFromRiders(1);
     expect(r.deliveryAvailable).toBe(false);
     expect(r.changed).toBe(true);
-    expect(bustSettingsCache).toHaveBeenCalled();
+    expect(bustSettingsCache).toHaveBeenCalledWith(1);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
       'settings.delivery_available.updated',
       expect.objectContaining({ deliveryAvailable: false })
     );
-    expect(syncGlobalShopOpenState).toHaveBeenCalled();
+    expect(syncAreaShopOpenState).toHaveBeenCalledWith(1);
   });
 
   it('turns delivery ON when any rider is active (14.10)', async () => {
@@ -110,7 +110,7 @@ describe('UAT 14.1 / 14.10 — delivery_available follows rider online count', (
       .mockResolvedValueOnce([[{ delivery_available: 0 }]])
       .mockResolvedValueOnce([{ affectedRows: 1 }]);
 
-    const r = await syncDeliveryAvailabilityFromRiders();
+    const r = await syncDeliveryAvailabilityFromRiders(1);
     expect(r.deliveryAvailable).toBe(true);
     expect(r.changed).toBe(true);
   });

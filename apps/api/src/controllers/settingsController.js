@@ -3,7 +3,7 @@ const { normalizeStoreType } = require('../utils/storeMode');
 const { createTtlCache } = require('../utils/ttlCache');
 const config = require('../config/env');
 const { cleanupOrphanedImage } = require('./imageController');
-const { syncGlobalShopOpenState } = require('../utils/shops');
+const { syncAreaShopOpenState } = require('../utils/shops');
 const { requestAreaId, getDefaultArea, bustAreaCaches } = require('../utils/areaScope');
 
 // Settings is a singleton (1 row) today, read by every app open and every
@@ -11,11 +11,7 @@ const { requestAreaId, getDefaultArea, bustAreaCaches } = require('../utils/area
 // settings fresh. Invalidated on PATCH.
 //
 // Key is already area-shaped (`settings:<areaId>`) even though `settings`
-// itself is still a single global row — TASK 9 makes it one row per area;
-// this plumbing means that swap only needs to replace the hardcoded `1`
-// below with a real req.areaId, not touch the cache key format.
 const settingsCache = createTtlCache({ ttlMs: 15_000 });
-const SETTINGS_AREA_ID_STOPGAP = 1;
 const settingsKey = (areaId) => `settings:${areaId}`;
 
 // Offer admin write/single-item endpoints reject null (super_admin, no
@@ -343,7 +339,7 @@ const updateSettings = async (req, res) => {
   // Master gate: delivery_available off means the business isn't
   // delivering, full stop — shop_open can't be open alongside it. (The
   // auto-open/auto-close side of this rule, triggered by individual shops
-  // opening/closing, lives in syncGlobalShopOpenState.)
+  // opening/closing, lives in syncAreaShopOpenState.)
   if (hasValue(body.shop_open)) {
     const wantsOpen = body.shop_open === true || body.shop_open === 'true' || body.shop_open === 1 || body.shop_open === '1';
     if (wantsOpen) {
@@ -419,7 +415,7 @@ const updateSettings = async (req, res) => {
   // closed if delivery just went off, or auto-opens if it just came back on
   // and some shop is open).
   if (body.delivery_available !== undefined) {
-    await syncGlobalShopOpenState();
+    await syncAreaShopOpenState(areaId);
     settingsCache.del(settingsKey(areaId));
   }
   if (
@@ -737,7 +733,7 @@ module.exports = {
   reorderOfferProducts,
   createSettingsForArea,
   // For code that writes settings outside this controller (e.g.
-  // syncGlobalShopOpenState flipping shop_open) — without this, public
+  // syncAreaShopOpenState flipping shop_open) — without this, public
   // /api/settings keeps serving the stale cached value for up to 15s.
-  bustSettingsCache: () => settingsCache.del(settingsKey(SETTINGS_AREA_ID_STOPGAP)),
+  bustSettingsCache: (areaId) => settingsCache.del(settingsKey(areaId)),
 };

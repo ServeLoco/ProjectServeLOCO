@@ -14,7 +14,7 @@ jest.mock('../src/realtime/socket', () => ({
   emitToAllCustomers: jest.fn(),
 }));
 jest.mock('../src/utils/shops', () => ({
-  syncGlobalShopOpenState: jest.fn().mockResolvedValue(undefined),
+  syncAreaShopOpenState: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock('../src/controllers/settingsController', () => ({
   bustSettingsCache: jest.fn(),
@@ -28,7 +28,7 @@ app.use(express.json());
 app.use('/api/admin', adminRoutes);
 
 const adminToken = () => jwt.sign(
-  { id: 'admin-1', role: 'admin' },
+  { id: 'admin-1', role: 'admin', adminRole: 'area_admin', areaId: 1 },
   process.env.JWT_SECRET || 'test_jwt_secret_that_is_long_enough'
 );
 

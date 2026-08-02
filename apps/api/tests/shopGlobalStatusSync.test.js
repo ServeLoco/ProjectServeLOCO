@@ -1,11 +1,12 @@
 /**
- * Tests for syncGlobalShopOpenState (src/utils/shops.js) and its wiring:
+ * Tests for syncAreaShopOpenState (src/utils/shops.js) and its wiring:
  *   - PATCH /api/shop/me/toggle       (shopOwnerController.toggleMyShop)
  *   - PATCH /api/admin/shops/:id      (shopAdminController.updateShop)
  *   - PATCH /api/admin/settings       (settingsController.updateSettings)
  *
  * Rule (confirmed with the user): settings.delivery_available is the master
- * gate for the admin dashboard's "Shop Status" banner (settings.shop_open).
+ * gate for the admin dashboard's "Shop Status" banner (settings.shop_open),
+ * scoped per area since TASK 15.
  *   - delivery_available OFF  -> shop_open forced closed, no matter how many
  *     individual shops are open. Products still show in the customer app
  *     menu — only ordering is gated by shop_open elsewhere.
@@ -20,7 +21,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const { pool } = require('../src/db/mysql');
 const { emitToAllCustomers } = require('../src/realtime/socket');
-const { syncGlobalShopOpenState } = require('../src/utils/shops');
+const { syncAreaShopOpenState } = require('../src/utils/shops');
 
 jest.mock('../src/db/mysql', () => ({
   pool: { query: jest.fn(), getConnection: jest.fn() },
@@ -31,7 +32,7 @@ jest.mock('../src/realtime/socket', () => ({
   emitToCustomer: jest.fn(),
 }));
 
-describe('syncGlobalShopOpenState (unit)', () => {
+describe('syncAreaShopOpenState (unit)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -41,10 +42,10 @@ describe('syncGlobalShopOpenState (unit)', () => {
       .mockResolvedValueOnce([[{ delivery_available: 0 }]]) // settings lookup
       .mockResolvedValueOnce([{ affectedRows: 1 }]);         // UPDATE shop_open = 0
 
-    await syncGlobalShopOpenState();
+    await syncAreaShopOpenState(1);
 
     expect(pool.query).toHaveBeenCalledTimes(2);
-    expect(pool.query).toHaveBeenNthCalledWith(2, 'UPDATE settings SET shop_open = 0 WHERE shop_open = 1 AND area_id = 1');
+    expect(pool.query).toHaveBeenNthCalledWith(2, 'UPDATE settings SET shop_open = 0 WHERE shop_open = 1 AND area_id = ?', [1]);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
       'settings.shop_open.updated',
       expect.objectContaining({ shopOpen: false, shop_open: false })
@@ -57,9 +58,9 @@ describe('syncGlobalShopOpenState (unit)', () => {
       .mockResolvedValueOnce([[{ total_active: 3, total_open: 1 }]])     // shops SUM
       .mockResolvedValueOnce([{ affectedRows: 1 }]);                     // UPDATE shop_open = 1
 
-    await syncGlobalShopOpenState();
+    await syncAreaShopOpenState(1);
 
-    expect(pool.query).toHaveBeenNthCalledWith(3, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = 1', [1, 1]);
+    expect(pool.query).toHaveBeenNthCalledWith(3, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = ?', [1, 1, 1]);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
       'settings.shop_open.updated',
       expect.objectContaining({ shopOpen: true, shop_open: true })
@@ -72,9 +73,9 @@ describe('syncGlobalShopOpenState (unit)', () => {
       .mockResolvedValueOnce([[{ total_active: 3, total_open: 0 }]])
       .mockResolvedValueOnce([{ affectedRows: 1 }]);
 
-    await syncGlobalShopOpenState();
+    await syncAreaShopOpenState(1);
 
-    expect(pool.query).toHaveBeenNthCalledWith(3, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = 1', [0, 0]);
+    expect(pool.query).toHaveBeenNthCalledWith(3, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = ?', [0, 0, 1]);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
       'settings.shop_open.updated',
       expect.objectContaining({ shopOpen: false, shop_open: false })
@@ -87,7 +88,7 @@ describe('syncGlobalShopOpenState (unit)', () => {
       .mockResolvedValueOnce([[{ total_active: 3, total_open: 1 }]])
       .mockResolvedValueOnce([{ affectedRows: 0 }]); // shop_open already 1
 
-    await syncGlobalShopOpenState();
+    await syncAreaShopOpenState(1);
 
     expect(emitToAllCustomers).not.toHaveBeenCalled();
   });
@@ -97,14 +98,14 @@ describe('syncGlobalShopOpenState (unit)', () => {
       .mockResolvedValueOnce([[{ delivery_available: 1 }]])
       .mockResolvedValueOnce([[{ total_active: 0, total_open: 0 }]]);
 
-    await syncGlobalShopOpenState();
+    await syncAreaShopOpenState(1);
 
     expect(pool.query).toHaveBeenCalledTimes(2); // settings + SUM only, no UPDATE
   });
 
   it('swallows DB errors without throwing', async () => {
     pool.query.mockRejectedValueOnce(new Error('connection lost'));
-    await expect(syncGlobalShopOpenState()).resolves.toBeUndefined();
+    await expect(syncAreaShopOpenState(1)).resolves.toBeUndefined();
   });
 });
 
@@ -118,7 +119,7 @@ describe('toggleMyShop wiring — PATCH /api/shop/me/toggle', () => {
     { id: 7, role: 'customer' },
     process.env.JWT_SECRET || 'test_jwt_secret_that_is_long_enough'
   );
-  const SHOP_ROW = [{ id: 1, name: 'Burger Point', is_open: 1, active: 1 }];
+  const SHOP_ROW = [{ id: 1, name: 'Burger Point', is_open: 1, active: 1, area_id: 1 }];
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -131,7 +132,8 @@ describe('toggleMyShop wiring — PATCH /api/shop/me/toggle', () => {
       .mockResolvedValueOnce([[{ id: 1, name: 'Burger Point', is_open: 1, active: 1 }]]) // re-select
       .mockResolvedValueOnce([[{ delivery_available: 1 }]])                 // sync: settings lookup
       .mockResolvedValueOnce([[{ total_active: 1, total_open: 1 }]])        // sync: shops SUM
-      .mockResolvedValueOnce([{ affectedRows: 1 }]);                        // sync: UPDATE settings shop_open = 1
+      .mockResolvedValueOnce([{ affectedRows: 1 }])                         // sync: UPDATE settings shop_open = 1
+      .mockResolvedValueOnce([{ affectedRows: 1 }]);                        // bustAreaCaches: catalog_version bump
 
     const res = await request(app)
       .patch('/api/shop/me/toggle')
@@ -139,7 +141,8 @@ describe('toggleMyShop wiring — PATCH /api/shop/me/toggle', () => {
       .send({ is_open: true });
 
     expect(res.statusCode).toEqual(200);
-    expect(pool.query).toHaveBeenLastCalledWith('UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = 1', [1, 1]);
+    expect(pool.query).toHaveBeenNthCalledWith(6, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = ?', [1, 1, 1]);
+    expect(pool.query).toHaveBeenLastCalledWith('UPDATE areas SET catalog_version = catalog_version + 1 WHERE id = ?', [1]);
   });
 
   it('closing the last open shop syncs the global banner off', async () => {
@@ -150,7 +153,8 @@ describe('toggleMyShop wiring — PATCH /api/shop/me/toggle', () => {
       .mockResolvedValueOnce([[{ id: 1, name: 'Burger Point', is_open: 0, active: 1 }]]) // re-select
       .mockResolvedValueOnce([[{ delivery_available: 1 }]])   // sync: settings lookup
       .mockResolvedValueOnce([[{ total_active: 1, total_open: 0 }]]) // sync: shops SUM
-      .mockResolvedValueOnce([{ affectedRows: 1 }]);   // sync: UPDATE settings shop_open = 0
+      .mockResolvedValueOnce([{ affectedRows: 1 }])    // sync: UPDATE settings shop_open = 0
+      .mockResolvedValueOnce([{ affectedRows: 1 }]);   // bustAreaCaches: catalog_version bump
 
     const res = await request(app)
       .patch('/api/shop/me/toggle')
@@ -158,7 +162,8 @@ describe('toggleMyShop wiring — PATCH /api/shop/me/toggle', () => {
       .send({ is_open: false });
 
     expect(res.statusCode).toEqual(200);
-    expect(pool.query).toHaveBeenLastCalledWith('UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = 1', [0, 0]);
+    expect(pool.query).toHaveBeenNthCalledWith(7, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = ?', [0, 0, 1]);
+    expect(pool.query).toHaveBeenLastCalledWith('UPDATE areas SET catalog_version = catalog_version + 1 WHERE id = ?', [1]);
   });
 });
 
@@ -169,7 +174,7 @@ describe('updateShop wiring — PATCH /api/admin/shops/:id', () => {
   app.use('/api/admin', adminRoutes);
 
   const adminToken = jwt.sign(
-    { id: 'admin', role: 'admin' },
+    { id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 },
     process.env.JWT_SECRET || 'test_jwt_secret_that_is_long_enough'
   );
 
@@ -188,7 +193,8 @@ describe('updateShop wiring — PATCH /api/admin/shops/:id', () => {
       }]])
       .mockResolvedValueOnce([[{ delivery_available: 1 }]])          // sync: settings lookup
       .mockResolvedValueOnce([[{ total_active: 1, total_open: 0 }]]) // sync: shops SUM
-      .mockResolvedValueOnce([{ affectedRows: 1 }]);                 // sync: UPDATE settings
+      .mockResolvedValueOnce([{ affectedRows: 1 }])                  // sync: UPDATE settings
+      .mockResolvedValueOnce([{ affectedRows: 1 }]);                 // bustAreaCaches: catalog_version bump
 
     const res = await request(app)
       .patch('/api/admin/shops/1')
@@ -196,6 +202,7 @@ describe('updateShop wiring — PATCH /api/admin/shops/:id', () => {
       .send({ is_open: false });
 
     expect(res.statusCode).toEqual(200);
-    expect(pool.query).toHaveBeenLastCalledWith('UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = 1', [0, 0]);
+    expect(pool.query).toHaveBeenNthCalledWith(6, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = ?', [0, 0, 1]);
+    expect(pool.query).toHaveBeenLastCalledWith('UPDATE areas SET catalog_version = catalog_version + 1 WHERE id = ?', [1]);
   });
 });

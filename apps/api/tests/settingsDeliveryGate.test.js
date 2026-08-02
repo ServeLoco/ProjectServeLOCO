@@ -105,7 +105,7 @@ describe('PATCH /api/admin/settings — delivery_available master gate', () => {
       .send({ delivery_available: false });
 
     expect(res.statusCode).toEqual(200);
-    expect(pool.query).toHaveBeenNthCalledWith(4, 'UPDATE settings SET shop_open = 0 WHERE shop_open = 1 AND area_id = 1');
+    expect(pool.query).toHaveBeenNthCalledWith(4, 'UPDATE settings SET shop_open = 0 WHERE shop_open = 1 AND area_id = ?', [1]);
   });
 
   it('turning delivery_available back on re-syncs shop_open per shop states', async () => {
@@ -123,7 +123,7 @@ describe('PATCH /api/admin/settings — delivery_available master gate', () => {
       .send({ delivery_available: true });
 
     expect(res.statusCode).toEqual(200);
-    expect(pool.query).toHaveBeenNthCalledWith(5, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = 1', [1, 1]);
+    expect(pool.query).toHaveBeenNthCalledWith(5, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = ?', [1, 1, 1]);
   });
 
   it('a plain shop_open: false close is never blocked by the gate', async () => {

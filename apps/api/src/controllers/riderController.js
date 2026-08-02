@@ -237,14 +237,14 @@ const setOnline = async (req, res) => {
   }
 
   const [rows] = await pool.query(
-    `SELECT id, user_id, display_name, phone, active, is_online
+    `SELECT id, user_id, area_id, display_name, phone, active, is_online
      FROM riders WHERE id = ?`,
     [req.rider.id]
   );
   req.rider = rows[0];
 
   // Fire-and-await so the response reflects the new delivery gate; never throws.
-  await syncDeliveryAvailabilityFromRiders();
+  await syncDeliveryAvailabilityFromRiders(req.rider.area_id);
 
   const rider = riderShape(req.rider);
 

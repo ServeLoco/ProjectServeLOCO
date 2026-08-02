@@ -438,7 +438,7 @@ const failAssignment = async (orderId, reason = 'No riders available') => {
       });
     } catch (_) { /* best-effort */ }
 
-    await syncDeliveryAvailabilityFromRiders();
+    await syncDeliveryAvailabilityFromRiders(updated.area_id);
     log('failAssignment (no auto-cancel)', { orderId, reason: failReason });
     return updated;
   } catch (e) {
@@ -488,7 +488,7 @@ const continueAssignment = async (orderId) => {
   }
 
   const excluded = await getExcludedRiderIdsForOrder(orderId);
-  const eligible = await listEligibleRiders({ excludeIds: excluded });
+  const eligible = await listEligibleRiders({ excludeIds: excluded, areaId: order.area_id });
   if (eligible.length === 0) {
     const outcome = await waitOrFailNoEligible(orderId, excluded);
     return { continued: false, ...outcome };
@@ -561,7 +561,7 @@ const startAssignment = async (orderId) => {
     }
 
     const excluded = await getExcludedRiderIdsForOrder(orderId);
-    const eligible = await listEligibleRiders({ excludeIds: excluded });
+    const eligible = await listEligibleRiders({ excludeIds: excluded, areaId: order.area_id });
     if (eligible.length === 0) {
       // Do not fail yet — keep searching until window ends (sweeper re-scans).
       log('startAssignment waiting for riders', { orderId, windowSec: RIDER_SEARCH_WINDOW_SEC });
@@ -901,20 +901,23 @@ const expireDueOffers = async () => {
  * continueAssignment either creates an offer, stays waiting, or fails the
  * window after RIDER_SEARCH_WINDOW_SEC.
  *
- * With nobody online, continueAssignment's own listEligibleRiders query is
- * guaranteed empty for every single waiting order — a full re-scan (loadOrder
- * + pending check + the eligible-riders JOIN, per order, every tick) buys
- * nothing. One countActiveRiders() check up front collapses that to a single
- * window-expiry check per order instead, while still letting failAssignment
- * fire on schedule (an order stuck waiting the full RIDER_SEARCH_WINDOW_SEC
- * with zero riders online is exactly the case that must notify admin).
+ * With nobody online IN THAT ORDER'S AREA, continueAssignment's own
+ * listEligibleRiders query is guaranteed empty for every single waiting
+ * order in that area — a full re-scan (loadOrder + pending check + the
+ * eligible-riders JOIN, per order, every tick) buys nothing. One
+ * countActiveRiders(areaId) check per distinct area up front collapses that
+ * to a single window-expiry check per order instead, while still letting
+ * failAssignment fire on schedule (an order stuck waiting the full
+ * RIDER_SEARCH_WINDOW_SEC with zero riders online in its area is exactly the
+ * case that must notify admin). Scoped per area (not once globally) so an
+ * area with online riders never masks another area with none, or vice versa.
  * The SELECT above already guarantees the same not-cancelled/not-delivered/
  * no-pending-offer/rider_id-NULL state continueAssignment re-checks via
  * loadOrder, so skipping that recheck here is safe, not a shortcut.
  */
 const recoverStuckAssignments = async () => {
   const [rows] = await pool.query(
-    `SELECT o.id FROM orders o
+    `SELECT o.id, o.area_id FROM orders o
      WHERE o.rider_assignment_status IN ('searching', 'offered')
        AND o.rider_id IS NULL
        AND o.status NOT IN ('Delivered', 'Cancelled')
@@ -927,15 +930,19 @@ const recoverStuckAssignments = async () => {
   );
   if (rows.length === 0) return [];
 
-  const hasOnlineRiders = (await countActiveRiders()) > 0;
+  const areaIds = [...new Set(rows.map((row) => row.area_id))];
+  const onlineByArea = new Map(
+    await Promise.all(areaIds.map(async (areaId) => [areaId, (await countActiveRiders(areaId)) > 0]))
+  );
+
   const results = [];
   for (const row of rows) {
-    if (hasOnlineRiders) {
+    if (onlineByArea.get(row.area_id)) {
       log('recoverStuckAssignments — resuming/scanning', row.id);
       results.push(await continueAssignment(row.id));
       continue;
     }
-    // Nobody to offer — just check whether this order's window has expired.
+    // Nobody online in this order's area — just check whether the window expired.
     const excluded = await getExcludedRiderIdsForOrder(row.id);
     const outcome = await waitOrFailNoEligible(row.id, excluded);
     results.push({ continued: false, ...outcome });

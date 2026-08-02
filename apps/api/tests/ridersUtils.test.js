@@ -31,7 +31,7 @@ jest.mock('../src/realtime/socket', () => ({
 }));
 
 jest.mock('../src/utils/shops', () => ({
-  syncGlobalShopOpenState: jest.fn().mockResolvedValue(undefined),
+  syncAreaShopOpenState: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../src/controllers/settingsController', () => ({
@@ -39,7 +39,7 @@ jest.mock('../src/controllers/settingsController', () => ({
 }));
 
 const { emitToAllCustomers } = require('../src/realtime/socket');
-const { syncGlobalShopOpenState } = require('../src/utils/shops');
+const { syncAreaShopOpenState } = require('../src/utils/shops');
 const { bustSettingsCache } = require('../src/controllers/settingsController');
 
 describe('selectRiderByLeastOrders (pure)', () => {
@@ -166,11 +166,11 @@ describe('listEligibleRiders', () => {
 
   it('excludes given rider ids', async () => {
     pool.query.mockResolvedValueOnce([[]]);
-    await listEligibleRiders({ excludeIds: [3, 5] });
+    await listEligibleRiders({ excludeIds: [3, 5], areaId: 1 });
     const [sql, params] = pool.query.mock.calls[0];
     expect(sql).toMatch(/r\.id NOT IN/);
-    // Location-freshness seconds are bound first, then the exclude list.
-    expect(params).toEqual([RIDER_LOCATION_MAX_AGE_SEC, 3, 5]);
+    // Location-freshness seconds are bound first, then areaId, then the exclude list.
+    expect(params).toEqual([RIDER_LOCATION_MAX_AGE_SEC, 1, 3, 5]);
   });
 
   it('marks a stale GPS ping as not fresh', async () => {
@@ -329,7 +329,7 @@ describe('countActiveRiders', () => {
 
   it('returns numeric count', async () => {
     pool.query.mockResolvedValueOnce([[{ cnt: 2 }]]);
-    expect(await countActiveRiders()).toBe(2);
+    expect(await countActiveRiders(1)).toBe(2);
   });
 });
 
@@ -344,20 +344,20 @@ describe('syncDeliveryAvailabilityFromRiders', () => {
       .mockResolvedValueOnce([[{ delivery_available: 0 }]]) // settings
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE
 
-    const result = await syncDeliveryAvailabilityFromRiders();
+    const result = await syncDeliveryAvailabilityFromRiders(1);
 
     expect(result.changed).toBe(true);
     expect(result.deliveryAvailable).toBe(true);
     expect(pool.query).toHaveBeenCalledWith(
-      'UPDATE settings SET delivery_available = ? WHERE delivery_available != ? AND area_id = 1',
-      [1, 1]
+      'UPDATE settings SET delivery_available = ? WHERE delivery_available != ? AND area_id = ?',
+      [1, 1, 1]
     );
-    expect(bustSettingsCache).toHaveBeenCalled();
+    expect(bustSettingsCache).toHaveBeenCalledWith(1);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
       'settings.delivery_available.updated',
       expect.objectContaining({ deliveryAvailable: true, delivery_available: true })
     );
-    expect(syncGlobalShopOpenState).toHaveBeenCalled();
+    expect(syncAreaShopOpenState).toHaveBeenCalledWith(1);
   });
 
   it('turns delivery_available OFF when zero active riders and currently on', async () => {
@@ -366,15 +366,15 @@ describe('syncDeliveryAvailabilityFromRiders', () => {
       .mockResolvedValueOnce([[{ delivery_available: 1 }]])
       .mockResolvedValueOnce([{ affectedRows: 1 }]);
 
-    const result = await syncDeliveryAvailabilityFromRiders();
+    const result = await syncDeliveryAvailabilityFromRiders(1);
 
     expect(result.changed).toBe(true);
     expect(result.deliveryAvailable).toBe(false);
     expect(pool.query).toHaveBeenCalledWith(
-      'UPDATE settings SET delivery_available = ? WHERE delivery_available != ? AND area_id = 1',
-      [0, 0]
+      'UPDATE settings SET delivery_available = ? WHERE delivery_available != ? AND area_id = ?',
+      [0, 0, 1]
     );
-    expect(syncGlobalShopOpenState).toHaveBeenCalled();
+    expect(syncAreaShopOpenState).toHaveBeenCalledWith(1);
   });
 
   it('no-ops when already matching desired state', async () => {
@@ -382,11 +382,11 @@ describe('syncDeliveryAvailabilityFromRiders', () => {
       .mockResolvedValueOnce([[{ cnt: 2 }]])
       .mockResolvedValueOnce([[{ delivery_available: 1 }]]);
 
-    const result = await syncDeliveryAvailabilityFromRiders();
+    const result = await syncDeliveryAvailabilityFromRiders(1);
 
     expect(result.changed).toBe(false);
     expect(bustSettingsCache).not.toHaveBeenCalled();
-    expect(syncGlobalShopOpenState).not.toHaveBeenCalled();
+    expect(syncAreaShopOpenState).not.toHaveBeenCalled();
   });
 
   it('returns early when settings row missing', async () => {
@@ -394,8 +394,8 @@ describe('syncDeliveryAvailabilityFromRiders', () => {
       .mockResolvedValueOnce([[{ cnt: 1 }]])
       .mockResolvedValueOnce([[]]);
 
-    const result = await syncDeliveryAvailabilityFromRiders();
+    const result = await syncDeliveryAvailabilityFromRiders(1);
     expect(result.changed).toBe(false);
-    expect(syncGlobalShopOpenState).not.toHaveBeenCalled();
+    expect(syncAreaShopOpenState).not.toHaveBeenCalled();
   });
 });

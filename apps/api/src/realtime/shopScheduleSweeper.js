@@ -39,9 +39,9 @@ const currentHHMM = (now = new Date()) => {
   return `${hour}:${minute}`;
 };
 
-const applyScheduledChange = async (shopId, isOpen) => {
-  await pool.query('UPDATE shops SET is_open = ? WHERE id = ?', [isOpen ? 1 : 0, shopId]);
-  const [rows] = await pool.query('SELECT id, active FROM shops WHERE id = ?', [shopId]);
+const applyScheduledChange = async (shopId, areaId, isOpen) => {
+  await pool.query('UPDATE shops SET is_open = ? WHERE id = ? AND area_id = ?', [isOpen ? 1 : 0, shopId, areaId]);
+  const [rows] = await pool.query('SELECT id, active FROM shops WHERE id = ? AND area_id = ?', [shopId, areaId]);
   const { emitToAllCustomers, emitToAdmins } = require('./socket');
   emitToAllCustomers('shop.status.updated', { shopId, isOpen });
   try {
@@ -49,12 +49,10 @@ const applyScheduledChange = async (shopId, isOpen) => {
       shopId, id: shopId, isOpen, is_open: isOpen, active: Boolean(rows[0]?.active),
     });
   } catch (_) { /* best-effort */ }
-  const { syncGlobalShopOpenState } = require('../utils/shops');
-  await syncGlobalShopOpenState();
-  const microCache = require('../utils/microCache');
-  // Hardcoded to area 1 for now (TASK 15 makes the sweeper loop areas).
-  microCache.bust('dashboard', 1);
-  microCache.bust('categories', 1);
+  const { syncAreaShopOpenState } = require('../utils/shops');
+  await syncAreaShopOpenState(areaId);
+  const { bustAreaCaches } = require('../utils/areaScope');
+  await bustAreaCaches(areaId);
 };
 
 const tick = async () => {
@@ -64,7 +62,7 @@ const tick = async () => {
     const hhmm = currentHHMM();
 
     const [toOpen] = await pool.query(
-      `SELECT id FROM shops
+      `SELECT id, area_id FROM shops
        WHERE active = 1 AND is_open = 0 AND open_time IS NOT NULL
          AND TIME_FORMAT(open_time, '%H:%i') = ?`,
       [hhmm],
@@ -74,10 +72,12 @@ const tick = async () => {
       // ended — that close must not slam the shop shut minutes after it
       // opened for the new day.
       pendingCloses.delete(row.id);
-      await applyScheduledChange(row.id, true);
+      await applyScheduledChange(row.id, row.area_id, true);
     }
 
     // Due now, plus anything whose close is still queued from an earlier tick.
+    // Areas run this same query concurrently by design — one WHERE, no loop
+    // needed, since area_id is just another column on the shared shops table.
     const closeClauses = ["TIME_FORMAT(close_time, '%H:%i') = ?"];
     const closeParams = [hhmm];
     const pendingIds = [...pendingCloses];
@@ -86,7 +86,7 @@ const tick = async () => {
       closeParams.push(...pendingIds);
     }
     const [toClose] = await pool.query(
-      `SELECT id FROM shops
+      `SELECT id, area_id FROM shops
        WHERE active = 1 AND is_open = 1 AND close_time IS NOT NULL
          AND (${closeClauses.join(' OR ')})`,
       closeParams,
@@ -113,7 +113,7 @@ const tick = async () => {
         continue;
       }
       pendingCloses.delete(row.id);
-      await applyScheduledChange(row.id, false);
+      await applyScheduledChange(row.id, row.area_id, false);
     }
   } catch (e) {
     console.error('[shop-schedule-sweeper] tick failed:', e.message);

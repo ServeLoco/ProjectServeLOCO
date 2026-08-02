@@ -52,7 +52,7 @@ jest.mock('../src/realtime/orderEvents', () => ({
 
 jest.mock('../src/utils/shops', () => ({
   notifyShopsOrderCancelled: jest.fn(),
-  syncGlobalShopOpenState: jest.fn().mockResolvedValue(undefined),
+  syncAreaShopOpenState: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../src/controllers/settingsController', () => ({

@@ -21,7 +21,7 @@ app.use(express.json());
 app.use('/api/admin', adminRoutes);
 
 const adminToken = jwt.sign(
-  { id: 'admin', role: 'admin' },
+  { id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 },
   process.env.JWT_SECRET || 'test_jwt_secret_that_is_long_enough'
 );
 
@@ -87,7 +87,7 @@ describe('Admin shop schedule — PATCH /api/admin/shops/:id/schedule', () => {
     expect(res.body.shop.openTime).toBe('09:00');
     expect(res.body.shop.closeTime).toBe('21:00');
     expect(pool.query).toHaveBeenNthCalledWith(2,
-      'UPDATE shops SET open_time = ?, close_time = ? WHERE id = ?', ['09:00', '21:00', 1]);
+      'UPDATE shops SET open_time = ?, close_time = ? WHERE id = ? AND area_id = ?', ['09:00', '21:00', 1, 1]);
   });
 
   it('clears the schedule when both times are null', async () => {

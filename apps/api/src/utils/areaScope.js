@@ -206,14 +206,9 @@ async function recomputeAreaBbox(areaId) {
 }
 
 /**
- * Fans out to every area-scoped cache. Partial today, by necessity:
- * microCache namespaces (dashboard/categories/delivery-zones) are
- * genuinely area-keyed as of TASK 4, so busting them by areaId works
- * correctly right now. bustSettingsCache() is still zero-arg and only
- * ever busts area 1's stopgap key (TASK 12 parameterizes it for real) —
- * calling it here is forward-compatible plumbing, not yet a real per-area
- * bust. invalidateStoreModeCache(areaId) is real as of TASK 11. Documented
- * rather than hidden, so nobody mistakes settings for already area-scoped.
+ * Fans out to every area-scoped cache: microCache namespaces
+ * (dashboard/categories/delivery-zones), the settings cache, and the
+ * store-mode cache, all keyed by areaId as of TASK 15.
  */
 function bustAreaCaches(areaId) {
   microCache.bust('dashboard', areaId);
@@ -227,7 +222,7 @@ function bustAreaCaches(areaId) {
   // requires of these two.
   try {
     const { bustSettingsCache } = require('../controllers/settingsController');
-    bustSettingsCache();
+    bustSettingsCache(areaId);
   } catch (_) { /* settingsController not loaded in this context (e.g. a unit test) */ }
   try {
     const { invalidateStoreModeCache } = require('./storeMode');

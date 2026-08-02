@@ -230,47 +230,53 @@ const notifyShopsRiderAssignmentFailed = async (order) => {
   }
 };
 
-// If every active multi-vendor shop is now closed, auto-close the global
-// "Shop Status" banner (settings.shop_open) too — so the admin dashboard
-// tracks reality instead of needing a separate manual flip every time a
-// shop opens or closes. delivery_available is the master gate: if it's
-// off, shop_open is forced closed no matter how many shops are open (the
-// business isn't delivering, full stop — products still show in the menu,
-// they just can't be ordered). If delivery_available is on, shop_open
-// tracks whether any active shop is currently open.
-// No-ops in single-vendor deployments (shops table empty/no active rows) —
-// delivery_available is the sole gate there, and settingsController already
-// respects it directly on manual shop_open writes.
-const syncGlobalShopOpenState = async () => {
+// If every active multi-vendor shop in this AREA is now closed, auto-close
+// that area's "Shop Status" banner (settings.shop_open) too — so the admin
+// dashboard tracks reality instead of needing a separate manual flip every
+// time a shop opens or closes. delivery_available is the master gate: if
+// it's off, shop_open is forced closed no matter how many shops are open
+// (the business isn't delivering, full stop — products still show in the
+// menu, they just can't be ordered). If delivery_available is on, shop_open
+// tracks whether any active shop in THIS area is currently open.
+// No-ops when this area has no active shops — delivery_available is the
+// sole gate there, and settingsController already respects it directly on
+// manual shop_open writes.
+//
+// Emits currently go to every connected customer regardless of area
+// (emitToAllCustomers) — per-area socket rooms don't exist until TASK 23,
+// so a customer resolved into a different area briefly sees another area's
+// banner flip until their next settings poll corrects it. Documented, not
+// silently accepted: TASK 23 narrows this to the area's own room.
+const syncAreaShopOpenState = async (areaId) => {
   try {
     let changed = false;
-    let globalOpen = null;
+    let areaOpen = null;
 
-    // stopgap area 1 throughout this function (TASK 15 renames it to
-    // syncAreaShopOpenState(areaId) and scopes the shops query too)
-    const [settingsRows] = await pool.query('SELECT delivery_available FROM settings WHERE area_id = 1 LIMIT 1');
+    const [settingsRows] = await pool.query('SELECT delivery_available FROM settings WHERE area_id = ? LIMIT 1', [areaId]);
     if (settingsRows.length === 0) return;
 
     const deliveryAvailable = Boolean(settingsRows[0].delivery_available);
     if (!deliveryAvailable) {
-      const [result] = await pool.query('UPDATE settings SET shop_open = 0 WHERE shop_open = 1 AND area_id = 1');
+      const [result] = await pool.query('UPDATE settings SET shop_open = 0 WHERE shop_open = 1 AND area_id = ?', [areaId]);
       changed = result.affectedRows > 0;
-      globalOpen = false;
+      areaOpen = false;
     } else {
       const [shopRows] = await pool.query(
         `SELECT
            SUM(active = 1) AS total_active,
            SUM(active = 1 AND is_open = 1) AS total_open
-         FROM shops`
+         FROM shops
+         WHERE area_id = ?`,
+        [areaId]
       );
       const totalActive = Number(shopRows[0]?.total_active) || 0;
       if (totalActive === 0) return;
 
       const totalOpen = Number(shopRows[0]?.total_open) || 0;
       const desiredOpen = totalOpen > 0 ? 1 : 0;
-      const [result] = await pool.query('UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = 1', [desiredOpen, desiredOpen]);
+      const [result] = await pool.query('UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = ?', [desiredOpen, desiredOpen, areaId]);
       changed = result.affectedRows > 0;
-      globalOpen = Boolean(desiredOpen);
+      areaOpen = Boolean(desiredOpen);
     }
 
     if (changed) {
@@ -280,19 +286,18 @@ const syncGlobalShopOpenState = async () => {
       // Lazy require: settingsController requires this file at load time,
       // so a top-level require here would be a circular import.
       const { bustSettingsCache } = require('../controllers/settingsController');
-      bustSettingsCache();
+      bustSettingsCache(areaId);
       const microCache = require('./microCache');
-      // Hardcoded to area 1 for now (TASK 15 makes this area-scoped).
-      microCache.bust('dashboard', 1);
-      microCache.bust('categories', 1);
+      microCache.bust('dashboard', areaId);
+      microCache.bust('categories', areaId);
 
       // Let connected customer apps flip their "shop closed" banner
       // immediately instead of waiting for the next settings poll.
       const { emitToAllCustomers } = require('../realtime/socket');
-      emitToAllCustomers('settings.shop_open.updated', { shopOpen: globalOpen, shop_open: globalOpen });
+      emitToAllCustomers('settings.shop_open.updated', { shopOpen: areaOpen, shop_open: areaOpen });
     }
   } catch (e) {
-    console.error('[shops] syncGlobalShopOpenState failed:', e.message);
+    console.error('[shops] syncAreaShopOpenState failed:', e.message);
   }
 };
 
@@ -408,7 +413,7 @@ const maybeAutoCancelOrderWhenAllShopsRejected = async (orderId) => {
 module.exports = {
   getShopForUser,
   notifyShopsForOrder,
-  syncGlobalShopOpenState,
+  syncAreaShopOpenState,
   notifyShopsOrderCancelled,
   notifyShopsRiderAssigned,
   notifyShopsRiderAssignmentFailed,
