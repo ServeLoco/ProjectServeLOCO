@@ -1636,25 +1636,96 @@ hand for the emit, not a change to any WHERE clause).
 
 ## Phase F — Super admin API + UI
 
-### [ ] TASK 24 — Super-admin endpoints, clone-area, the 409 gate
+### [x] TASK 24 — Super-admin endpoints, clone-area, the 409 gate
 **Spec:** §2.12, §6.6, §6.8 · **Files:** `[api] src/controllers/areaController.js` (new),
-`src/routes/adminRoutes.js`, `src/validators/index.js`
+`src/routes/adminRoutes.js`, `src/utils/areaScope.js`, `src/db/migrate.js`
 
-- [ ] 24.1 `POST /admin/areas` — one transaction creating the area, its `settings` row, and its
-      system store modes. **A new area is created empty** — no catalog, shops, riders or offers.
-- [ ] 24.2 `GET /admin/areas`, `PATCH /admin/areas/:id`.
-- [ ] 24.3 `POST /admin/admins`, `GET /admin/admins`, `PATCH /admin/admins/:id`. Enforce the §2.9
-      role/area invariant here.
-- [ ] 24.4 **Ship the §6.6 gate in this task:** `POST /admin/areas` returns **409** unless
-      `areas_sweep_complete` is set. Only TASK 30 sets it. Never a follow-up commit.
-- [ ] 24.5 `POST /admin/areas/:id/clone-from/:sourceId` — copies categories, store modes, dashboard
-      sections, offers and library-linked products (flat copy or price multiplier). Copies are
-      **independent rows with no ongoing link** to the source.
-- [ ] 24.6 Clone **never** copies orders, customers, riders, shops or coupons.
-- [ ] 24.7 Clone returns **409** against a target that already has categories or products, so a
-      double click cannot duplicate a catalog (§6.8).
-- [ ] 24.8 Area delete is **not supported** — deactivate only; say so in the response of any delete
-      attempt.
+- [x] 24.1 `POST /admin/areas` — one transaction (`pool.getConnection`/`beginTransaction`, same pattern
+      as `orderController.js`'s checkout transaction) creating the `areas` row, its `settings` row
+      (`createSettingsForArea`, ready since TASK 9, called for the first time by this task) and its two
+      `is_system` store modes (`seedSystemStoreModes`, already existed in `areaScope.js` since TASK
+      11/15 but was likewise never called until now) — all three committed together, or none of them.
+      Gave `seedSystemStoreModes` an optional `connection` param (previously always used the module-level
+      `pool`) so it can join the same transaction, matching `createSettingsForArea`'s existing
+      `connection = pool` pattern. A new area starts with zero categories/products/shops/riders/offers —
+      confirmed live (see below).
+- [x] 24.2 `GET /admin/areas` (`listAreas()` from `areaScope.js`, already cached) and
+      `PATCH /admin/areas/:id` (partial update: name/active/timezone/brand_color/logo_image_id/features).
+      Both bust the 60s areas cache — added a small `invalidateAreasCache()` export to `areaScope.js`
+      (it only exposed `_resetCachesForTests` before this task) so a just-created/edited area is visible
+      to `listAreas()`/`getAreaById()` immediately instead of after the TTL.
+- [x] 24.3 `POST /admin/admins`, `GET /admin/admins` (joined to `areas` for `areaCode`), `PATCH
+      /admin/admins/:id`. §2.9 role/area invariant enforced in one shared `validateRoleAreaInvariant`:
+      `super_admin` must have no `areaId`; `area_admin` must reference a real area (`getAreaById`
+      lookup, not just "is it a number"). Password hashed with `bcrypt.hash(password, 10)`, same as the
+      existing admin-login bootstrap path in `migrate.js`; minimum 8 characters. `password_hash` is never
+      included in any response shape.
+- [x] 24.4 **§6.6 gate, shipped in this same commit, not a follow-up:** a new `platform_flags` singleton
+      table (`id INT PRIMARY KEY DEFAULT 1, areas_sweep_complete TINYINT(1) NOT NULL DEFAULT 0`) —
+      same one-row-by-convention shape as the existing `admin_auth_state` table — added to `migrate.js`
+      right after TASK 22's `units` table, seeded to `0`. `createArea` reads it first, before touching
+      anything else, and returns `409 AREAS_SWEEP_INCOMPLETE` if it isn't `1`. Nothing in this task, or
+      anywhere else in the codebase, ever sets it to `1` — only TASK 30 will, after its isolation E2E
+      passes.
+- [x] 24.5 `POST /admin/areas/:id/clone-from/:sourceId` — copies, as brand-new rows with fresh
+      auto-increment ids and old-id→new-id maps built along the way: categories (all identity + placement
+      fields, `library_category_id` preserved so future propagation still reaches the clone), store modes
+      (`INSERT IGNORE` on `uniq_store_modes_area_slug` so the target's own already-seeded `is_system`
+      packed/fast_food rows are a no-op and only genuinely custom modes get copied), products **where
+      `library_product_id IS NOT NULL`** (local-only products are never cloned — matches §2.5's "opt-in
+      per area" model) plus their variants, offers plus `offer_products` (skipped when the referenced
+      product wasn't itself a library-linked clone), and `dashboard_sections` plus
+      `dashboard_section_items` (category/product/offer items remapped through the same id maps; combo
+      items skipped — combos are outside this task's copy scope and there is nothing in the target to
+      point at). Optional `priceMultiplier` (default `1`) scales `price`/`original_price`/`shop_price` on
+      both products and variants, rounded to 2dp. `shop_id`/`group_id` are deliberately never copied onto
+      a cloned product (§2.8 — shops aren't cloned, so a copied `shop_id` would point at nothing, or worse,
+      at a different area's real shop).
+- [x] 24.6 Confirmed by construction, not just by omission: the clone function's own query list touches
+      only `categories`, `store_modes`, `products`, `product_variants`, `offers`, `offer_products`,
+      `dashboard_sections`, `dashboard_section_items` — `orders`, `order_items`, `users`, `riders`,
+      `shops` and `coupons` do not appear anywhere in `cloneArea`.
+- [x] 24.7 Clone's first two queries (inside the same transaction as the rest of the copy, before any
+      write) count the target's own `categories`/`products` rows; either being non-zero returns `409
+      CONFLICT` and rolls back before any INSERT runs — live-verified: cloning twice in a row 409s on
+      the second attempt.
+- [x] 24.8 `DELETE /admin/areas/:id` is a real, routed endpoint — not a 404 — that always returns `405
+      NOT_SUPPORTED` with a message pointing at `PATCH { active: false }` instead.
+
+**Live verification (real local dev DB, not mocked):** ran the actual migration twice (idempotent, no
+errors — `platform_flags` table created cleanly, existing Area 1 row untouched) and then drove every
+`areaController.js` function directly against the real `pool` with a throwaway script
+(`scratchpad/verifyTask24.js`, deleted after use): (1) `POST /admin/areas` correctly 409s
+(`AREAS_SWEEP_INCOMPLETE`) while the flag is `0`; (2) flipping `platform_flags.areas_sweep_complete = 1`
+(simulating what TASK 30 will eventually do) makes area creation succeed, and the new area's `settings`
+row and both `store_modes` rows exist immediately afterward; (3) a duplicate code 409s; (4) `PATCH`
+updates and re-reads correctly; (5) `DELETE` 405s; (6) cloning the real seeded Area 1 catalog into the
+new area actually copied 9 categories, 3 store modes, 3 offers and 8 dashboard sections (0 products,
+correctly — none of Area 1's real seed products are library-linked, since promoting to the library is a
+deliberate admin action nothing in this session's seed data has ever performed); (7) cloning again
+immediately 409s; (8) creating an `area_admin` bound to the new area, and rejecting a `super_admin`
+payload that also set an `areaId`, both worked; (9) `updateAdmin` applied a `displayName` change. Every
+row this script created (test area, its settings/store-modes/categories/products/offers/sections, the
+test admin) was deleted afterward and the flag reset to `0` — confirmed 0 remain and Area 1 is
+unaffected.
+
+**Test churn:** new `tests/areaController.test.js` (25 cases) — the §6.6 gate at both flag states, the
+one-transaction create (asserting `createSettingsForArea`/`seedSystemStoreModes` are called with the
+same connection object as the `INSERT INTO areas`, not a fresh `pool.query`), duplicate-code and
+mid-transaction-failure rollback, area update/delete, the full clone happy path (asserting the exact
+remapped `category_id`/product row shape sent to MySQL, not just the summary counts in the response),
+the price-multiplier math, target-not-empty and same-area-id and missing-area 4xx/409s, admin list/create/
+update including every role/area invariant branch and the duplicate-username/short-password rejections,
+and a super_admin-vs-area_admin 403 check across both route groups. Full Jest suite: 98/98 suites,
+1064/1065 tests, 1 pre-existing skip. `npm run lint`: clean.
+
+**Guardrail:** informational violation count: 246 (was 244 at TASK 23) — `cloneArea`'s child-row reads
+(`product_variants` by `product_id`, `offer_products` by `offer_id`, `dashboard_section_items` by
+`section_id`) filter by a parent id that was itself already resolved from an area-scoped row earlier in
+the same transaction, the same trusted-child-id pattern already used everywhere else in this codebase
+(e.g. variant toggles joining through `products` to confirm area) — the guardrail's static scan can't see
+that trust chain and counts them anyway; never a real cross-area leak, still purely informational/never-
+failing.
 
 **Commit:** `feat: AREA TASK 24 — super admin endpoints, clone-area, creation gate`
 
