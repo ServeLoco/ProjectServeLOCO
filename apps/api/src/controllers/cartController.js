@@ -401,6 +401,7 @@ const calculateCart = async (req, res) => {
       userId,
       zoneId,
       itemCount: totalItemCount,
+      areaId: deliveryAreaId,
     });
     if (result.ok) {
       discount = roundMoney(result.discount);
@@ -420,6 +421,7 @@ const calculateCart = async (req, res) => {
       userId,
       zoneId,
       itemCount: totalItemCount,
+      areaId: deliveryAreaId,
     });
     if (result.ok) {
       discount = roundMoney(result.discount);
@@ -438,6 +440,7 @@ const calculateCart = async (req, res) => {
       userId,
       zoneId,
       itemCount: totalItemCount,
+      areaId: deliveryAreaId,
     });
     if (best) {
       discount = roundMoney(best.discount);
@@ -458,6 +461,7 @@ const calculateCart = async (req, res) => {
       userId,
       zoneId,
       itemCount: totalItemCount,
+      areaId: deliveryAreaId,
     });
     if (best) {
       discount = roundMoney(best.discount);
@@ -477,6 +481,7 @@ const calculateCart = async (req, res) => {
       userId,
       zoneId,
       itemCount: totalItemCount,
+      areaId: deliveryAreaId,
     });
   } catch (_) {
     // Non-fatal: empty list on error.
@@ -498,7 +503,7 @@ const calculateCart = async (req, res) => {
   let freeDeliveryProgress = null;
   if (!isFreeDeliveryApplied) {
     try {
-      freeDeliveryProgress = await getNextFreeDeliveryThreshold({ subtotal, storeType: cartStoreType, userId, zoneId, itemCount: totalItemCount });
+      freeDeliveryProgress = await getNextFreeDeliveryThreshold({ subtotal, storeType: cartStoreType, userId, zoneId, itemCount: totalItemCount, areaId: deliveryAreaId });
     } catch (err) {
       // Non-fatal: no progress hint on error, but log so a broken hint
       // (e.g. missing migration column) doesn't fail silently in prod.
@@ -519,6 +524,7 @@ const calculateCart = async (req, res) => {
       zoneId,
       excludeCouponId: appliedCoupon?.id || null,
       itemCount: totalItemCount,
+      areaId: deliveryAreaId,
     });
   } catch (err) {
     console.error('[cart] getNearestUnlockableCoupon failed:', err.message);
@@ -742,6 +748,7 @@ const validateCouponHandler = async (req, res) => {
     storeType: cartStoreType,
     userId,
     zoneId,
+    areaId: deliveryAreaId,
   });
 
   if (result.ok) {
@@ -827,6 +834,7 @@ const getAvailableCoupons = async (req, res) => {
     storeType: cartStoreType,
     userId,
     zoneId,
+    areaId: deliveryAreaId,
   });
 
   res.status(200).json({ data: coupons });

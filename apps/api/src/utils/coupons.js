@@ -440,6 +440,7 @@ const validateCoupon = async ({
   now = new Date(),
   connection = null,
   itemCount = null,
+  areaId = null,
 }) => {
   if (!code || typeof code !== 'string') {
     return { ok: false, reason: 'Please enter a coupon code' };
@@ -448,10 +449,12 @@ const validateCoupon = async ({
   const normalizedCode = code.trim().toUpperCase();
   const conn = connection || pool;
 
-  const [rows] = await conn.query(
-    'SELECT * FROM coupons WHERE code = ? AND deleted = 0 LIMIT 1',
-    [normalizedCode]
-  );
+  // areaId is an input to the rule engine, not logic inside it (§14.2) —
+  // omitted only by callers that haven't been threaded through yet (their
+  // owning stopgap, not this file's).
+  const [rows] = areaId !== null
+    ? await conn.query('SELECT * FROM coupons WHERE code = ? AND deleted = 0 AND area_id = ? LIMIT 1', [normalizedCode, areaId])
+    : await conn.query('SELECT * FROM coupons WHERE code = ? AND deleted = 0 LIMIT 1', [normalizedCode]);
 
   if (rows.length === 0) {
     return { ok: false, reason: 'Invalid coupon code' };
@@ -493,6 +496,7 @@ const validateCouponById = async ({
   now = new Date(),
   connection = null,
   itemCount = null,
+  areaId = null,
 }) => {
   if (!couponId) {
     return { ok: false, reason: 'Coupon not found' };
@@ -500,10 +504,9 @@ const validateCouponById = async ({
 
   const conn = connection || pool;
 
-  const [rows] = await conn.query(
-    'SELECT * FROM coupons WHERE id = ? AND deleted = 0 LIMIT 1',
-    [couponId]
-  );
+  const [rows] = areaId !== null
+    ? await conn.query('SELECT * FROM coupons WHERE id = ? AND deleted = 0 AND area_id = ? LIMIT 1', [couponId, areaId])
+    : await conn.query('SELECT * FROM coupons WHERE id = ? AND deleted = 0 LIMIT 1', [couponId]);
 
   if (rows.length === 0) {
     return { ok: false, reason: 'Coupon not found' };
@@ -556,20 +559,30 @@ const pickBestAutoApply = async ({
   now = new Date(),
   connection = null,
   itemCount = null,
+  areaId = null,
 }) => {
   const conn = connection || pool;
 
   // Fetch all active, non-deleted auto-apply coupons within the date window.
   // We can't fully filter by day-of-week / time-of-day in SQL, so we fetch
   // candidates and then check in JS.
-  const [rows] = await conn.query(
-    `SELECT * FROM coupons
-     WHERE auto_apply = 1 AND active = 1 AND deleted = 0
-       AND (starts_at IS NULL OR starts_at <= ?)
-       AND (ends_at IS NULL OR ends_at >= ?)
-     ORDER BY priority DESC, id DESC`,
-    [now, now]
-  );
+  const [rows] = areaId !== null
+    ? await conn.query(
+        `SELECT * FROM coupons
+         WHERE auto_apply = 1 AND active = 1 AND deleted = 0 AND area_id = ?
+           AND (starts_at IS NULL OR starts_at <= ?)
+           AND (ends_at IS NULL OR ends_at >= ?)
+         ORDER BY priority DESC, id DESC`,
+        [areaId, now, now]
+      )
+    : await conn.query(
+        `SELECT * FROM coupons
+         WHERE auto_apply = 1 AND active = 1 AND deleted = 0
+           AND (starts_at IS NULL OR starts_at <= ?)
+           AND (ends_at IS NULL OR ends_at >= ?)
+         ORDER BY priority DESC, id DESC`,
+        [now, now]
+      );
 
   const eligible = [];
   for (const coupon of rows) {
@@ -641,19 +654,29 @@ const findApplicableCoupons = async ({
   now = new Date(),
   connection = null,
   itemCount = null,
+  areaId = null,
 }) => {
   // NOTE: Owner confirmed in bugs.md (§C7) that code-required coupons appearing
   // in the in-app offers list is INTENDED BEHAVIOR. Do not filter them out.
   const conn = connection || pool;
 
-  const [rows] = await conn.query(
-    `SELECT * FROM coupons
-     WHERE active = 1 AND deleted = 0
-       AND (starts_at IS NULL OR starts_at <= ?)
-       AND (ends_at IS NULL OR ends_at >= ?)
-     ORDER BY auto_apply DESC, priority DESC, id DESC`,
-    [now, now]
-  );
+  const [rows] = areaId !== null
+    ? await conn.query(
+        `SELECT * FROM coupons
+         WHERE active = 1 AND deleted = 0 AND area_id = ?
+           AND (starts_at IS NULL OR starts_at <= ?)
+           AND (ends_at IS NULL OR ends_at >= ?)
+         ORDER BY auto_apply DESC, priority DESC, id DESC`,
+        [areaId, now, now]
+      )
+    : await conn.query(
+        `SELECT * FROM coupons
+         WHERE active = 1 AND deleted = 0
+           AND (starts_at IS NULL OR starts_at <= ?)
+           AND (ends_at IS NULL OR ends_at >= ?)
+         ORDER BY auto_apply DESC, priority DESC, id DESC`,
+        [now, now]
+      );
 
   const sub = toMoney(subtotal);
   const currentItems = Number(itemCount) || 0;
@@ -825,18 +848,29 @@ const getNextFreeDeliveryThreshold = async ({
   now = new Date(),
   connection = null,
   itemCount = 0,
+  areaId = null,
 }) => {
   const conn = connection || pool;
 
-  const [rows] = await conn.query(
-    `SELECT * FROM coupons
-     WHERE active = 1 AND deleted = 0 AND discount_type = 'free_delivery'
-       AND auto_apply = 1 AND requires_code = 0
-       AND (starts_at IS NULL OR starts_at <= ?)
-       AND (ends_at IS NULL OR ends_at >= ?)
-     ORDER BY min_order_amount ASC, min_item_count ASC`,
-    [now, now]
-  );
+  const [rows] = areaId !== null
+    ? await conn.query(
+        `SELECT * FROM coupons
+         WHERE active = 1 AND deleted = 0 AND discount_type = 'free_delivery' AND area_id = ?
+           AND auto_apply = 1 AND requires_code = 0
+           AND (starts_at IS NULL OR starts_at <= ?)
+           AND (ends_at IS NULL OR ends_at >= ?)
+         ORDER BY min_order_amount ASC, min_item_count ASC`,
+        [areaId, now, now]
+      )
+    : await conn.query(
+        `SELECT * FROM coupons
+         WHERE active = 1 AND deleted = 0 AND discount_type = 'free_delivery'
+           AND auto_apply = 1 AND requires_code = 0
+           AND (starts_at IS NULL OR starts_at <= ?)
+           AND (ends_at IS NULL OR ends_at >= ?)
+         ORDER BY min_order_amount ASC, min_item_count ASC`,
+        [now, now]
+      );
 
   const result = await findNearestEligibleThreshold({
     rows,
@@ -886,17 +920,27 @@ const getNearestUnlockableCoupon = async ({
   connection = null,
   excludeCouponId = null,
   itemCount = 0,
+  areaId = null,
 }) => {
   const conn = connection || pool;
 
-  const [rows] = await conn.query(
-    `SELECT * FROM coupons
-     WHERE active = 1 AND deleted = 0 AND discount_type != 'free_delivery'
-       AND (starts_at IS NULL OR starts_at <= ?)
-       AND (ends_at IS NULL OR ends_at >= ?)
-     ORDER BY min_order_amount ASC, min_item_count ASC, priority DESC, id ASC`,
-    [now, now]
-  );
+  const [rows] = areaId !== null
+    ? await conn.query(
+        `SELECT * FROM coupons
+         WHERE active = 1 AND deleted = 0 AND discount_type != 'free_delivery' AND area_id = ?
+           AND (starts_at IS NULL OR starts_at <= ?)
+           AND (ends_at IS NULL OR ends_at >= ?)
+         ORDER BY min_order_amount ASC, min_item_count ASC, priority DESC, id ASC`,
+        [areaId, now, now]
+      )
+    : await conn.query(
+        `SELECT * FROM coupons
+         WHERE active = 1 AND deleted = 0 AND discount_type != 'free_delivery'
+           AND (starts_at IS NULL OR starts_at <= ?)
+           AND (ends_at IS NULL OR ends_at >= ?)
+         ORDER BY min_order_amount ASC, min_item_count ASC, priority DESC, id ASC`,
+        [now, now]
+      );
 
   const candidates = excludeCouponId
     ? rows.filter(coupon => coupon.id !== excludeCouponId)

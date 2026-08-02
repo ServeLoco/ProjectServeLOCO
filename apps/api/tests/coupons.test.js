@@ -2250,7 +2250,7 @@ describe('admin coupon routes — ER_DUP_ENTRY race handling', () => {
   adminApp.use(express.json());
   adminApp.use('/api/admin', adminRoutes);
 
-  const adminToken = jwt.sign({ sub: 1, role: 'admin' }, process.env.JWT_SECRET || 'secret');
+  const adminToken = jwt.sign({ sub: 1, role: 'admin', adminRole: 'area_admin', areaId: 1 }, process.env.JWT_SECRET || 'secret');
 
   const dupEntryError = () => {
     const err = new Error("Duplicate entry 'RACE' for key 'uniq_live_coupon_code'");
@@ -2308,6 +2308,7 @@ describe('admin coupon routes — ER_DUP_ENTRY race handling', () => {
     pool.query
       .mockResolvedValueOnce([[]]) // code uniqueness pre-check
       .mockResolvedValueOnce([{ insertId: 55 }]) // INSERT coupons
+      .mockResolvedValueOnce([[{ id: 2 }, { id: 3 }]]) // §14.4: zone-ownership check — both in this area
       .mockResolvedValueOnce([{}]); // INSERT IGNORE coupon_zones
 
     const res = await request(adminApp)
@@ -2322,8 +2323,8 @@ describe('admin coupon routes — ER_DUP_ENTRY race handling', () => {
     expect(res.body.id).toBe(55);
     const insertSql = pool.query.mock.calls[1][0];
     expect(insertSql).toContain('target_zones');
-    const zonesSql = pool.query.mock.calls[2][0];
-    const zonesParams = pool.query.mock.calls[2][1];
+    const zonesSql = pool.query.mock.calls[3][0];
+    const zonesParams = pool.query.mock.calls[3][1];
     expect(zonesSql).toContain('INSERT IGNORE INTO coupon_zones');
     expect(zonesParams[0]).toEqual([[55, 2], [55, 3]]);
   });
@@ -2333,6 +2334,7 @@ describe('admin coupon routes — ER_DUP_ENTRY race handling', () => {
       .mockResolvedValueOnce([[buildCoupon({ id: 1, target_zones: 'selected' })]]) // existing coupon lookup
       .mockResolvedValueOnce([{ affectedRows: 1 }]) // UPDATE coupons (target_zones unchanged, no other fields)
       .mockResolvedValueOnce([{}]) // DELETE FROM coupon_zones
+      .mockResolvedValueOnce([[{ id: 4 }]]) // §14.4: zone-ownership check — zone 4 is in this area
       .mockResolvedValueOnce([{}]); // INSERT IGNORE coupon_zones
 
     const res = await request(adminApp)
@@ -2343,7 +2345,7 @@ describe('admin coupon routes — ER_DUP_ENTRY race handling', () => {
     expect(res.statusCode).toBe(200);
     const deleteSql = pool.query.mock.calls[2][0];
     expect(deleteSql).toContain('DELETE FROM coupon_zones');
-    const insertParams = pool.query.mock.calls[3][1];
+    const insertParams = pool.query.mock.calls[4][1];
     expect(insertParams[0]).toEqual([[1, 4]]);
   });
 });

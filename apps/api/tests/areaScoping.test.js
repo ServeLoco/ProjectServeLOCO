@@ -101,15 +101,6 @@ const ALLOWLIST = [
       'areas). Also: this file is the coupon rule engine, which the spec ' +
       'explicitly says to scope only at its inputs, never inside its logic.',
   },
-  {
-    file: 'src/controllers/couponController.js',
-    line: 137,
-    reason:
-      'Zone-name lookup for a coupon\'s targeted zones — coupons/coupon_zones ' +
-      "aren't area-scoped yet (TASK 14 owns that full redesign); scoping just " +
-      'this JOIN\'s delivery_zones side ahead of TASK 14 would be premature ' +
-      'and wouldn\'t make the read meaningfully safer on its own.',
-  },
 ];
 
 function isAllowlisted(relFile, line) {

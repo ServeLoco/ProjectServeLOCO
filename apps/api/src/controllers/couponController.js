@@ -1,6 +1,22 @@
 const { pool } = require('../db/mysql');
 const { roundMoney } = require('../utils/money');
 const { getActiveStoreModeSlugs, isSystemModeSlug } = require('../utils/storeMode');
+const { requestAreaId, bustAreaCaches } = require('../utils/areaScope');
+
+// Coupon admin endpoints always target exactly one area — rejects null
+// (super_admin, no X-Area-Id) and 'all'.
+const requireOneArea = (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required to manage coupons' });
+    return null;
+  }
+  if (areaId === 'all') {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Coupons cannot be managed for "all" areas at once — pick one area' });
+    return null;
+  }
+  return areaId;
+};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -74,10 +90,13 @@ const enrichCoupon = async (coupon) => {
 // ─────────────────────────────────────────────────────────────────────────
 
 const getAdminCoupons = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { status, active, auto_apply, target_audience, target_zones, applies_to } = req.query;
 
-  let query = 'SELECT * FROM coupons WHERE deleted = 0';
-  const params = [];
+  let query = 'SELECT * FROM coupons WHERE deleted = 0 AND area_id = ?';
+  const params = [areaId];
 
   if (active !== undefined) {
     query += ' AND active = ?';
@@ -114,8 +133,14 @@ const getAdminCoupons = async (req, res) => {
 };
 
 const getAdminCouponById = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
-  const [rows] = await pool.query('SELECT * FROM coupons WHERE id = ? AND deleted = 0', [id]);
+  // area_id in the WHERE, not just id: without this, an area_admin could
+  // read another area's coupon by guessing its (globally sequential)
+  // numeric id.
+  const [rows] = await pool.query('SELECT * FROM coupons WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (rows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Coupon not found' });
   }
@@ -138,8 +163,8 @@ const getAdminCouponById = async (req, res) => {
       `SELECT cz.delivery_zone_id, dz.name
        FROM coupon_zones cz
        JOIN delivery_zones dz ON cz.delivery_zone_id = dz.id
-       WHERE cz.coupon_id = ? ORDER BY dz.id ASC`,
-      [id]
+       WHERE cz.coupon_id = ? AND dz.area_id = ? ORDER BY dz.id ASC`,
+      [id, areaId]
     );
     coupon.targetedZones = zoneRows;
   } else {
@@ -150,6 +175,9 @@ const getAdminCouponById = async (req, res) => {
 };
 
 const createCoupon = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const adminId = req.admin?.id || null;
   const b = req.body;
 
@@ -170,7 +198,9 @@ const createCoupon = async (req, res) => {
   let code = toNullIfEmpty(b.code);
   if (code) {
     code = String(code).trim().toUpperCase();
-    const [existing] = await pool.query('SELECT id FROM coupons WHERE code = ? AND deleted = 0', [code]);
+    // Scoped by area: the same code is allowed to exist independently in
+    // two different areas (§14.5) — the composite UNIQUE key backs this too.
+    const [existing] = await pool.query('SELECT id FROM coupons WHERE code = ? AND deleted = 0 AND area_id = ?', [code, areaId]);
     if (existing.length > 0) {
       return res.status(409).json({ code: 'CONFLICT', message: 'A coupon with this code already exists' });
     }
@@ -188,7 +218,7 @@ const createCoupon = async (req, res) => {
   if (b.applies_to === 'all' || isSystemModeSlug(b.applies_to)) {
     appliesTo = b.applies_to;
   } else if (b.applies_to !== undefined) {
-    const activeModeSlugs = await getActiveStoreModeSlugs();
+    const activeModeSlugs = await getActiveStoreModeSlugs(areaId);
     if (activeModeSlugs.includes(b.applies_to)) appliesTo = b.applies_to;
   }
 
@@ -196,15 +226,16 @@ const createCoupon = async (req, res) => {
   try {
     [result] = await pool.query(
       `INSERT INTO coupons (
-        code, title, description,
+        area_id, code, title, description,
         discount_type, also_free_delivery, discount_value, max_discount_amount,
         min_order_amount, min_item_count, max_order_amount, applies_to,
         starts_at, ends_at, active_days_mask, active_time_start, active_time_end,
         total_usage_limit, per_user_usage_limit, first_order_only, first_n_orders,
         target_audience, target_zones, auto_apply, requires_code, priority,
         active, created_by_admin_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
       [
+        areaId,
         code,
         b.title.trim(),
         toNullIfEmpty(b.description) || '',
@@ -248,18 +279,34 @@ const createCoupon = async (req, res) => {
   }
 
   if (targetZones === 'selected' && Array.isArray(b.targeted_zone_ids) && b.targeted_zone_ids.length > 0) {
-    const values = b.targeted_zone_ids.map(zid => [couponId, Number(zid)]);
-    await pool.query('INSERT IGNORE INTO coupon_zones (coupon_id, delivery_zone_id) VALUES ?', [values]);
+    // §14.4: a coupon and its coupon_zones must share an area — silently
+    // drop any zone id that isn't actually in this area rather than let a
+    // coupon end up "targeted" at a zone it can never actually match.
+    const [zoneRows] = await pool.query(
+      'SELECT id FROM delivery_zones WHERE id IN (?) AND area_id = ?',
+      [b.targeted_zone_ids.map(Number), areaId]
+    );
+    const validZoneIds = new Set(zoneRows.map(r => r.id));
+    const values = b.targeted_zone_ids.map(Number).filter(zid => validZoneIds.has(zid)).map(zid => [couponId, zid]);
+    if (values.length > 0) {
+      await pool.query('INSERT IGNORE INTO coupon_zones (coupon_id, delivery_zone_id) VALUES ?', [values]);
+    }
   }
 
+  await bustAreaCaches(areaId);
   res.status(201).json({ message: 'Coupon created', id: couponId });
 };
 
 const updateCoupon = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const b = req.body;
 
-  const [existingRows] = await pool.query('SELECT * FROM coupons WHERE id = ? AND deleted = 0', [id]);
+  // area_id in the WHERE, not just id: without this, an area_admin could
+  // PATCH another area's coupon by guessing its numeric id.
+  const [existingRows] = await pool.query('SELECT * FROM coupons WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (existingRows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Coupon not found' });
   }
@@ -284,7 +331,7 @@ const updateCoupon = async (req, res) => {
     let code = toNullIfEmpty(b.code);
     if (code) {
       code = String(code).trim().toUpperCase();
-      const [dupe] = await pool.query('SELECT id FROM coupons WHERE code = ? AND deleted = 0 AND id != ?', [code, id]);
+      const [dupe] = await pool.query('SELECT id FROM coupons WHERE code = ? AND deleted = 0 AND id != ? AND area_id = ?', [code, id, areaId]);
       if (dupe.length > 0) {
         return res.status(409).json({ code: 'CONFLICT', message: 'A coupon with this code already exists' });
       }
@@ -313,7 +360,7 @@ const updateCoupon = async (req, res) => {
   if (b.min_item_count !== undefined) { updates.push('min_item_count = ?'); params.push(toIntOrNull(b.min_item_count)); }
   if (b.max_order_amount !== undefined) { updates.push('max_order_amount = ?'); params.push(toMoneyOrNull(b.max_order_amount)); }
   if (b.applies_to !== undefined) {
-    const activeModeSlugs = await getActiveStoreModeSlugs();
+    const activeModeSlugs = await getActiveStoreModeSlugs(areaId);
     if (!['all', ...activeModeSlugs].includes(b.applies_to)) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: `applies_to must be all, ${activeModeSlugs.join(', ')}` });
     }
@@ -347,9 +394,9 @@ const updateCoupon = async (req, res) => {
   }
 
   if (updates.length > 0) {
-    params.push(id);
+    params.push(id, areaId);
     try {
-      await pool.query(`UPDATE coupons SET ${updates.join(', ')} WHERE id = ?`, params);
+      await pool.query(`UPDATE coupons SET ${updates.join(', ')} WHERE id = ? AND area_id = ?`, params);
     } catch (err) {
       if (err.code === 'ER_DUP_ENTRY') {
         return res.status(409).json({ code: 'CONFLICT', message: 'A coupon with this code already exists' });
@@ -371,27 +418,44 @@ const updateCoupon = async (req, res) => {
     await pool.query('DELETE FROM coupon_zones WHERE coupon_id = ?', [id]);
     const targetZones = b.target_zones ? (b.target_zones === 'selected' ? 'selected' : 'all') : existing.target_zones;
     if (targetZones === 'selected' && Array.isArray(b.targeted_zone_ids) && b.targeted_zone_ids.length > 0) {
-      const values = b.targeted_zone_ids.map(zid => [Number(id), Number(zid)]);
-      await pool.query('INSERT IGNORE INTO coupon_zones (coupon_id, delivery_zone_id) VALUES ?', [values]);
+      // §14.4: a coupon and its coupon_zones must share an area.
+      const [zoneRows] = await pool.query(
+        'SELECT id FROM delivery_zones WHERE id IN (?) AND area_id = ?',
+        [b.targeted_zone_ids.map(Number), areaId]
+      );
+      const validZoneIds = new Set(zoneRows.map(r => r.id));
+      const values = b.targeted_zone_ids.map(Number).filter(zid => validZoneIds.has(zid)).map(zid => [Number(id), zid]);
+      if (values.length > 0) {
+        await pool.query('INSERT IGNORE INTO coupon_zones (coupon_id, delivery_zone_id) VALUES ?', [values]);
+      }
     }
   }
+
+  await bustAreaCaches(areaId);
 
   res.status(200).json({ message: 'Coupon updated' });
 };
 
 const deleteCoupon = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
-  const [rows] = await pool.query('SELECT id FROM coupons WHERE id = ? AND deleted = 0', [id]);
+  const [rows] = await pool.query('SELECT id FROM coupons WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (rows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Coupon not found' });
   }
-  await pool.query('UPDATE coupons SET deleted = 1, active = 0 WHERE id = ?', [id]);
+  await pool.query('UPDATE coupons SET deleted = 1, active = 0 WHERE id = ? AND area_id = ?', [id, areaId]);
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Coupon deleted' });
 };
 
 const duplicateCoupon = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
-  const [rows] = await pool.query('SELECT * FROM coupons WHERE id = ? AND deleted = 0', [id]);
+  const [rows] = await pool.query('SELECT * FROM coupons WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (rows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Coupon not found' });
   }
@@ -401,15 +465,16 @@ const duplicateCoupon = async (req, res) => {
   try {
     [result] = await pool.query(
       `INSERT INTO coupons (
-        code, title, description,
+        area_id, code, title, description,
         discount_type, also_free_delivery, discount_value, max_discount_amount,
         min_order_amount, min_item_count, max_order_amount, applies_to,
         starts_at, ends_at, active_days_mask, active_time_start, active_time_end,
         total_usage_limit, per_user_usage_limit, first_order_only, first_n_orders,
         target_audience, target_zones, auto_apply, requires_code, priority,
         active, created_by_admin_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
       [
+        areaId,
         c.code ? `${c.code}-COPY` : null,
         `${c.title} (Copy)`,
         c.description,
@@ -459,15 +524,26 @@ const duplicateCoupon = async (req, res) => {
     );
   }
 
+  await bustAreaCaches(areaId);
   res.status(201).json({ message: 'Coupon duplicated', id: result.insertId });
 };
 
 const getCouponRedemptions = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const { page = 1, limit = 20 } = req.query;
   const p = Math.max(1, Number(page) || 1);
   const l = Math.min(100, Math.max(1, Number(limit) || 20));
   const offset = (p - 1) * l;
+
+  // area_id in the WHERE, not just id: without this, an area_admin could
+  // read another area's coupon's redemption list by guessing its id.
+  const [couponRows] = await pool.query('SELECT id FROM coupons WHERE id = ? AND area_id = ?', [id, areaId]);
+  if (couponRows.length === 0) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Coupon not found' });
+  }
 
   const [countRows] = await pool.query(
     'SELECT COUNT(*) as total FROM coupon_redemptions WHERE coupon_id = ?',
