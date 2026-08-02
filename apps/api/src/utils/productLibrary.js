@@ -247,4 +247,65 @@ const propagateLibraryEdit = async (conn, libraryProductId) => {
   return { areaIds: areaRows.map((r) => r.area_id) };
 };
 
-module.exports = { materializeToArea, syncLibraryVariants, propagateLibraryEdit, LibraryError };
+/**
+ * Category library propagation (TASK 21, §2.7/§4.5) — same shape as
+ * propagateLibraryEdit, not a second mechanism: one batched UPDATE with an
+ * explicit column list, keyed by the library link column, area list from a
+ * single SELECT DISTINCT. Categories have no child collection like variants,
+ * so there is no add/remove pass here — identity only.
+ * `active`/`display_order`/`category` placement are strictly per-area and
+ * are never in this column list (21.4) — a NULL `library_category_id` row
+ * is never touched at all (21.5, local-only).
+ * @param {import('mysql2/promise').PoolConnection} conn
+ * @param {number} libraryCategoryId
+ * @returns {Promise<{ areaIds: number[] }>}
+ */
+const propagateCategoryLibraryEdit = async (conn, libraryCategoryId) => {
+  const [libRows] = await conn.query('SELECT * FROM category_library WHERE id = ?', [libraryCategoryId]);
+  const lib = libRows[0];
+  if (!lib) throw new LibraryError('NOT_FOUND', 'Library category not found');
+
+  await conn.query(
+    'UPDATE categories SET name = ?, slug = ?, type = ?, image_id = ? WHERE library_category_id = ?',
+    [lib.name, lib.slug, lib.type, lib.image_id, libraryCategoryId]
+  );
+
+  const [areaRows] = await conn.query(
+    'SELECT DISTINCT area_id FROM categories WHERE library_category_id = ? AND deleted = 0',
+    [libraryCategoryId]
+  );
+  return { areaIds: areaRows.map((r) => r.area_id) };
+};
+
+/**
+ * Store-mode library propagation (TASK 21, §2.7/§4.5) — same shape again.
+ * `active`/`display_order`/`is_default` stay strictly per-area (21.4).
+ * @param {import('mysql2/promise').PoolConnection} conn
+ * @param {number} libraryStoreModeId
+ * @returns {Promise<{ areaIds: number[] }>}
+ */
+const propagateStoreModeLibraryEdit = async (conn, libraryStoreModeId) => {
+  const [libRows] = await conn.query('SELECT * FROM store_mode_library WHERE id = ?', [libraryStoreModeId]);
+  const lib = libRows[0];
+  if (!lib) throw new LibraryError('NOT_FOUND', 'Library store mode not found');
+
+  await conn.query(
+    'UPDATE store_modes SET slug = ?, label = ?, icon_image_id = ? WHERE library_store_mode_id = ?',
+    [lib.slug, lib.label, lib.icon_image_id, libraryStoreModeId]
+  );
+
+  const [areaRows] = await conn.query(
+    'SELECT DISTINCT area_id FROM store_modes WHERE library_store_mode_id = ?',
+    [libraryStoreModeId]
+  );
+  return { areaIds: areaRows.map((r) => r.area_id) };
+};
+
+module.exports = {
+  materializeToArea,
+  syncLibraryVariants,
+  propagateLibraryEdit,
+  propagateCategoryLibraryEdit,
+  propagateStoreModeLibraryEdit,
+  LibraryError,
+};

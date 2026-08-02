@@ -75,7 +75,7 @@ const SWEPT_TABLES = [
 const ALLOWLIST = [
   {
     file: 'src/controllers/imageController.js',
-    line: 33,
+    line: 34,
     reason:
       "getUsedImageIds' settings query — images are global (§2.5/§2.6), so " +
       '"is this image used anywhere" is deliberately a cross-area scan of ' +

@@ -116,7 +116,9 @@ describe('getUsedImageIds (via GET /admin/images) — both areas report their UP
       // could only ever see one of them.
       .mockResolvedValueOnce([[{ upi_qr_image_id: 101 }, { upi_qr_image_id: 202 }]])
       .mockResolvedValueOnce([[]]) // store_modes
-      .mockResolvedValueOnce([[]]); // product_library
+      .mockResolvedValueOnce([[]]) // product_library
+      .mockResolvedValueOnce([[]]) // category_library
+      .mockResolvedValueOnce([[]]); // store_mode_library
 
     const req = {};
     const res = mockRes();

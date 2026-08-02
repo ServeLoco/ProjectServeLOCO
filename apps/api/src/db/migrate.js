@@ -289,6 +289,10 @@ const migrate = async () => {
       await connection.query('ALTER TABLE categories ADD COLUMN display_order INT NOT NULL DEFAULT 0 AFTER active');
     }
     await ensureColumn('categories', 'deleted', 'deleted BOOLEAN DEFAULT FALSE AFTER display_order');
+    // Library linkage (TASK 21, §2.7) — NULL means "local-only category",
+    // fully editable, exactly as today. No FK, same rationale as
+    // products.library_product_id.
+    await ensureColumn('categories', 'library_category_id', 'library_category_id INT NULL');
     console.log('Categories table ready.');
 
     // Store Modes Table — admin-configurable list of store "modes" (formerly
@@ -320,7 +324,44 @@ const migrate = async () => {
     // Which mode the customer app opens into on cold start. Only one row may
     // be TRUE at a time — enforced in the controller, not a DB constraint.
     await ensureColumn('store_modes', 'is_default', 'is_default BOOLEAN NOT NULL DEFAULT FALSE AFTER icon_image_id');
+    // Library linkage (TASK 21, §2.7) — NULL means "local-only store mode",
+    // exactly as today. No FK, same rationale as products.library_product_id.
+    await ensureColumn('store_modes', 'library_store_mode_id', 'library_store_mode_id INT NULL');
     console.log('Store modes table ready.');
+
+    // Category library (TASK 21, §2.7) — same identity-vs-placement split as
+    // the product library (§2.5): name/slug/type/icon are authored once and
+    // shared; active/display_order/which products land in it stay per-area.
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS category_library (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        slug VARCHAR(255) NOT NULL UNIQUE,
+        type VARCHAR(50) NOT NULL,
+        image_id VARCHAR(255) NULL,
+        archived BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('Category library table ready.');
+
+    // Store mode library (TASK 21, §2.7) — packed/fast_food today are
+    // already is_system rows seeded per area (TASK 11); this is the global
+    // identity they (and any future custom mode) can optionally link back to.
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS store_mode_library (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        slug VARCHAR(50) NOT NULL UNIQUE,
+        label VARCHAR(100) NOT NULL,
+        icon_image_id INT NULL,
+        is_system BOOLEAN NOT NULL DEFAULT FALSE,
+        archived BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      );
+    `);
+    console.log('Store mode library table ready.');
 
     // Products Table
     await connection.query(`
@@ -654,6 +695,10 @@ const migrate = async () => {
     // library edits both look up "every products row for this library item".
     await ensureIndex('products', 'idx_products_library_product', 'library_product_id');
     await ensureIndex('product_variants', 'idx_product_variants_library_variant', 'library_variant_id');
+    // Category + store-mode library propagation fan-out (TASK 21, §2.7) —
+    // same shape as the product library indexes just above.
+    await ensureIndex('categories', 'idx_categories_library_category', 'library_category_id');
+    await ensureIndex('store_modes', 'idx_store_modes_library_store_mode', 'library_store_mode_id');
     // Dashboard section item lookups by section + type + active.
     await ensureIndex('dashboard_section_items', 'idx_dsi_section_type_active', 'section_id, item_type, active');
     await ensureIndex('orders', 'idx_orders_rider', 'rider_id, status');

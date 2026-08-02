@@ -9,7 +9,10 @@ jest.mock('../src/db/mysql', () => ({
 }));
 
 const { pool } = require('../src/db/mysql');
-const { propagateLibraryEdit, syncLibraryVariants } = require('../src/utils/productLibrary');
+const {
+  propagateLibraryEdit, syncLibraryVariants,
+  propagateCategoryLibraryEdit, propagateStoreModeLibraryEdit,
+} = require('../src/utils/productLibrary');
 
 const fakeConn = { query: (...args) => pool.query(...args) };
 
@@ -156,5 +159,63 @@ describe('syncLibraryVariants', () => {
   it('is a no-op when variants is not an array', async () => {
     await syncLibraryVariants(fakeConn, 20, undefined);
     expect(pool.query).not.toHaveBeenCalled();
+  });
+});
+
+// TASK 21, §2.7/§4.5 — same shape as propagateLibraryEdit, not a second
+// mechanism: one batched UPDATE with an explicit column list, area list from
+// a single SELECT DISTINCT, active/display_order/is_default never touched.
+describe('propagateCategoryLibraryEdit (TASK 21.7)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('renames a library category and reaches every area without touching display_order', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 5, name: 'Dairy & Eggs', slug: 'dairy-eggs', type: 'packed', image_id: '10' }]])
+      .mockResolvedValueOnce([{ affectedRows: 2 }]) // identity UPDATE
+      .mockResolvedValueOnce([[{ area_id: 1 }, { area_id: 2 }]]); // affected areas
+
+    const result = await propagateCategoryLibraryEdit(fakeConn, 5);
+
+    const identitySql = pool.query.mock.calls[1][0];
+    expect(identitySql).toBe('UPDATE categories SET name = ?, slug = ?, type = ?, image_id = ? WHERE library_category_id = ?');
+    expect(pool.query.mock.calls[1][1]).toEqual(['Dairy & Eggs', 'dairy-eggs', 'packed', '10', 5]);
+    expect(identitySql).not.toMatch(/\bactive\b/);
+    expect(identitySql).not.toMatch(/\bdisplay_order\b/);
+    expect(result.areaIds).toEqual([1, 2]);
+  });
+
+  it('throws NOT_FOUND for a missing library category', async () => {
+    pool.query.mockResolvedValueOnce([[]]);
+    await expect(propagateCategoryLibraryEdit(fakeConn, 999)).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+});
+
+describe('propagateStoreModeLibraryEdit (TASK 21)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('propagates identity without touching active/display_order/is_default', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 3, slug: 'fast_food', label: 'Fast Food v2', icon_image_id: 77 }]])
+      .mockResolvedValueOnce([{ affectedRows: 2 }])
+      .mockResolvedValueOnce([[{ area_id: 1 }, { area_id: 2 }]]);
+
+    const result = await propagateStoreModeLibraryEdit(fakeConn, 3);
+
+    const identitySql = pool.query.mock.calls[1][0];
+    expect(identitySql).toBe('UPDATE store_modes SET slug = ?, label = ?, icon_image_id = ? WHERE library_store_mode_id = ?');
+    expect(pool.query.mock.calls[1][1]).toEqual(['fast_food', 'Fast Food v2', 77, 3]);
+    expect(identitySql).not.toMatch(/\bactive\b/);
+    expect(identitySql).not.toMatch(/\bdisplay_order\b/);
+    expect(identitySql).not.toMatch(/\bis_default\b/);
+    expect(result.areaIds).toEqual([1, 2]);
+  });
+
+  it('throws NOT_FOUND for a missing library store mode', async () => {
+    pool.query.mockResolvedValueOnce([[]]);
+    await expect(propagateStoreModeLibraryEdit(fakeConn, 999)).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 });

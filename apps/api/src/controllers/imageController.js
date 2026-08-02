@@ -21,9 +21,10 @@ const buildFilename = (fieldname, ext) => {
 // get deleted by cleanupOrphanedImage/the admin Images page (§6.4). Fixed
 // by dropping the LIMIT — addUsage already iterates every row returned.
 //
-// product_library.image_id (TASK 18, §6.5) MUST stay in this same list —
-// products.image_id has no FK to images, so a missed table here means
-// deleting an image the library still needs, silently breaking it for
+// product_library.image_id (TASK 18, §6.5), category_library.image_id and
+// store_mode_library.icon_image_id (TASK 21, §6.5) MUST stay in this same
+// list — products.image_id has no FK to images, so a missed table here
+// means deleting an image a library still needs, silently breaking it for
 // every area that later adds that library item.
 const getUsedImageIds = async () => {
   const [products] = await pool.query('SELECT DISTINCT image_id FROM products WHERE image_id IS NOT NULL AND deleted = 0');
@@ -33,6 +34,8 @@ const getUsedImageIds = async () => {
   const [settings] = await pool.query('SELECT upi_qr_image_id FROM settings WHERE upi_qr_image_id IS NOT NULL');
   const [storeModes] = await pool.query('SELECT DISTINCT icon_image_id FROM store_modes WHERE icon_image_id IS NOT NULL');
   const [productLibrary] = await pool.query('SELECT DISTINCT image_id FROM product_library WHERE image_id IS NOT NULL');
+  const [categoryLibrary] = await pool.query('SELECT DISTINCT image_id FROM category_library WHERE image_id IS NOT NULL');
+  const [storeModeLibrary] = await pool.query('SELECT DISTINCT icon_image_id FROM store_mode_library WHERE icon_image_id IS NOT NULL');
 
   const used = new Set();
   const usageMap = {};
@@ -53,6 +56,8 @@ const getUsedImageIds = async () => {
   addUsage(settings, 'Settings', 'upi_qr_image_id');
   addUsage(storeModes, 'Store Mode', 'icon_image_id');
   addUsage(productLibrary, 'Product Library');
+  addUsage(categoryLibrary, 'Category Library');
+  addUsage(storeModeLibrary, 'Store Mode Library', 'icon_image_id');
 
   return { used, usageMap };
 };
