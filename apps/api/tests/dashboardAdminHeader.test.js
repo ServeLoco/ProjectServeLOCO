@@ -14,6 +14,7 @@ const adminRoutes = require('../src/routes/adminRoutes');
 const dashboardRoutes = require('../src/routes/dashboardRoutes');
 const { pool } = require('../src/db/mysql');
 const jwt = require('jsonwebtoken');
+const areaScope = require('../src/utils/areaScope');
 
 jest.mock('../src/db/mysql', () => ({
   pool: {
@@ -34,11 +35,18 @@ app.use(express.json());
 app.use('/api/admin', adminRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 
-const adminToken = jwt.sign({ id: 'admin', role: 'admin' }, process.env.JWT_SECRET || 'secret');
+const adminToken = jwt.sign({ id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 }, process.env.JWT_SECRET || 'secret');
+
+const DEFAULT_AREA = { id: 1, code: 'A1', name: 'Area 1', active: 1, is_default: 1 };
+// GET /api/dashboard carries resolveCustomerArea (TASK 12) — unauthenticated,
+// no-pin request resolves via its default-area fallback, one
+// `SELECT * FROM areas` before the real sections query.
+const mockDefaultAreaLookup = () => pool.query.mockResolvedValueOnce([[DEFAULT_AREA]]);
 
 describe('Admin dashboard section: show_hot_badge and section_icon', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    areaScope._resetCachesForTests();
   });
 
   it('accepts show_hot_badge and section_icon on create', async () => {
@@ -109,6 +117,7 @@ describe('Admin dashboard section: show_hot_badge and section_icon', () => {
   it('echoes showHotBadge and sectionIcon in the public dashboard response', async () => {
     // The public /api/dashboard endpoint should surface the admin flags.
     // Mock the sections query to return a section with both flags set.
+    mockDefaultAreaLookup();
     pool.query.mockResolvedValueOnce([[{
       id: 1,
       title: 'Popular combos',
@@ -139,12 +148,13 @@ describe('Admin dashboard section: show_hot_badge and section_icon', () => {
       expect(sections[0]).toHaveProperty('sectionIcon', 'star');
     }
     // Also verify the SELECT used to load sections includes the new columns.
-    const sectionsSql = pool.query.mock.calls[0][0];
+    const sectionsSql = pool.query.mock.calls[1][0];
     expect(sectionsSql).toMatch(/show_hot_badge/);
     expect(sectionsSql).toMatch(/section_icon/);
   });
 
   it('defaults showHotBadge to false and sectionIcon to null when absent', async () => {
+    mockDefaultAreaLookup();
     pool.query.mockResolvedValueOnce([[{
       id: 1,
       title: 'Categories',

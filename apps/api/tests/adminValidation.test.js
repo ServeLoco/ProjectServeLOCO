@@ -27,7 +27,7 @@ app.use(express.json());
 app.use('/api/admin', adminRoutes);
 
 const adminToken = jwt.sign(
-  { id: 'admin', role: 'admin' },
+  { id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 },
   process.env.JWT_SECRET || 'secret'
 );
 

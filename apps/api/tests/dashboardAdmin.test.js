@@ -21,7 +21,7 @@ const app = express();
 app.use(express.json());
 app.use('/api/admin', adminRoutes);
 
-const adminToken = jwt.sign({ id: 'admin', role: 'admin' }, process.env.JWT_SECRET || 'secret');
+const adminToken = jwt.sign({ id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 }, process.env.JWT_SECRET || 'secret');
 
 describe('Dashboard Admin Filter', () => {
   beforeEach(() => {
@@ -39,6 +39,6 @@ describe('Dashboard Admin Filter', () => {
 
     expect(res.statusCode).toEqual(200);
     expect(pool.query.mock.calls[1][0]).toContain('(store_type = ? OR (store_type = "all" AND section_type != "offer_banner"))');
-    expect(pool.query.mock.calls[1][1]).toEqual(['packed']);
+    expect(pool.query.mock.calls[1][1]).toEqual([1, 'packed']);
   });
 });

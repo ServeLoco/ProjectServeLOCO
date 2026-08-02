@@ -327,13 +327,9 @@ const getProducts = async (req, res) => {
   const availableClause = includeClosedShops ? '1=1' : 'p.available = 1';
 
   if (finalOfferId) {
-    // 1. Validate the offer. `offers` isn't area-scoped by controllers yet
-    // (TASK 12 owns that) — offers.area_id already exists on the column
-    // (backfilled to area 1) but this lookup deliberately doesn't filter by
-    // it yet, matching the stopgap pattern. The joined PRODUCTS below ARE
-    // scoped, so an offer can never surface another area's products even
-    // before TASK 12 lands.
-    const [offers] = await pool.query('SELECT store_type, active, deleted, is_clickable FROM offers WHERE id = ?', [finalOfferId]);
+    // 1. Validate the offer, scoped to this area — an offerId from another
+    // area must 404 the same as one that doesn't exist at all.
+    const [offers] = await pool.query('SELECT store_type, active, deleted, is_clickable FROM offers WHERE id = ? AND area_id = ?', [finalOfferId, areaId]);
     if (offers.length === 0 || offers[0].deleted || !offers[0].active || !offers[0].is_clickable) {
       return res.status(200).json(productsResponse([], false));
     }

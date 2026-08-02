@@ -18,6 +18,21 @@ const settingsCache = createTtlCache({ ttlMs: 15_000 });
 const SETTINGS_AREA_ID_STOPGAP = 1;
 const settingsKey = (areaId) => `settings:${areaId}`;
 
+// Offer admin write/single-item endpoints reject null (super_admin, no
+// X-Area-Id) and 'all' — offer management always targets exactly one area.
+const requireOneArea = (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required to manage offers' });
+    return null;
+  }
+  if (areaId === 'all') {
+    res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Offers cannot be managed for "all" areas at once — pick one area' });
+    return null;
+  }
+  return areaId;
+};
+
 const hasValue = (value) => value !== undefined && value !== null && value !== '';
 const getStoredImageUrl = (image) => image?.url ||
   image?.imageUrl ||
@@ -163,18 +178,29 @@ const getSettings = async (req, res) => {
   res.status(200).json({ data: settings });
 };
 
+// Public endpoint. Also mounted under /api/admin/offers/active with
+// requireAdmin (req.areaId already resolved there) — same handler either
+// way since requestAreaId() reads whichever middleware ran.
 const getActiveOffer = async (req, res) => {
+  // Catalog/promo data (§2.4): a pin outside every zone (null areaId) gets
+  // no offer, same rule as getProducts/getDashboard — never another area's
+  // banner.
+  const areaId = requestAreaId(req);
+  if (areaId === null || areaId === 'all') {
+    return res.status(200).json({ data: null });
+  }
+
   const { store_type, storeType } = req.query;
   const finalStoreType = store_type || storeType || 'packed';
-  let query = 'SELECT * FROM offers WHERE active = 1 AND deleted = 0';
-  const params = [];
+  let query = 'SELECT * FROM offers WHERE active = 1 AND deleted = 0 AND area_id = ?';
+  const params = [areaId];
 
   if (finalStoreType) {
     // A client can hold a stale/deactivated mode slug — fall back to 'all'
     // instead of erroring the public active-offer endpoint.
     let normalizedStoreType = 'all';
     try {
-      normalizedStoreType = await normalizeStoreType(finalStoreType, { allowAll: true });
+      normalizedStoreType = await normalizeStoreType(finalStoreType, { allowAll: true, areaId });
     } catch {
       normalizedStoreType = 'all';
     }
@@ -186,7 +212,7 @@ const getActiveOffer = async (req, res) => {
 
   query += ' ORDER BY id DESC LIMIT 1';
   const [rows] = await pool.query(query, params);
-  
+
   if (rows.length === 0) {
     return res.status(200).json({ data: null });
   }
@@ -420,9 +446,12 @@ const updateSettings = async (req, res) => {
 };
 
 const createOffer = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { title, description, active, image_id, imageId, store_type, storeType, is_clickable, isClickable } = req.body;
   const finalImageId = image_id || imageId || null;
-  const finalStoreType = await normalizeStoreType(store_type || storeType);
+  const finalStoreType = await normalizeStoreType(store_type || storeType, { areaId });
   const clickableInput = is_clickable !== undefined ? is_clickable : isClickable;
   const finalIsClickable = (clickableInput === true || clickableInput === 'true' || clickableInput === 1 || clickableInput === '1') ? 1 : 0;
 
@@ -436,20 +465,25 @@ const createOffer = async (req, res) => {
   }
 
   const [result] = await pool.query(
-    'INSERT INTO offers (title, description, active, image_id, store_type, is_clickable) VALUES (?, ?, ?, ?, ?, ?)',
-    [title, description || '', isActive, finalImageId, finalStoreType, finalIsClickable]
+    'INSERT INTO offers (area_id, title, description, active, image_id, store_type, is_clickable) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [areaId, title, description || '', isActive, finalImageId, finalStoreType, finalIsClickable]
   );
 
-  // offers isn't area-scoped yet (TASK 12) — stopgap area 1, same pattern as TASK 4.
-  await bustAreaCaches(1);
+  await bustAreaCaches(areaId);
   res.status(201).json({ message: 'Offer created', id: result.insertId });
 };
 
 const updateOffer = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const { title, description, active, image_id, imageId, is_clickable, isClickable } = req.body;
 
-  const [existingRows] = await pool.query('SELECT * FROM offers WHERE id = ? AND deleted = 0', [id]);
+  // area_id in the WHERE, not just id: without this, an area_admin could
+  // PATCH another area's offer by guessing its (globally sequential)
+  // numeric id.
+  const [existingRows] = await pool.query('SELECT * FROM offers WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (existingRows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Offer not found' });
   }
@@ -497,7 +531,7 @@ const updateOffer = async (req, res) => {
 
   const finalStoreTypeInput = req.body.store_type || req.body.storeType;
   const targetStoreType = finalStoreTypeInput !== undefined
-    ? await normalizeStoreType(finalStoreTypeInput)
+    ? await normalizeStoreType(finalStoreTypeInput, { areaId })
     : existingOffer.store_type;
   if (finalStoreTypeInput !== undefined) {
     updates.push('store_type = ?');
@@ -508,25 +542,28 @@ const updateOffer = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'No valid fields provided' });
   }
 
-  params.push(id);
-  await pool.query(`UPDATE offers SET ${updates.join(', ')} WHERE id = ?`, params);
+  params.push(id, areaId);
+  await pool.query(`UPDATE offers SET ${updates.join(', ')} WHERE id = ? AND area_id = ?`, params);
 
   if (previousImageId && finalImageId !== undefined && String(previousImageId) !== String(finalImageId)) {
     await cleanupOrphanedImage(previousImageId);
   }
 
-  await bustAreaCaches(1); // offers isn't area-scoped yet (TASK 12) — stopgap area 1.
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Offer updated' });
 };
 
 const getAdminOffers = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { store_type, storeType } = req.query;
   const finalStoreType = store_type || storeType;
-  let query = 'SELECT * FROM offers WHERE deleted = 0';
-  const params = [];
+  let query = 'SELECT * FROM offers WHERE deleted = 0 AND area_id = ?';
+  const params = [areaId];
 
   if (finalStoreType) {
-    const normalizedStoreType = await normalizeStoreType(finalStoreType, { allowAll: true });
+    const normalizedStoreType = await normalizeStoreType(finalStoreType, { allowAll: true, areaId });
     if (normalizedStoreType !== 'all') {
       query += ' AND store_type = ?';
       params.push(normalizedStoreType);
@@ -540,29 +577,36 @@ const getAdminOffers = async (req, res) => {
 };
 
 const deleteOffer = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
-  const [rows] = await pool.query('SELECT id, image_id FROM offers WHERE id = ? AND deleted = 0', [id]);
+  const [rows] = await pool.query('SELECT id, image_id FROM offers WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (rows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Offer not found' });
   }
-  await pool.query('UPDATE offers SET deleted = 1 WHERE id = ? AND deleted = 0', [id]);
+  await pool.query('UPDATE offers SET deleted = 1 WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   await cleanupOrphanedImage(rows[0].image_id);
-  await bustAreaCaches(1); // offers isn't area-scoped yet (TASK 12) — stopgap area 1.
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Offer soft deleted' });
 };
 
 
 const getOfferProducts = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const [rows] = await pool.query(`
     SELECT op.id as offer_product_id, op.offer_id, op.product_id, op.display_order as op_display_order, op.active as op_active,
            p.*, c.name as category_name, c.type as category_type
     FROM offer_products op
     JOIN products p ON op.product_id = p.id
+    JOIN offers o ON o.id = op.offer_id
     LEFT JOIN categories c ON p.category_id = c.id
-    WHERE op.offer_id = ?
+    WHERE op.offer_id = ? AND o.area_id = ?
     ORDER BY op.display_order ASC, p.display_order ASC, p.id ASC
-  `, [id]);
+  `, [id, areaId]);
 
   await attachOfferProductImageUrls(rows);
 
@@ -570,6 +614,9 @@ const getOfferProducts = async (req, res) => {
 };
 
 const addOfferProduct = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const { product_id, productId, display_order } = req.body;
   const finalProductId = product_id || productId;
@@ -578,17 +625,19 @@ const addOfferProduct = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'product_id is required' });
   }
 
-  const [offerRows] = await pool.query('SELECT store_type, deleted FROM offers WHERE id = ?', [id]);
+  // area_id in the WHERE, not just id: without this, an area_admin could
+  // attach a product to another area's offer by guessing its numeric id.
+  const [offerRows] = await pool.query('SELECT store_type, deleted FROM offers WHERE id = ? AND area_id = ?', [id, areaId]);
   if (offerRows.length === 0 || offerRows[0].deleted) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Offer not found or deleted' });
   }
 
   const [productRows] = await pool.query(`
-    SELECT p.id, p.deleted, p.available, p.is_combo, c.type as category_type 
-    FROM products p 
-    LEFT JOIN categories c ON p.category_id = c.id 
-    WHERE p.id = ?`, [finalProductId]);
-  
+    SELECT p.id, p.deleted, p.available, p.is_combo, c.type as category_type
+    FROM products p
+    LEFT JOIN categories c ON p.category_id = c.id
+    WHERE p.id = ? AND p.area_id = ?`, [finalProductId, areaId]);
+
   if (productRows.length === 0 || productRows[0].deleted) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Product not found or deleted' });
   }
@@ -609,11 +658,11 @@ const addOfferProduct = async (req, res) => {
       'INSERT INTO offer_products (offer_id, product_id, display_order) VALUES (?, ?, ?)',
       [id, finalProductId, display_order || 0]
     );
-    await bustAreaCaches(1); // offers isn't area-scoped yet (TASK 12) — stopgap area 1.
+    await bustAreaCaches(areaId);
     res.status(201).json({ message: 'Product added to offer' });
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') {
-      await bustAreaCaches(1);
+      await bustAreaCaches(areaId);
       res.status(200).json({ message: 'Product already attached' });
     } else {
       throw err;
@@ -621,26 +670,46 @@ const addOfferProduct = async (req, res) => {
   }
 };
 
+// offer_products has no area_id of its own (a child of offers) — the
+// EXISTS guard is the cross-tenant check: without it, an area_admin could
+// detach a product from another area's offer by guessing its id.
 const removeOfferProduct = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id, productId } = req.params;
-  await pool.query('DELETE FROM offer_products WHERE offer_id = ? AND product_id = ?', [id, productId]);
-  await bustAreaCaches(1); // offers isn't area-scoped yet (TASK 12) — stopgap area 1.
+  await pool.query(
+    `DELETE FROM offer_products WHERE offer_id = ? AND product_id = ?
+     AND EXISTS (SELECT 1 FROM offers WHERE offers.id = offer_products.offer_id AND offers.area_id = ?)`,
+    [id, productId, areaId]
+  );
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Product removed from offer' });
 };
 
 const reorderOfferProducts = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
   const { id } = req.params;
   const { productIds } = req.body;
-  
+
   if (!Array.isArray(productIds)) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'productIds array is required' });
+  }
+
+  // Verify the offer belongs to the caller's area once, up front, so the
+  // reorder loop below can't be used to touch another area's offer_products.
+  const [offerRows] = await pool.query('SELECT id FROM offers WHERE id = ? AND area_id = ? LIMIT 1', [id, areaId]);
+  if (offerRows.length === 0) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Offer not found' });
   }
 
   for (let i = 0; i < productIds.length; i++) {
     await pool.query('UPDATE offer_products SET display_order = ? WHERE offer_id = ? AND product_id = ?', [i, id, productIds[i]]);
   }
 
-  await bustAreaCaches(1); // offers isn't area-scoped yet (TASK 12) — stopgap area 1.
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Products reordered' });
 };
 

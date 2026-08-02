@@ -165,15 +165,12 @@ const updateStoreMode = async (req, res) => {
   }
 
   if (active === false) {
-    // offers isn't area-scoped yet (TASK 12), so its slot in this usage
-    // count stays unscoped for now — categories/combos (this task's own
-    // scope) are correctly scoped to this area.
     const [[usage]] = await pool.query(
       `SELECT
         (SELECT COUNT(*) FROM categories WHERE type = ? AND deleted = 0 AND area_id = ?) +
         (SELECT COUNT(*) FROM combos WHERE store_type = ? AND deleted = 0 AND area_id = ?) +
-        (SELECT COUNT(*) FROM offers WHERE store_type = ? AND deleted = 0) as count`,
-      [existing.slug, areaId, existing.slug, areaId, existing.slug]
+        (SELECT COUNT(*) FROM offers WHERE store_type = ? AND deleted = 0 AND area_id = ?) as count`,
+      [existing.slug, areaId, existing.slug, areaId, existing.slug, areaId]
     );
     if (Number(usage.count) > 0 && !req.body.force) {
       return res.status(400).json({

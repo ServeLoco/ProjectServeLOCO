@@ -163,6 +163,7 @@ describe('GET /api/dashboard and /api/dashboard/sections/:slug/items', () => {
   });
 
   it('excludes closed-shop products in dashboard product_block by default', async () => {
+    mockDefaultAreaLookup();
     pool.query.mockResolvedValueOnce([[mockSectionRow()]]);
     pool.query.mockResolvedValueOnce([[mockProductRow({ section_item_id: 101 })]]);
     pool.query.mockResolvedValueOnce([[]]);
@@ -171,7 +172,7 @@ describe('GET /api/dashboard and /api/dashboard/sections/:slug/items', () => {
     const res = await request(app).get('/api/dashboard?storeType=packed');
 
     expect(res.statusCode).toEqual(200);
-    const sectionSql = pool.query.mock.calls[1][0];
+    const sectionSql = pool.query.mock.calls[2][0];
     expect(sectionSql).toContain('shop_is_open');
     expect(sectionSql).toContain('s.is_open = 1');
     expect(res.body.data.sections[0].items[0]).toHaveProperty('shopIsOpen', 1);
@@ -179,6 +180,7 @@ describe('GET /api/dashboard and /api/dashboard/sections/:slug/items', () => {
   });
 
   it('includes closed-shop products in dashboard product_block with include_closed_shops=1', async () => {
+    mockDefaultAreaLookup();
     pool.query.mockResolvedValueOnce([[mockSectionRow()]]);
     pool.query.mockResolvedValueOnce([[mockProductRow({ section_item_id: 101, shop_is_open: 0 })]]);
     pool.query.mockResolvedValueOnce([[]]);
@@ -187,7 +189,7 @@ describe('GET /api/dashboard and /api/dashboard/sections/:slug/items', () => {
     const res = await request(app).get('/api/dashboard?storeType=packed&include_closed_shops=1');
 
     expect(res.statusCode).toEqual(200);
-    const sectionSql = pool.query.mock.calls[1][0];
+    const sectionSql = pool.query.mock.calls[2][0];
     expect(sectionSql).toContain('shop_is_open');
     expect(sectionSql).not.toContain('s.is_open = 1');
     expect(sectionSql).toContain('s.active = 1');
@@ -196,6 +198,7 @@ describe('GET /api/dashboard and /api/dashboard/sections/:slug/items', () => {
   });
 
   it('includes closed-shop products in section items with include_closed_shops=1', async () => {
+    mockDefaultAreaLookup();
     pool.query.mockResolvedValueOnce([[mockSectionRow()]]);
     pool.query.mockResolvedValueOnce([[mockProductRow({ section_item_id: 101, shop_is_open: 0 })]]);
     pool.query.mockResolvedValueOnce([[]]);
@@ -204,7 +207,7 @@ describe('GET /api/dashboard and /api/dashboard/sections/:slug/items', () => {
     const res = await request(app).get('/api/dashboard/sections/popular/items?storeType=packed&include_closed_shops=1');
 
     expect(res.statusCode).toEqual(200);
-    const sectionSql = pool.query.mock.calls[1][0];
+    const sectionSql = pool.query.mock.calls[2][0];
     expect(sectionSql).toContain('shop_is_open');
     expect(sectionSql).not.toContain('s.is_open = 1');
     expect(res.body.data.items[0]).toHaveProperty('shopIsOpen', 0);

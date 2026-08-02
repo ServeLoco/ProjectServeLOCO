@@ -31,17 +31,26 @@ app.use(express.json());
 app.use('/api/admin', adminRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 
-const adminToken = jwt.sign({ id: 'admin', role: 'admin' }, process.env.JWT_SECRET || 'secret');
+const adminToken = jwt.sign({ id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 }, process.env.JWT_SECRET || 'secret');
 const { clearAll: clearMicroCache } = require('../src/utils/microCache');
+const areaScope = require('../src/utils/areaScope');
+
+const DEFAULT_AREA = { id: 1, code: 'A1', name: 'Area 1', active: 1, is_default: 1 };
+// GET /api/dashboard carries resolveCustomerArea (TASK 12) — unauthenticated,
+// no-pin request resolves via its default-area fallback, one
+// `SELECT * FROM areas` before the real sections query.
+const mockDefaultAreaLookup = () => pool.query.mockResolvedValueOnce([[DEFAULT_AREA]]);
 
 describe('Dashboard Public and Admin API Tests', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     clearMicroCache();
+    areaScope._resetCachesForTests();
   });
 
   describe('Public API: GET /api/dashboard', () => {
     it('should return dynamic dashboard sections', async () => {
+      mockDefaultAreaLookup();
       pool.query.mockResolvedValueOnce([[
         {
           id: 1,
@@ -93,6 +102,7 @@ describe('Dashboard Public and Admin API Tests', () => {
     });
 
     it('product_block: relaxes the available filter and still returns a toggled-off product when include_closed_shops=1', async () => {
+      mockDefaultAreaLookup();
       pool.query.mockResolvedValueOnce([[
         {
           id: 3,
@@ -137,6 +147,7 @@ describe('Dashboard Public and Admin API Tests', () => {
     });
 
     it('product_block: keeps the strict available filter when include_closed_shops is not set', async () => {
+      mockDefaultAreaLookup();
       pool.query.mockResolvedValueOnce([[
         {
           id: 4,
@@ -160,6 +171,7 @@ describe('Dashboard Public and Admin API Tests', () => {
     });
 
     it('should hide the category section when no items are explicitly assigned', async () => {
+      mockDefaultAreaLookup();
       pool.query.mockResolvedValueOnce([[
         {
           id: 2,
@@ -184,6 +196,7 @@ describe('Dashboard Public and Admin API Tests', () => {
     });
 
     it('should hide the offer banner section when linked items are stale or inactive', async () => {
+      mockDefaultAreaLookup();
       pool.query.mockResolvedValueOnce([[
         {
           id: 5,
@@ -330,6 +343,8 @@ describe('Dashboard Public and Admin API Tests', () => {
       pool.query.mockResolvedValueOnce([[]]);
       // Mock insert item
       pool.query.mockResolvedValueOnce([{ insertId: 500 }]);
+      // bustAreaCaches' bumpCatalogVersion UPDATE
+      pool.query.mockResolvedValueOnce([{}]);
       // Mock hydration fetch of the newly-added product (returned inline so the
       // admin UI can show it without a full section refetch)
       pool.query.mockResolvedValueOnce([[{ id: 50, name: 'Milk', is_combo: 0 }]]);
