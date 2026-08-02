@@ -233,13 +233,26 @@ function bustAreaCaches(areaId) {
 }
 
 /**
+ * Busts the 60s areas cache — called by TASK 24's area create/update/clone
+ * endpoints so a newly created or edited area is visible to
+ * listAreas()/getAreaById() immediately, not after the TTL expires.
+ */
+function invalidateAreasCache() {
+  areasCache.del(ALL_AREAS_KEY);
+}
+
+/**
  * Seeds the two is_system store modes (packed, fast_food) for one area.
  * INSERT IGNORE against uniq_store_modes_area_slug (area_id, slug) — safe
- * to call repeatedly (migration reruns) and reused by clone-area (TASK 25)
- * so a brand new area always opens with both legacy modes present.
+ * to call repeatedly (migration reruns) and reused by TASK 24's
+ * POST /admin/areas (same transaction as the area + settings row itself)
+ * so a brand new area always opens with both legacy modes present. Accepts
+ * an optional connection so the caller can run it inside its own
+ * transaction instead of a separate pool.query, same pattern as
+ * settingsController's createSettingsForArea.
  */
-async function seedSystemStoreModes(areaId) {
-  await pool.query(
+async function seedSystemStoreModes(areaId, connection = pool) {
+  await connection.query(
     `INSERT IGNORE INTO store_modes (area_id, slug, label, display_order, active, is_system)
      VALUES (?, 'packed', 'Packed Items', 1, TRUE, TRUE), (?, 'fast_food', 'Fast Food', 2, TRUE, TRUE)`,
     [areaId, areaId]
@@ -266,6 +279,7 @@ module.exports = {
   assertAreaAccess,
   bustAreaCaches,
   bumpCatalogVersion,
+  invalidateAreasCache,
   seedSystemStoreModes,
   _resetCachesForTests,
 };

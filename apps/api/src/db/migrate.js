@@ -739,6 +739,23 @@ const migrate = async () => {
       SELECT DISTINCT TRIM(unit) FROM products WHERE unit IS NOT NULL AND TRIM(unit) != ''
     `);
     console.log('Units table ready.');
+
+    // ---- TASK 24 — platform_flags singleton + areas_sweep_complete gate --
+    // Same singleton-row-by-convention shape as admin_auth_state (id=1).
+    // areas_sweep_complete blocks POST /admin/areas with 409 until TASK 30's
+    // cross-area isolation E2E passes and explicitly flips it (§6.6) — this
+    // task only reads it, nothing here ever sets it to 1.
+    await connection.query(`
+      CREATE TABLE IF NOT EXISTS platform_flags (
+        id INT PRIMARY KEY DEFAULT 1,
+        areas_sweep_complete TINYINT(1) NOT NULL DEFAULT 0
+      );
+    `);
+    await connection.query(`
+      INSERT IGNORE INTO platform_flags (id, areas_sweep_complete) VALUES (1, 0)
+    `);
+    console.log('Platform flags table ready.');
+
     // Dashboard section item lookups by section + type + active.
     await ensureIndex('dashboard_section_items', 'idx_dsi_section_type_active', 'section_id, item_type, active');
     await ensureIndex('orders', 'idx_orders_rider', 'rider_id, status');

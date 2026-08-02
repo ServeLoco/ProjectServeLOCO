@@ -70,6 +70,16 @@ const {
   addLibraryProductToAreas,
   promoteProductToLibrary,
 } = require('../controllers/libraryController');
+const {
+  getAdminAreas,
+  createArea,
+  updateArea,
+  deleteArea,
+  cloneArea,
+  getAdminAdmins,
+  createAdmin,
+  updateAdmin,
+} = require('../controllers/areaController');
 const { validate, isString, isId, isBoolean, isNumericAmount, isPositiveInteger, isNonNegativeInteger, validatePagination, normalizeField } = require('../validators');
 const asyncHandler = require('../utils/asyncHandler');
 const rateLimit = require('express-rate-limit');
@@ -820,6 +830,19 @@ router.patch('/library/:id', requireAdmin, requireSuperAdmin, asyncHandler(updat
 router.post('/library/:id/archive', requireAdmin, requireSuperAdmin, asyncHandler(archiveLibraryProduct));
 router.post('/library/:id/add-to-area', requireAdmin, asyncHandler(addLibraryProductToArea));
 router.post('/library/:id/add-to-areas', requireAdmin, requireSuperAdmin, asyncHandler(addLibraryProductToAreas));
+
+// Super-admin only (TASK 24, §2.9/§2.12): area + admin-account management,
+// and clone-area. requireSuperAdmin everywhere here — an area_admin has no
+// reason to create areas, other admins, or clone a catalog.
+router.get('/areas', requireAdmin, requireSuperAdmin, asyncHandler(getAdminAreas));
+router.post('/areas', requireAdmin, requireSuperAdmin, asyncHandler(createArea));
+router.patch('/areas/:id', requireAdmin, requireSuperAdmin, asyncHandler(updateArea));
+router.delete('/areas/:id', requireAdmin, requireSuperAdmin, asyncHandler(deleteArea));
+router.post('/areas/:id/clone-from/:sourceId', requireAdmin, requireSuperAdmin, asyncHandler(cloneArea));
+
+router.get('/admins', requireAdmin, requireSuperAdmin, asyncHandler(getAdminAdmins));
+router.post('/admins', requireAdmin, requireSuperAdmin, asyncHandler(createAdmin));
+router.patch('/admins/:id', requireAdmin, requireSuperAdmin, asyncHandler(updateAdmin));
 // Bulk import: ?preview=true for dry-run, no query param for commit
 router.post('/products/bulk-import', requireAdmin, bulkUpload, asyncHandler(async (req, res) => {
   if (req.query.preview === 'true') {
