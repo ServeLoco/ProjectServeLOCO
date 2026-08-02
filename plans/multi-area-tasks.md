@@ -1531,19 +1531,104 @@ scoped-but-unscoped sites were introduced or closed.
 
 ## Phase E — Realtime
 
-### [ ] TASK 23 — Per-area socket rooms
+### [x] TASK 23 — Per-area socket rooms
 **Spec:** §3.5, H7 · **Files:** `[api] src/realtime/socket.js`, `orderEvents.js`,
 `src/services/riderAssignment.js`, `tests/realtime*.test.js`
 
-- [ ] 23.1 Rooms → `customers:<areaId>`, `admin:<areaId>`. `customer:<userId>` unchanged.
-- [ ] 23.2 `emitToAllCustomers(areaId, event, payload)` and `emitToAdmins(areaId, ...)`.
-- [ ] 23.3 Customer socket joins on connect using `users.last_area_id`, and **rejoins** on an area
-      change pushed by the client.
-- [ ] 23.4 Tolerate a socket that has joined **no** area room yet — cold start races the pin (H7).
-      Never block the connection waiting for an area.
-- [ ] 23.5 Super admin joins every `admin:<areaId>` room.
-- [ ] 23.6 **Event names and payload fields unchanged** — only the room changes.
-- [ ] 23.7 Test: a zone edit in area 2 reaches no area 1 socket.
+- [x] 23.1 Rooms → `customers:<areaId>`, `admin:<areaId>`. `customer:<userId>` unchanged (a customer
+      still also joins that identity room via `joinRoleRoom`, untouched). New `joinAreaRoom(socket)`
+      handles the area-scoped joins: customer → `resolveAreaIdForSocketUser` (reused from TASK 17) →
+      `customers:<areaId>`; admin → JWT's `areaId` claim (added to `socket.data.auth` in
+      `authenticateSocket`, alongside the existing `adminRole`) → `admin:<areaId>`.
+- [x] 23.2 `emitToAdmins(areaId, eventName, payload)` and `emitToAllCustomers(areaId, eventName,
+      payload)` — both now target `admin:<areaId>`/`customers:<areaId>` instead of the old flat
+      `admin`/`customers` rooms. Every call site across the codebase updated (17 files, ~42 sites:
+      controllers/riderController.js, settingsController.js, shopAdminController.js,
+      shopOwnerController.js, adminRiderController.js, adminController.js, deliveryZonesController.js,
+      productController.js; utils/adminNotifications.js, shops.js, riders.js; services/riderAssignment.js,
+      shopOrderActions.js; realtime/orderEvents.js, presence.js, shopScheduleSweeper.js) — each one
+      threaded through whatever `areaId` was already in local scope (`requireOneArea`'s resolved
+      `areaId`, `req.shop.area_id`, `req.rider.area_id`, or the order/count-query row's own `area_id`).
+      Two spots needed a genuinely new `area_id` on hand, not just a rename: `orderController.js`'s
+      checkout order object (built pre-refetch for speed, never carried `area_id`/`areaId` before —
+      now does) and `confirmShopOrder`/`readyShopOrder` in `shopOrderActions.js` (their `COUNT(*)`
+      queries gained `MAX(o.area_id) as area_id`, matching `rejectShopOrder`'s pre-existing pattern).
+- [x] 23.3 Customer socket joins on connect via `joinAreaRoom` (reusing `resolveAreaIdForSocketUser`,
+      same `users.last_area_id → getDefaultArea()` chain and same `NODE_ENV!=='test'` guard as TASK 17's
+      presence resolution — actually consolidated into one lookup per connect now, since presence used
+      to run this same query a second time independently). **Rejoin on client-pushed area change**: new
+      `socket.on('area:changed', { areaId })` handler → `rejoinAreaRoom(socket, newAreaId)`, which leaves
+      the stale `customers:<oldAreaId>` room (if any) and joins the new one. No existing client emits
+      this event yet — it's new server-side plumbing a future customer-app change (switching delivery
+      area mid-session) can call into; documented in the handler's own comment.
+- [x] 23.4 A customer socket that resolves no area at all (H7 — cold-start race, or both the
+      `last_area_id` lookup and the default-area fallback come up empty) simply joins no
+      `customers:<areaId>` room and the connection proceeds normally — `joinAreaRoom` only calls
+      `socket.join(...)` inside an `if (areaId)` guard, never blocks or rejects the connection. Admin
+      sockets are unaffected either way (JWT-claim-driven, no async lookup on the area_admin path).
+- [x] 23.5 `adminRole === 'super_admin'` branch in `joinAreaRoom` calls `areaScope.listAreas()` and
+      joins every `admin:<areaId>` room (`socket.data.allAdminAreas = true` marks this for
+      debuggability). Unit-tested directly in `tests/socketAreaResolution.test.js` (real e2e coverage
+      isn't possible here without a db/mysql mock — see that file's own comment) with 3 real areas,
+      confirming all 3 rooms are joined.
+- [x] 23.6 Confirmed no event name or payload field changed — grepped every touched emit call site's
+      event-name string and payload object literal before/after; only the first positional argument
+      (the target room's areaId) was added. `toOrderEventPayload`'s shaped customer/admin payload is
+      untouched; `orderEvents.js`'s wrapper functions derive `areaId` from the raw `order.area_id`
+      passed in (already stamped on every order since TASK 13), not from anything added to the payload
+      itself.
+- [x] 23.7 New test in `tests/realtime.test.js` ("an area 2 admin event never reaches an area 1 admin
+      socket") — two real socket.io connections (area_admin JWTs with `areaId: 1` and `areaId: 2`),
+      `emitToAdmins(2, 'delivery_zones.updated', ...)`, asserts the area 2 socket receives it and the
+      area 1 socket never does (`expectNoEvent` with a 75ms grace window, same helper the file's other
+      leak tests already used). Same file also gained a same-area delivery test (two area-1 admins both
+      receive an area-1 emit) as the direct positive-case complement.
+
+**Test churn (fixing signature-change breakage, not new coverage):** `tests/realtimeEvents.test.js`,
+`tests/riderAssignment.test.js`, `tests/ridersUtils.test.js`, `tests/riderUatCoverage.test.js`,
+`tests/shopOwner.test.js`, `tests/ridersAdminDelete.test.js`, `tests/shopGlobalStatusSync.test.js`,
+`tests/presenceTracker.test.js`, `tests/realtime.test.js` all had `emitToAdmins`/`emitToAllCustomers`
+call assertions updated to the new `(areaId, eventName, payload)` shape, with fixtures gaining an
+explicit `area_id`/`areaId` where the emit's area now has to come from the mocked row. New/expanded:
+`tests/socketAreaResolution.test.js` (added `joinAreaRoom` coverage: customer resolves-and-joins,
+customer resolves-to-nothing (H7), area_admin joins from JWT claim with zero DB calls, super_admin
+joins every area, no-auth no-op — 5 new cases), `tests/realtime.test.js` (23.7 above, plus the
+same-area admin-delivery test).
+
+**Bug caught by this sweep, not by TASK 13:** `orderController.js`'s checkout success path built its
+own `order` object literal for `realtimeEvents.emitOrderCreated(order)` rather than re-querying the row
+— that literal never included `area_id`/`areaId`, so with `emitToAdmins` now requiring a real areaId to
+pick a room, every real "new order" admin notification would have silently gone to `admin:undefined`
+(reaching no one) had this not been caught while tracing whether `order.area_id` was actually in scope
+at each of `orderEvents.js`'s call sites. Fixed by adding `areaId: deliveryAreaId, area_id:
+deliveryAreaId` (the same variable already used two lines below it for `createAdminNotification`'s
+`areaId`) to the literal.
+
+**`presence.js` (analytics live snapshot) also updated**, since `emitToAdmins`'s old single-room
+signature no longer exists: `emitLiveSnapshot` now emits one `getLiveSnapshot(areaId)` per real area
+(unioning `listAreas()` with any area currently present in the in-memory presence Map, so a quiet area
+with zero online customers still gets its own zeroed snapshot instead of going stale) to that area's own
+`admin:<areaId>` room, instead of one combined snapshot to a flat `admin` room. Necessary follow-on fix:
+`peakToday` was previously a single global high-water mark tracked only when `getLiveSnapshot()` was
+called with no `areaId` — since every real call now passes one, peak tracking is now split into a
+global `peakToday` (unchanged, for direct unfiltered callers) plus a `peakByArea` Map keyed by areaId,
+so each area's own admin room sees a peak that's actually its own rather than permanently stuck at 0.
+
+**Live verification:** per-area room targeting is a socket.io connection-level concern (not a MySQL
+schema/query change), so — consistent with the plan this session had already set for this task —
+verification is the real end-to-end Jest socket suite (`tests/realtime.test.js`) rather than a
+standalone DB script: real `http.createServer` + real `socket.io` server + real `socket.io-client`
+connections over an actual TCP port, asserting genuine room delivery/non-delivery, not mocked
+event-emitter calls. `resolveAreaIdForSocketUser`/`listAreas` DB-touching branches (customer + super_admin
+paths) are separately unit-tested against a real query shape in `tests/socketAreaResolution.test.js`.
+Full Jest suite: 97/97 suites, 1039/1040 tests, 1 pre-existing skip. `npm run lint`: clean.
+
+**Guardrail:** informational violation count: 244 (was 247 at TASK 22 — minor drift, not attributable to
+this task: sockets carry no SQL, and this guardrail only scans query strings on not-yet-swept tables, so
+TASK 23's room-targeting logic contributes nothing to it either way; every query this task touched
+already had its `area_id` predicate from earlier tasks — the only SQL change here was adding
+`area_id`/`MAX(o.area_id) as area_id` to a couple of SELECT column lists so the row's own area was on
+hand for the emit, not a change to any WHERE clause).
 
 **Commit:** `feat: AREA TASK 23 — per-area socket rooms`
 
