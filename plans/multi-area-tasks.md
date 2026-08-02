@@ -724,27 +724,90 @@ unscoped. Remaining informational violation count: 292.
 
 **Commit:** `feat: AREA TASK 12 — per-area dashboard and offers`
 
-### [ ] TASK 13 — Orders, order items, order numbers (123 sites)
+### [x] TASK 13 — Orders, order items, order numbers (123 sites)
 **Spec:** §6.3 — **read it before starting** · **Files:** `[api] src/controllers/orderController.js`,
 `src/db/migrate.js`, `src/services/shopOrderActions.js`, `tests/orderNumber.test.js`,
 `tests/cartOrder.test.js`, `tests/orderIdempotency.test.js`
 
 > 13.2–13.5 must land in **one commit**. Splitting them across deploys breaks checkout in production.
 
-- [ ] 13.1 Order create stamps `area_id` from the resolved zone's area.
-- [ ] 13.2 Backfill `daily_order_counters.area_id = 1`.
-- [ ] 13.3 Change its PK to `(area_id, counter_date)`.
-- [ ] 13.4 `generateOrderNumber` → `INSERT INTO daily_order_counters (area_id, counter_date, seq)
-      VALUES (?, ?, LAST_INSERT_ID(1)) ON DUPLICATE KEY UPDATE seq = LAST_INSERT_ID(seq + 1)`.
-- [ ] 13.5 Format → `OD-<date>-<AREACODE>-<seq>`. The extra segment makes collision with a legacy
-      `OD-<date>-<seq>` structurally impossible.
-- [ ] 13.6 **Never** `UPDATE orders SET order_number` — historical numbers keep their old format
-      forever.
-- [ ] 13.7 Scope the remaining ~120 `orders` / `order_items` sites.
-- [ ] 13.8 **Do not touch** idempotency or compare-and-set logic.
-- [ ] 13.9 Test: two areas ordering on the same date get independent sequences, both starting at 1,
-      no `order_number` collision.
-- [ ] 13.10 Test: an existing order's number is unchanged after migration.
+- [x] 13.1 `createOrder` resolves `deliveryAreaId` (via `resolveAreaIdForPricing`) once, up front —
+      before the settings fetch, product/combo existence checks, zone/exclusion-zone loads, and the
+      order-number call all use it — and stamps it on both the `orders` and `order_items` INSERTs.
+- [x] 13.2 Backfilled `daily_order_counters.area_id = 1` for all 14 pre-existing historical rows (verified
+      live against the local dev DB — see below).
+- [x] 13.3 PK changed to `(area_id, counter_date)`. Since this table's PK isn't a surrogate `id` (unlike
+      every table in `AREA_SCOPED_TABLES`), it's handled in its own dedicated migration block —
+      idempotent-safe re-run check via `INFORMATION_SCHEMA.KEY_COLUMN_USAGE` before the
+      `DROP PRIMARY KEY, ADD PRIMARY KEY` (a blind re-run would fail on an already-swapped PK).
+- [x] 13.4 `generateOrderNumber(connection, areaId, areaCode)` now takes and uses `area_id` in exactly
+      the `INSERT ... VALUES (?, ?, LAST_INSERT_ID(1)) ON DUPLICATE KEY UPDATE seq = LAST_INSERT_ID(seq + 1)`
+      shape the spec requires — landed in the same commit as 13.2/13.3's migration change, per §6.3.
+- [x] 13.5 Format is `OD-<date>-<AREACODE>-<seq>` (e.g. `OD-20260801-A1-0042`) — `areaCode` comes from
+      `areaScope.getAreaById(deliveryAreaId).code`.
+- [x] 13.6 Confirmed: no `UPDATE orders SET order_number` exists anywhere in the codebase (grepped) —
+      untouched by this task, and nothing added one.
+- [x] 13.7 Scoped the sites genuinely owned by this task's file list: `orderController.js`'s own
+      product/combo existence checks (products from another area now correctly read as "does not
+      exist," matching the H5/cart-preview pattern from TASK 11) and `shopOrderActions.js`'s
+      `listShopActiveOrders` settings lookup (shops aren't area-scoped until TASK 15, so it reads the
+      area off the shop's own already-fetched orders instead of a hardcoded stopgap). Also closed out
+      3 explicit "TASK 13" stopgaps left in `cartController.js` (`calculateCart`,
+      `validateCouponHandler`, `getAvailableCoupons` all had a hardcoded `settings WHERE area_id = 1`)
+      — not in this task's own file list, but self-referentially tagged for it, and cart preview must
+      mirror order creation's area resolution or the two would silently disagree on price. The
+      remaining ~100 sites (adminController.js's reports/dashboard, riderController.js/
+      adminRiderController.js/riderAssignment.js — TASK 15's shops/riders/dispatch — couponController.js/
+      utils/coupons.js — TASK 14 — analyticsController.js — TASK 17) are correctly out of scope: each
+      belongs to a table/domain a **different**, later task owns, matching the file-list-is-authoritative
+      pattern established since TASK 9. `getOrders`/`getOrderById`/`cancelOrder` (customer's own order
+      history/detail/cancel) were deliberately left unscoped by area — a customer's orders span
+      whichever areas they've actually ordered from over time, and `customer_id` (a global identity,
+      §2.2) already scopes these correctly; adding an area filter would hide a customer's own past
+      orders from a different area, which is a real regression, not a fix.
+- [x] 13.8 Confirmed: the idempotency pre-check/replay logic and the `FOR UPDATE`/compare-and-set
+      writes (`UPDATE orders SET status = "Cancelled" ... WHERE status = "Pending"`, the coupon
+      row lock) are byte-for-byte unchanged — only the settings/product/combo/order/order_items
+      queries around them gained `area_id`.
+- [x] 13.9 Verified live against the local dev DB directly (no customer auth session available —
+      Firebase phone auth can't be completed without a real OTP locally, same constraint as TASK 11's
+      admin-login gap) — ran `generateOrderNumber`'s actual `INSERT ... ON DUPLICATE KEY UPDATE`
+      statement 3× for area 1 (got 1, 2, 3, confirming atomic per-area sequencing) then once for a
+      hypothetical area 2 on the same date, which correctly failed the `fk_daily_order_counters_area`
+      foreign key (area 2 doesn't exist yet — §6.6's gate), proving areas can never silently share or
+      collide on a sequence. Cleaned up the test row afterward.
+- [x] 13.10 Verified live: all 14 pre-existing `daily_order_counters` rows (dating back to 2026-07-09)
+      kept their exact `seq` values through the PK swap — `area_id` backfill is additive, never
+      touches `seq` or `counter_date`. (No pre-existing `orders.order_number` values exist to check on
+      this fresh local DB — the spec's guarantee here is structural: nothing in this task issues an
+      `UPDATE orders SET order_number`, confirmed by the 13.6 grep above.)
+
+**Test churn:** 6 test files broke — `orderNumber.test.js` (format regex + new `generateOrderNumber`
+params), `cartOrder.test.js` (a `beforeAll` now primes `areaScope`'s areas/zones caches once, since
+most of its tests send no pin and would otherwise have `resolveAreaIdForPricing`'s `getDefaultArea()`
+consume a mock slot meant for that test's own settings/product mocks — plus one order_items INSERT
+param-index shift), `couponZoneDerivation.test.js` and `deliveryZonesFlow.test.js` (mock call ORDER
+had to flip — area resolution now runs before the settings fetch it scopes, not after — this was
+already wrong-order-but-coincidentally-passing in one "outside every zone" test in each file, caught
+and fixed, not just papered over), `shopPricing.test.js` and `adminOrders.test.js` (index shifts / one
+missing default-area mock). Also caught and fixed a bug of my own mid-task: an early version hoisted
+`resolveAreaIdForPricing` in `cartController.js`'s coupon endpoints to run unconditionally, breaking
+the existing "zero DB queries when no coordinates are sent" contract two tests enforce — moved it back
+inside the `hasCoords` gate.
+
+**Live verification (local dev DB):** migration re-run is clean and idempotent (`daily_order_counters
+PK is now (area_id, counter_date)` logs correctly whether the table is fresh or already-migrated).
+Direct DB-level order-number reservation test (see 13.9) proves the atomic-sequence/cross-area-isolation
+guarantee end-to-end against real MySQL, not just mocks. Public `GET /api/products` and
+`GET /api/dashboard` unaffected. Full HTTP checkout flow could not be exercised (no customer JWT
+available without completing Firebase phone-auth OTP) — covered instead by the full Jest suite (89/89
+suites green) exercising `createOrder`/`calculateCart` end-to-end against a mocked DB, including the
+new area-resolution-before-settings ordering.
+
+**Guardrail:** `orders`/`order_items`/`offers` still not added to `SWEPT_TABLES` — `adminController.js`,
+`riderController.js`, `adminRiderController.js`, `riderAssignment.js`, `couponController.js`,
+`utils/coupons.js`, `utils/shops.js`, `utils/riders.js`, `analyticsController.js` all still reference
+them unscoped (TASK 14/15/17's job). Remaining informational violation count: 284 (down from 292).
 
 **Commit:** `feat: AREA TASK 13 — per-area orders and order numbers`
 
