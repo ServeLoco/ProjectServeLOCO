@@ -35,7 +35,7 @@ async function notifyShopOwnerOrderUpdated(shopId, orderId, action) {
 /** List Accepted/Preparing orders that include items for this shop. */
 async function listShopActiveOrders(shopId) {
   const [orders] = await pool.query(
-    `SELECT DISTINCT o.id, o.order_number, o.status, o.note, o.created_at, o.delivery_type
+    `SELECT DISTINCT o.id, o.order_number, o.status, o.note, o.created_at, o.delivery_type, o.area_id
      FROM orders o JOIN order_items oi ON oi.order_id = o.id
      WHERE oi.shop_id = ? AND o.status IN ('Accepted','Preparing')
      ORDER BY o.created_at ASC`,
@@ -46,9 +46,14 @@ async function listShopActiveOrders(shopId) {
     return [];
   }
 
-  // stopgap area 1 (TASK 13 scopes shop order actions by area)
+  // Shops aren't area-scoped themselves yet (TASK 15), so there's no
+  // "this shop's area" to read directly — but its orders now carry a real
+  // area_id, and a given shop only ever has orders in one area in
+  // practice, so the first row's area_id is what settings (expectedMinutes
+  // display only) should read.
   const [settingsRows] = await pool.query(
-    'SELECT standard_delivery_minutes, fast_delivery_minutes FROM settings WHERE area_id = 1 LIMIT 1'
+    'SELECT standard_delivery_minutes, fast_delivery_minutes FROM settings WHERE area_id = ? LIMIT 1',
+    [orders[0].area_id]
   );
   const settings = settingsRows[0] || {};
 

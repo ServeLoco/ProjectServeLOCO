@@ -1917,6 +1917,39 @@ const migrate = async () => {
     await ensureUniqueIndex('settings', 'uniq_settings_area', 'area_id');
     console.log('[migrate] settings.area_id unique key in place.');
 
+    // ---- TASK 13 — daily_order_counters PK becomes (area_id, counter_date) ----
+    // Deliberately NOT in AREA_SCOPED_TABLES above: its PK is `counter_date`
+    // alone (no surrogate `id`), so the generic add-column/backfill/NOT-NULL/FK
+    // loop doesn't fit, AND — per §6.3 — this PK change must land in the exact
+    // same commit as orderController.js's generateOrderNumber query change.
+    // Backfilling area_id BEFORE the PK change (not after) matters: every
+    // existing row is Area 1's history, so the composite PK still uniquely
+    // identifies each row the instant it's created — no window where two
+    // "different" counters could collide under the old single-column PK.
+    await ensureColumnAtEnd('daily_order_counters', 'area_id', 'area_id INT NULL');
+    await connection.query('UPDATE daily_order_counters SET area_id = 1 WHERE area_id IS NULL');
+    await assertNoAreaOrphans('daily_order_counters');
+    const [counterAreaCol] = await connection.query(`
+      SELECT IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'daily_order_counters' AND COLUMN_NAME = 'area_id'
+    `, [config.MYSQL_DATABASE]);
+    if (counterAreaCol[0] && counterAreaCol[0].IS_NULLABLE === 'YES') {
+      await connection.query('ALTER TABLE daily_order_counters MODIFY COLUMN area_id INT NOT NULL');
+    }
+    await ensureForeignKey('daily_order_counters', 'fk_daily_order_counters_area', 'FOREIGN KEY (area_id) REFERENCES areas(id) ON DELETE RESTRICT');
+    // PK swap is not idempotent-safe to blindly re-run (DROP PRIMARY KEY on a
+    // table that's already been swapped would fail) — check first.
+    const [counterPkCols] = await connection.query(`
+      SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'daily_order_counters' AND CONSTRAINT_NAME = 'PRIMARY'
+      ORDER BY ORDINAL_POSITION
+    `, [config.MYSQL_DATABASE]);
+    const currentPk = counterPkCols.map((r) => r.COLUMN_NAME).join(',');
+    if (currentPk !== 'area_id,counter_date') {
+      await connection.query('ALTER TABLE daily_order_counters DROP PRIMARY KEY, ADD PRIMARY KEY (area_id, counter_date)');
+    }
+    console.log('[migrate] daily_order_counters PK is now (area_id, counter_date).');
+
     // users.last_area_id — a cold-start cache (§2.2), NOT an authorization
     // input, and deliberately NO foreign key (a stale/wrong cached area is
     // harmless; areas are deactivate-only per §6.8 so it could never

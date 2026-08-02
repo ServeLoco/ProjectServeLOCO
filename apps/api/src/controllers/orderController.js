@@ -8,7 +8,7 @@ const { roundMoney, toMoney } = require('../utils/money');
 const { isCodBlockedDuringNight } = require('../utils/nightDelivery');
 const { calculateRainCharge } = require('../utils/rainCharge');
 const { resolveDeliveryPricing, loadActiveZones, loadActiveExclusionZones } = require('../utils/deliveryPricing');
-const { resolveAreaIdForPricing } = require('../utils/areaScope');
+const { resolveAreaIdForPricing, getAreaById } = require('../utils/areaScope');
 const { validateCoupon, validateCouponById, pickBestAutoApply } = require('../utils/coupons');
 
 // Expected business failures → 400. clientCode lets specific failures carry a
@@ -21,23 +21,29 @@ class OrderError extends Error {
   }
 }
 
-const generateOrderNumber = async (connection) => {
+// areaCode is the area's `areas.code` (e.g. "A1") — the extra segment in
+// OD-<date>-<AREACODE>-<seq> makes collision with a legacy pre-multi-area
+// OD-<date>-<seq> number structurally impossible (§6.3).
+const generateOrderNumber = async (connection, areaId, areaCode) => {
   const date = new Date();
   const istDate = date.toLocaleString('en-CA', { timeZone: 'Asia/Kolkata' }).split(',')[0];
   const dateStr = istDate.replace(/-/g, '');
-  const prefix = `OD-${dateStr}-`;
+  const prefix = `OD-${dateStr}-${areaCode}-`;
 
   if (process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID) {
     return `${prefix}TEST`;
   }
 
-  // Atomically reserve the next sequence for this date. LAST_INSERT_ID is
-  // per-connection, so two concurrent checkouts on separate connections can
+  // Atomically reserve the next sequence for this (area, date). LAST_INSERT_ID
+  // is per-connection, so two concurrent checkouts on separate connections can
   // never collide — the INSERT ... ON DUPLICATE KEY UPDATE serializes on the
-  // PRIMARY KEY, and SELECT LAST_INSERT_ID() returns the new seq value.
+  // (area_id, counter_date) PRIMARY KEY, and SELECT LAST_INSERT_ID() returns
+  // the new seq value. This statement and the PK it depends on must never be
+  // changed in separate commits (§6.3) — a PK/query mismatch here silently
+  // breaks order-number uniqueness in production.
   await connection.query(
-    `INSERT INTO daily_order_counters (counter_date, seq) VALUES (?, LAST_INSERT_ID(1)) ON DUPLICATE KEY UPDATE seq = LAST_INSERT_ID(seq + 1)`,
-    [istDate]
+    `INSERT INTO daily_order_counters (area_id, counter_date, seq) VALUES (?, ?, LAST_INSERT_ID(1)) ON DUPLICATE KEY UPDATE seq = LAST_INSERT_ID(seq + 1)`,
+    [areaId, istDate]
   );
   const [rows] = await connection.query(`SELECT LAST_INSERT_ID() AS seq`);
   const nextSeq = (rows[0].seq).toString().padStart(4, '0');
@@ -202,8 +208,20 @@ const createOrder = async (req, res) => {
       return res.status(403).json({ code: 'FORBIDDEN', message: 'Your account is blocked' });
     }
 
-    // stopgap area 1 (TASK 13 threads the resolved area through order creation)
-    const [settingRows] = await connection.query('SELECT shop_open, delivery_available, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings WHERE area_id = 1 LIMIT 1');
+    // Which AREA this order belongs to is resolved from the pin up front —
+    // everything below (settings, zones, exclusion zones, the order row
+    // itself, its items, and the order-number sequence) uses this same
+    // area_id, resolved once through the outer pool + its short TTL cache
+    // (area membership is a coarse, rarely-changing routing fact, unlike the
+    // zone PRICING data below, which still reads through `connection`
+    // uncached for transactional consistency).
+    const deliveryAreaId = await resolveAreaIdForPricing(latitude, longitude);
+    const deliveryArea = await getAreaById(deliveryAreaId);
+
+    const [settingRows] = await connection.query(
+      'SELECT shop_open, delivery_available, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings WHERE area_id = ? LIMIT 1',
+      [deliveryAreaId]
+    );
     const settings = settingRows[0];
 
     if (settings.shop_open === 0 || settings.shop_open === false) throw new OrderError('Shop is currently closed');
@@ -232,9 +250,13 @@ const createOrder = async (req, res) => {
 
     if (productEntries.length > 0) {
       const productIds = productEntries.map(e => e.productId);
+      // area_id = ? so a stale/forged cart line referencing another area's
+      // product id can't be checked out here — same OrderError below as
+      // "does not exist" (§2.4: a customer in area 1 must never see area
+      // 2's products, including via a crafted product id).
       const [prodRows] = await connection.query(
-        'SELECT id, name, price, shop_price, shop_id FROM products WHERE id IN (?) AND available = 1 AND deleted = 0 AND (shop_id IS NULL OR EXISTS (SELECT 1 FROM shops s WHERE s.id = products.shop_id AND s.is_open = 1 AND s.active = 1)) AND (group_id IS NULL OR EXISTS (SELECT 1 FROM product_groups g WHERE g.id = products.group_id AND g.active = 1))',
-        [productIds]
+        'SELECT id, name, price, shop_price, shop_id FROM products WHERE id IN (?) AND available = 1 AND deleted = 0 AND area_id = ? AND (shop_id IS NULL OR EXISTS (SELECT 1 FROM shops s WHERE s.id = products.shop_id AND s.is_open = 1 AND s.active = 1)) AND (group_id IS NULL OR EXISTS (SELECT 1 FROM product_groups g WHERE g.id = products.group_id AND g.active = 1 AND g.area_id = products.area_id))',
+        [productIds, deliveryAreaId]
       );
       for (const row of prodRows) productById.set(Number(row.id), row);
     }
@@ -242,8 +264,8 @@ const createOrder = async (req, res) => {
     if (comboEntries.length > 0) {
       const comboIds = comboEntries.map(e => e.productId);
       const [comboRows] = await connection.query(
-        'SELECT id, name, price FROM combos WHERE id IN (?) AND available = 1 AND deleted = 0',
-        [comboIds]
+        'SELECT id, name, price FROM combos WHERE id IN (?) AND available = 1 AND deleted = 0 AND area_id = ?',
+        [comboIds, deliveryAreaId]
       );
       for (const row of comboRows) comboById.set(Number(row.id), row);
     }
@@ -326,14 +348,6 @@ const createOrder = async (req, res) => {
     }
 
     subtotal = roundMoney(subtotal);
-
-    // Which AREA this coordinate belongs to is resolved via the outer pool +
-    // its short TTL cache, not the transaction connection — area membership
-    // is a coarse, rarely-changing routing fact, unlike the zone PRICING
-    // data below, which still reads through `connection` uncached for
-    // transactional consistency (same reasoning as loadActiveExclusionZones'
-    // existing comment).
-    const deliveryAreaId = await resolveAreaIdForPricing(latitude, longitude);
 
     // Radius-zone pricing (server-authoritative — never trusts the preview the
     // client saw). Read + pure compute inside the existing transaction; the
@@ -462,7 +476,7 @@ const createOrder = async (req, res) => {
     }
 
     const total = roundMoney(Math.max(0, subtotal + standardDeliveryCharge + fastDeliveryFee + nightCharge + rainCharge - discount));
-    const orderNumber = await generateOrderNumber(connection);
+    const orderNumber = await generateOrderNumber(connection, deliveryAreaId, deliveryArea ? deliveryArea.code : 'A1');
 
     const finalAddress = address || user.address;
     if (!finalAddress) throw new OrderError('Address is required');
@@ -471,16 +485,16 @@ const createOrder = async (req, res) => {
     try {
       const [orderResult] = await connection.query(
         `INSERT INTO orders (
-          order_number, customer_id, customer_name, phone, whatsapp_number, address,
+          area_id, order_number, customer_id, customer_name, phone, whatsapp_number, address,
           latitude, longitude, map_url, subtotal, delivery_charge, night_charge, rain_charge, fast_delivery_charge, total,
           payment_method, payment_status, status, note,
           delivery_distance_km, delivery_radius_km_snapshot, delivery_cost_per_km_snapshot,
           free_delivery_offer_snapshot, delivery_zone_id, delivery_eta_minutes_snapshot, delivery_type,
           idempotency_key, idempotency_key_created_at,
           coupon_id, coupon_code, coupon_title, discount_amount, free_delivery_waiver_amount
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', 'Pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', 'Pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          orderNumber, userId, user.name, user.phone, user.whatsapp_number, finalAddress,
+          deliveryAreaId, orderNumber, userId, user.name, user.phone, user.whatsapp_number, finalAddress,
           latitude || null, longitude || null, map_url || null,
           subtotal, standardDeliveryCharge, nightCharge, rainCharge, fastDeliveryFee, total,
           payment_method, note || null,
@@ -544,17 +558,17 @@ const createOrder = async (req, res) => {
     }
 
     if (orderItems.length > 0) {
-      const placeholders = orderItems.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+      const placeholders = orderItems.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
       const values = [];
       for (const oi of orderItems) {
         values.push(
-          orderId, oi.product_id, oi.variant_id || null, oi.variant_label || null, oi.shop_id || null,
+          deliveryAreaId, orderId, oi.product_id, oi.variant_id || null, oi.variant_label || null, oi.shop_id || null,
           oi.item_type || 'product', oi.product_name, oi.quantity, oi.unit_price, oi.line_total,
           oi.shop_unit_price ?? null, oi.shop_line_total ?? null
         );
       }
       await connection.query(
-        `INSERT INTO order_items (order_id, product_id, variant_id, variant_label, shop_id, item_type, product_name, quantity, unit_price, line_total, shop_unit_price, shop_line_total) VALUES ${placeholders}`,
+        `INSERT INTO order_items (area_id, order_id, product_id, variant_id, variant_label, shop_id, item_type, product_name, quantity, unit_price, line_total, shop_unit_price, shop_line_total) VALUES ${placeholders}`,
         values
       );
     }

@@ -21,6 +21,7 @@ jest.mock('../src/utils/coupons', () => ({
 }));
 
 const { pickBestAutoApply, validateCouponById, getNextFreeDeliveryThreshold, getNearestUnlockableCoupon } = require('../src/utils/coupons');
+const areaScope = require('../src/utils/areaScope');
 
 const app = express();
 app.use(express.json());
@@ -30,6 +31,21 @@ app.use('/api/orders', orderRoutes);
 const token = jwt.sign({ id: 1, role: 'customer' }, process.env.JWT_SECRET || 'secret');
 
 describe('Cart and Order Tests', () => {
+  // None of these tests configure a real delivery-zone polygon, so
+  // resolveAreaIdForPricing (TASK 13) always falls through to
+  // getDefaultArea() for the AREA itself — but a request that DOES send a
+  // pin still makes resolveAreaForPoint try a zone match first, hitting
+  // loadActiveZones' own (separate, 15s-TTL) cache. Prime both caches ONCE,
+  // up front, so neither ever consumes a query slot meant for a test's own
+  // settings/product mocks. (Not reset per-test on purpose: resetting would
+  // reintroduce exactly that mock-slot collision on every test in this file.)
+  beforeAll(async () => {
+    pool.query.mockResolvedValueOnce([[{ id: 1, code: 'A1', name: 'Area 1', active: 1, is_default: 1 }]]);
+    await areaScope.getDefaultArea();
+    pool.query.mockResolvedValueOnce([[]]);
+    await areaScope.resolveAreaForPoint(12.9716, 77.6046);
+  });
+
   beforeEach(() => {
     jest.clearAllMocks();
   });
@@ -870,8 +886,8 @@ describe('combo items ignore a forged variantId', () => {
       c => typeof c[0] === 'string' && c[0].includes('INSERT INTO order_items')
     );
     expect(insertCall).toBeDefined();
-    // values array layout: (order_id, product_id, variant_id, variant_label, item_type, product_name, quantity, unit_price, line_total)
-    expect(insertCall[1][2]).toBeNull(); // variant_id must be null, not 999999
-    expect(insertCall[1][3]).toBeNull(); // variant_label
+    // values array layout: (area_id, order_id, product_id, variant_id, variant_label, item_type, product_name, quantity, unit_price, line_total)
+    expect(insertCall[1][3]).toBeNull(); // variant_id must be null, not 999999
+    expect(insertCall[1][4]).toBeNull(); // variant_label
   });
 });

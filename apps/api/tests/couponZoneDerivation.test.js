@@ -86,8 +86,11 @@ describe('POST /api/cart/validate-coupon — zone is derived server-side', () =>
   });
 
   it('ignores a delivery_zone_id supplied in the request body', async () => {
-    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]); // settings
+    // TASK 13: area is resolved BEFORE settings now (settings itself is
+    // area-scoped), so the order here is areas/zone-match, then settings,
+    // then active zones.
     queueAreaResolution();
+    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]); // settings
     pool.query.mockResolvedValueOnce([[ZONE_ROW]]);     // active zones
 
     const res = await request(app)
@@ -108,8 +111,8 @@ describe('POST /api/cart/validate-coupon — zone is derived server-side', () =>
   });
 
   it('resolves no zone when the pin is outside every zone', async () => {
-    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]);
     queueAreaResolution();
+    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]);
     pool.query.mockResolvedValueOnce([[ZONE_ROW]]);
 
     const far = offsetPoint(CENTER.lat, CENTER.lng, 0, 50);
@@ -160,8 +163,11 @@ describe('GET /api/cart/available-coupons — zone is derived server-side', () =
   });
 
   it('ignores a delivery_zone_id supplied as a query param', async () => {
-    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]); // settings
+    // TASK 13: area is resolved BEFORE settings now (settings itself is
+    // area-scoped), so the order here is areas/zone-match, then settings,
+    // then active zones.
     queueAreaResolution();
+    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]); // settings
     pool.query.mockResolvedValueOnce([[ZONE_ROW]]);     // active zones
 
     const res = await request(app)
@@ -181,8 +187,8 @@ describe('GET /api/cart/available-coupons — zone is derived server-side', () =
   });
 
   it('resolves no zone when the pin is outside every zone', async () => {
-    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]);
     queueAreaResolution();
+    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]);
     pool.query.mockResolvedValueOnce([[ZONE_ROW]]);
 
     const far = offsetPoint(CENTER.lat, CENTER.lng, 0, 50);

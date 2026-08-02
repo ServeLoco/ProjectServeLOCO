@@ -66,12 +66,14 @@ describe('Race-safe order numbers (TASK 3)', () => {
       }),
     };
 
-    const num1 = await generateOrderNumber(mockConnection);
-    const num2 = await generateOrderNumber(mockConnection);
+    const num1 = await generateOrderNumber(mockConnection, 1, 'A1');
+    const num2 = await generateOrderNumber(mockConnection, 1, 'A1');
 
-    // Format must stay OD-YYYYMMDD-NNNN
-    expect(num1).toMatch(/^OD-\d{8}-\d{4}$/);
-    expect(num2).toMatch(/^OD-\d{8}-\d{4}$/);
+    // Format is OD-YYYYMMDD-AREACODE-NNNN (TASK 13, §6.3) — the extra
+    // segment makes collision with the legacy OD-YYYYMMDD-NNNN structurally
+    // impossible.
+    expect(num1).toMatch(/^OD-\d{8}-A1-\d{4}$/);
+    expect(num2).toMatch(/^OD-\d{8}-A1-\d{4}$/);
     expect(num1).not.toEqual(num2);
 
     // Sequence numbers must be consecutive
@@ -85,7 +87,7 @@ describe('Race-safe order numbers (TASK 3)', () => {
       query: jest.fn().mockResolvedValue([[{ seq: 1 }]]),
     };
 
-    await generateOrderNumber(mockConnection);
+    await generateOrderNumber(mockConnection, 1, 'A1');
 
     const calls = mockConnection.query.mock.calls.map(c => String(c[0]));
     expect(calls.some(sql => /INSERT INTO daily_order_counters.*ON DUPLICATE KEY UPDATE/i.test(sql))).toBe(true);

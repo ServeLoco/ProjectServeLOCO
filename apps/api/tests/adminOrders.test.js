@@ -24,10 +24,12 @@ app.use(express.json());
 app.use('/api/admin', adminRoutes);
 
 const adminToken = jwt.sign({ id: 'admin', role: 'admin' }, process.env.JWT_SECRET || 'secret');
+const areaScope = require('../src/utils/areaScope');
 
 describe('Admin-placed orders (order on behalf of a customer)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    areaScope._resetCachesForTests();
   });
 
   describe('POST /api/admin/orders/calculate', () => {
@@ -65,6 +67,9 @@ describe('Admin-placed orders (order on behalf of a customer)', () => {
 
     it('returns the same cart calculation the customer app would get', async () => {
       pool.query.mockResolvedValueOnce([[{ id: 42, blocked: 0 }]]); // customer lookup
+      // No pin sent: calculateCart's area resolution (TASK 13) goes
+      // straight to getDefaultArea() — one extra query before settings.
+      pool.query.mockResolvedValueOnce([[{ id: 1, code: 'A1', name: 'Area 1', active: 1, is_default: 1 }]]);
       pool.query.mockResolvedValueOnce([[{ shop_open: 1, delivery_charge: 10, night_charge: 0 }]]); // settings
       pool.query.mockResolvedValueOnce([[{ id: 1, name: 'Pizza', price: 100, available: 1 }]]); // products
 

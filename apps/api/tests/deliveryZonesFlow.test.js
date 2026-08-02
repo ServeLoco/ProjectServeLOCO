@@ -119,11 +119,13 @@ describe('Delivery zone pricing — cart preview', () => {
 
   it('prices from the matched zone with dual-cased zone fields', async () => {
     const p = pointAtKm(3);
-    pool.query
-      .mockResolvedValueOnce([[ZONE_SETTINGS]]) // settings
-      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]); // products
+    // TASK 13: area is resolved BEFORE settings now (settings itself is
+    // area-scoped) — areas/zone-match, then settings, then products, then
+    // active zones/exclusion zones.
     queueAreaResolution();
     pool.query
+      .mockResolvedValueOnce([[ZONE_SETTINGS]]) // settings
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]) // products
       .mockResolvedValueOnce([ZONE_ROWS]) // active zones
       .mockResolvedValueOnce([[]]); // active exclusion zones
 
@@ -155,11 +157,10 @@ describe('Delivery zone pricing — cart preview', () => {
 
   it('reports a COD-disabled zone for the far band', async () => {
     const p = pointAtKm(7);
-    pool.query
-      .mockResolvedValueOnce([[ZONE_SETTINGS]])
-      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]);
     queueAreaResolution();
     pool.query
+      .mockResolvedValueOnce([[ZONE_SETTINGS]])
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]])
       .mockResolvedValueOnce([ZONE_ROWS]) // active zones
       .mockResolvedValueOnce([[]]); // active exclusion zones
 
@@ -177,9 +178,6 @@ describe('Delivery zone pricing — cart preview', () => {
 
   it('invalidates the preview when the pin is beyond the largest zone', async () => {
     const p = pointAtKm(15);
-    pool.query
-      .mockResolvedValueOnce([[ZONE_SETTINGS]])
-      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]);
     // No zone matches this pin, so resolveAreaForPoint returns null and
     // resolveAreaIdForPricing falls back to the default area — but that
     // fallback reuses the SAME cached areas list from the bbox check
@@ -187,6 +185,8 @@ describe('Delivery zone pricing — cart preview', () => {
     // not 3.
     queueAreaResolution();
     pool.query
+      .mockResolvedValueOnce([[ZONE_SETTINGS]])
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]])
       .mockResolvedValueOnce([ZONE_ROWS]) // active zones
       .mockResolvedValueOnce([[]]); // active exclusion zones
 
@@ -208,14 +208,13 @@ describe('Delivery zone pricing — cart preview', () => {
   // how a customer with the location gate dismissed still got a full price
   // breakdown for an address nobody had checked.
   it('refuses to quote when no coordinates are sent and zone pricing is on', async () => {
-    pool.query
-      .mockResolvedValueOnce([[ZONE_SETTINGS]])
-      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]);
     // No pin at all: resolveAreaForPoint short-circuits before touching the
     // DB (Number(undefined) isn't finite), so resolveAreaIdForPricing goes
     // straight to getDefaultArea() — only 1 extra call, not 2.
     pool.query.mockResolvedValueOnce([[AREA_ROW]]);
     pool.query
+      .mockResolvedValueOnce([[ZONE_SETTINGS]])
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]])
       .mockResolvedValueOnce([ZONE_ROWS]) // active zones
       .mockResolvedValueOnce([[]]); // active exclusion zones
 
@@ -234,11 +233,10 @@ describe('Delivery zone pricing — cart preview', () => {
 
   it('lets a free-delivery coupon waive the zone standard charge', async () => {
     const p = pointAtKm(3);
-    pool.query
-      .mockResolvedValueOnce([[ZONE_SETTINGS]])
-      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]);
     queueAreaResolution();
     pool.query
+      .mockResolvedValueOnce([[ZONE_SETTINGS]])
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]])
       .mockResolvedValueOnce([ZONE_ROWS]) // active zones
       .mockResolvedValueOnce([[]]); // active exclusion zones
     pickBestAutoApply.mockResolvedValueOnce({
@@ -273,11 +271,13 @@ describe('Delivery zone pricing — cart preview', () => {
     const AREA_1 = { id: 1, code: 'A1', name: 'Area 1', active: 1, is_default: 1, min_lat: null, max_lat: null, min_lng: null, max_lng: null };
     const AREA_2 = { id: 2, code: 'A2', name: 'Area 2', active: 1, is_default: 0, min_lat: null, max_lat: null, min_lng: null, max_lng: null };
 
+    // TASK 13: area is resolved BEFORE settings now (settings itself is
+    // area-scoped) — bbox candidates + zone-match come first.
     pool.query
-      .mockResolvedValueOnce([[ZONE_SETTINGS]]) // settings
-      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]) // products
       .mockResolvedValueOnce([[AREA_1, AREA_2]]) // bbox candidate areas — both, area 1 listed first
       .mockResolvedValueOnce([ZONE_ROWS]) // resolveAreaForPoint's zone-match query for area 1 — matches
+      .mockResolvedValueOnce([[ZONE_SETTINGS]]) // settings
+      .mockResolvedValueOnce([[{ id: 1, price: 100, available: 1, name: 'Test Product' }]]) // products
       .mockResolvedValueOnce([ZONE_ROWS]) // the REAL pricing zones query, scoped to area 1
       .mockResolvedValueOnce([[]]) // active exclusion zones
       .mockResolvedValueOnce([[{ type: 'packed' }]]); // store-type derivation from items — unrelated to zones
@@ -418,7 +418,8 @@ describe('Delivery zone pricing — order creation', () => {
     const params = insertCall[1];
     // ... delivery_distance_km, delivery_radius_km_snapshot, cost_per_km(null),
     // free_delivery_offer_snapshot(null), delivery_zone_id, delivery_eta_minutes_snapshot ...
-    const distanceIdx = 17;
+    // +1 vs. pre-TASK-13: area_id is now the first bound param on this INSERT.
+    const distanceIdx = 18;
     expect(params[distanceIdx]).toBeGreaterThan(6.9); // delivery_distance_km
     expect(params[distanceIdx + 1]).toBeCloseTo(equivalentRadiusOfSquare(20), 1); // delivery_radius_km_snapshot
     expect(params[distanceIdx + 2]).toBeNull(); // delivery_cost_per_km_snapshot

@@ -232,10 +232,10 @@ describe('Order creation snapshots shop pricing', () => {
     // order_id, product_id, variant_id, variant_label, shop_id, item_type,
     // product_name, quantity, unit_price, line_total, shop_unit_price, shop_line_total
     const values = insertCall[1];
-    expect(values[8]).toBe(100); // unit_price
-    expect(values[9]).toBe(300); // line_total
-    expect(values[10]).toBe(70); // shop_unit_price
-    expect(values[11]).toBe(210); // shop_line_total = 70 * 3
+    expect(values[9]).toBe(100); // unit_price
+    expect(values[10]).toBe(300); // line_total
+    expect(values[11]).toBe(70); // shop_unit_price
+    expect(values[12]).toBe(210); // shop_line_total = 70 * 3
   });
 
   it('leaves shop_unit_price/shop_line_total null when the product has no shop_price configured', async () => {
@@ -269,8 +269,8 @@ describe('Order creation snapshots shop pricing', () => {
       c => typeof c[0] === 'string' && c[0].includes('INSERT INTO order_items')
     );
     const values = insertCall[1];
-    expect(values[10]).toBeNull(); // shop_unit_price
-    expect(values[11]).toBeNull(); // shop_line_total
+    expect(values[11]).toBeNull(); // shop_unit_price
+    expect(values[12]).toBeNull(); // shop_line_total
   });
 
   it('snapshots the variant shop_price, not the product-level one', async () => {
@@ -305,9 +305,9 @@ describe('Order creation snapshots shop pricing', () => {
       c => typeof c[0] === 'string' && c[0].includes('INSERT INTO order_items')
     );
     const values = insertCall[1];
-    expect(values[8]).toBe(349); // unit_price = variant price, not product price
-    expect(values[10]).toBe(260); // shop_unit_price = variant shop_price
-    expect(values[11]).toBe(520); // shop_line_total = 260 * 2
+    expect(values[9]).toBe(349); // unit_price = variant price, not product price
+    expect(values[11]).toBe(260); // shop_unit_price = variant shop_price
+    expect(values[12]).toBe(520); // shop_line_total = 260 * 2
   });
 
   it('never snapshots a shop price for a combo line', async () => {
@@ -341,8 +341,8 @@ describe('Order creation snapshots shop pricing', () => {
       c => typeof c[0] === 'string' && c[0].includes('INSERT INTO order_items')
     );
     const values = insertCall[1];
-    expect(values[10]).toBeNull();
     expect(values[11]).toBeNull();
+    expect(values[12]).toBeNull();
   });
 });
 
