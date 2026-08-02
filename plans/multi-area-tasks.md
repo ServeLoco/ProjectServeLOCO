@@ -1071,27 +1071,114 @@ pass rather than asserted here. Remaining informational violation count: 243 (do
 
 **Commit:** `feat: AREA TASK 16 — per-area notifications and broadcast`
 
-### [ ] TASK 17 — Analytics + reports (MySQL + Mongo)
+### [x] TASK 17 — Analytics + reports (MySQL + Mongo)
 **Spec:** §9.5 — **follow it exactly** · **Files:** `[api] src/services/analytics/collections.js`,
 `eventStore.js`, `sessionStore.js`, `rollup.js`, `src/controllers/analyticsController.js`,
 `src/realtime/presence.js`, `src/utils/reportPeriods.js`, report handlers
 
-- [ ] 17.1 `insertEvents` and the session insert take `areaId` from `resolveCustomerArea`; fall back
-      to `users.last_area_id`, then default area.
-- [ ] 17.2 **No backfill for `analytics_sessions` or `analytics_events`** — 30-day TTL ages them out.
-- [ ] 17.3 `analytics_daily`: one `updateMany({areaId:{$exists:false}}, {$set:{areaId:1}})` (~365
-      docs). Run **before** creating the new unique index.
-- [ ] 17.4 Drop `{date:1}` unique → create `{areaId:1, date:1}` unique.
-- [ ] 17.5 Add `{areaId:1, createdAt:-1}` to sessions and events; remap
-      `{type,createdAt}` → `{areaId,type,createdAt}` and
-      `{productId,type,createdAt}` → `{areaId,productId,type,createdAt}`.
-- [ ] 17.6 **Leave every TTL index single-field on `createdAt`.** A compound TTL index silently
-      stops expiry and the collections grow without bound.
-- [ ] 17.7 Rollup groups by `(areaId, date)`, writes one daily doc per area.
-- [ ] 17.8 `presence.js:134` `emitLiveSnapshot` — per-area snapshot to `admin:<areaId>` (H2), or
-      every area admin sees every area's live traffic.
-- [ ] 17.9 MySQL report endpoints group by area; super admin gets the all-areas roll-up (§2.10).
-- [ ] 17.10 Transition window: treat a missing `areaId` as area 1 at query time.
+- [x] 17.1 `insertEvents(userId, events, areaId)` gained an `areaId` param, stamped on every doc.
+      `POST /api/analytics/events` now runs `resolveCustomerArea` (no pin in this endpoint's body, so
+      it always falls through that middleware's own `users.last_area_id` → default-area chain — exactly
+      §9.5's own text). `sessionStore.openSession({..., areaId})` likewise gained the param — since a
+      socket connection has no HTTP request/response cycle to hang middleware off, `socket.js` gained
+      `resolveAreaIdForSocketUser(userId)`, doing the identical `users.last_area_id` → `getDefaultArea()`
+      lookup once per connect (not per event), called right before `presenceTracker.addPresence`.
+      Guarded to skip entirely in `NODE_ENV=test` (mirrors `authenticateSocket`'s existing admin
+      revocation check) so the e2e socket test suite (`realtime.test.js`) stays DB-free; a dedicated
+      `tests/socketAreaResolution.test.js` unit-tests the function directly instead.
+- [x] 17.2 Confirmed: no backfill added for `analytics_sessions`/`analytics_events` — new docs get a
+      real `areaId`, old ones age out within the 30-day TTL on their own.
+- [x] 17.3 `backfillDailyAreaId(db)` in `collections.js` runs the exact
+      `updateMany({areaId:{$exists:false}}, {$set:{areaId:1}})`, called from inside
+      `ensureAnalyticsIndexes` **before** the new unique index is built (order verified by test and,
+      live, by the fact Mongo would refuse to build a unique index over docs missing the key otherwise).
+- [x] 17.4 Old `{date:1}` unique index dropped (`dropIndexIfExists`, swallows "already gone" so re-runs
+      stay idempotent) → new `{areaId:1, date:1}` unique index created.
+- [x] 17.5 `{areaId:1, createdAt:-1}` added to both sessions and events. `{type:1,createdAt:-1}` →
+      dropped, replaced by `{areaId:1,type:1,createdAt:-1}`; `{productId:1,type:1,createdAt:-1}` →
+      dropped, replaced by `{areaId:1,productId:1,type:1,createdAt:-1}` — leftmost-prefix rule (§3.3).
+- [x] 17.6 Confirmed live against real MongoDB: both TTL indexes (`analytics_events`/`analytics_sessions`
+      `createdAt` at 2,592,000s, `analytics_daily` `createdAt` at 31,536,000s) stayed single-field —
+      never touched beyond their existing `expireAfterSeconds`.
+- [x] 17.7 `computeDailyStats` rewritten: fetches the day's sessions/events **once** (not once per area
+      — cheap at "tens of areas", §3.9), partitions them in memory by `areaId` (missing `areaId` treated
+      as area 1, 17.10), then upserts one `{areaId, date}`-keyed doc per area — including a zero-traffic
+      doc for every active area, not just areas with data that day. `backfillYesterday`'s own staleness
+      check now compares doc count to active-area count (not a single `findOne`), so a new area added
+      after yesterday's rollup already ran still gets backfilled instead of being skipped because area
+      1's doc already exists.
+- [x] 17.8 `presence.js`: every presence entry now carries the connecting customer's `areaId` (resolved
+      once at connect, 17.1); `getLiveSnapshot(areaId)` gained an optional per-area filter and a
+      `byArea` breakdown on the combined snapshot, and each `users[]` entry carries its own `areaId`.
+      `emitLiveSnapshot()` itself still emits ONE combined snapshot via `emitToAdmins` — real per-area
+      admin socket rooms don't exist yet (TASK 23), so this is the same documented, consistent gap as
+      every other realtime emit in this sweep (shops.js, riders.js, riderOfferSweeper.js,
+      adminNotifications.js) — but the data is now genuinely ready for TASK 23 to call
+      `getLiveSnapshot(areaId)` per room without any further presence-layer changes.
+- [x] 17.9 MySQL report endpoints in `adminController.js` (not in this task's own file list, but the
+      "report handlers" this task's file list points to — confirmed by the pre-existing `// stopgap
+      area 1 (TASK 17 scopes the admin dashboard/reports by area)` comment already sitting on
+      `getDashboard`): `getSalesReport`, `getTopProductsReport`, `getShopsReport`, `getProfitSummary`,
+      `getProfitOrders` all gained the new `resolveAreaOrAll` helper (reject missing area context;
+      *allow* `'all'` for a super_admin — §2.10 explicitly lists Orders/Reports/Analytics as accepting
+      it, unlike Settings/Delivery Zones/Store Modes) and an `AND area_id = ?` filter (omitted entirely
+      when `'all'`, for a genuine cross-area sum/roll-up). `withAreaCodes()` annotates each row with
+      `areaCode`/`area_code` in `'all'` mode wherever a row could span more than one area (top-products
+      groups by `(areaId, productId, ...)` too in that mode — products aren't shared across areas yet,
+      §2.5/2.6, TASK 18's job — so the same `product_id` in two areas must stay two distinct rows, not
+      merge into one). `getDashboard` uses a **stricter** `requireOneArea` (rejects `'all'` outright,
+      same as Settings) since it also renders `shop_open`/`delivery_available`/`rain_charge_enabled` —
+      booleans that don't mean anything summed across areas — alongside its order KPIs.
+      `getCustomersReport` deliberately stays **fully unscoped**: customers are a global identity
+      (§2.2), not owned by an area, same reasoning TASK 13 applied to a customer's own order history —
+      total/trusted/blocked customer counts are platform-wide by nature. `getAdminOrders` and the
+      order-lifecycle endpoints (`getAdminOrderById`, `updateOrderStatus`, etc.) were confirmed **out of
+      scope** — order *management*, not a report, and not owned by any task's file list from TASK 9
+      through TASK 17 (a real, separate gap, noted below).
+- [x] 17.10 `rollup.js`'s `resolveAreaId(doc)` treats a doc with no `areaId` as area 1 at query
+      (aggregation) time, exactly as specced — verified by a dedicated test and live against the real
+      (empty) dev Mongo, where the backfill's before/after `$exists:false` count both read 0 (no
+      pre-existing docs on this fresh environment to exercise the fallback against, but the idempotent
+      re-run itself was proven safe).
+
+**Also fixed, beyond the checklist's own scope:** `notifyMobileAdminsPush` (`utils/adminNotifications.js`,
+TASK 16's file) now also filters `mobile_admins` by `area_id = ?` — a mobile admin in area 2 has no
+reason to be paged about area 1's new order. Caught while re-reading that file for this task; the actual
+`mobile_admins` CRUD (`mobileAdminController.js`) remains untouched and unscoped — flagged separately
+(see below), since it isn't owned by this task and fixing it properly means designing its whole
+area-scoping story, not a one-line filter.
+
+**Confirmed gap, reported not fixed (outside every task's file list):** `mobileAdminController.js`'s
+`createMobileAdmin` INSERT never supplies `area_id`, and `mobile_admins.area_id` is `NOT NULL` with no
+default (confirmed live via `SHOW COLUMNS` against the local dev DB) — creating a new mobile admin
+against the real schema currently throws outright. Neither `mobileAdminController.js` nor `mobile_admins`
+appears in any task's file list from TASK 9 through TASK 17. Reported via a spawned follow-up task during
+TASK 16 (not re-reported here) rather than absorbed into this task's scope.
+
+**Test churn:** 6 test files broke. `tests/analyticsStores.test.js` (index-shape assertions + new
+`dropIndex`/`updateMany` mocks on the fake `db.collection` object). `tests/analyticsRollup.test.js`
+(rewritten: `computeDailyStats` now returns an array, `listAreas` needed mocking, new area-partitioning
+tests added). `tests/presenceTracker.test.js` (`getLiveSnapshot()`'s empty-state assertion needed the new
+`byArea: {}` field — `toEqual` doesn't ignore extra actual keys the way `toMatchObject` does).
+`tests/analyticsEndpoints.test.js`, `tests/reports.test.js`, `tests/profitReport.test.js`,
+`tests/topItemsReport.test.js` — the now-familiar root cause (admin JWTs missing `adminRole`/`areaId`),
+with one new wrinkle in `topItemsReport.test.js`: it mocks `requireAdmin` itself as a bare
+`(req,res,next)=>next()` passthrough (bypassing `resolveAdminArea` entirely, unique to that one file),
+so the mock itself needed to set `req.areaId` directly. Added `tests/socketAreaResolution.test.js` (new,
+17.1) and 2 new tests in `tests/analyticsRollup.test.js` (multi-area partitioning, 17.10's fallback).
+
+**Live verification:** ran `ensureAnalyticsIndexes` directly against the real local MongoDB (idempotent
+re-run) — confirmed the new `{areaId:1,date:1}` unique index, both `{areaId:1,...}` compound event/session
+indexes, and that both TTL indexes stayed single-field on `createdAt` with their exact
+`expireAfterSeconds`. Confirmed all 79 pre-existing local orders carry `area_id = 1` (matches "Area 1 is
+the only area that has ever existed" — §9.5's own justification for the historical-doc backfill target).
+Full report/analytics HTTP flows covered by the Jest suite (92/92 suites, 1001/1002 tests, 1 pre-existing
+skip) rather than a live customer/admin session (same Firebase-OTP constraint as every prior task).
+
+**Guardrail:** informational violation count: 239 (down from 243) — `mobileAdminController.js` remains
+the largest concentration of the remaining count (unowned gap, see above), alongside `getAdminOrders`
+and friends in `adminController.js` (order-management endpoints, also unowned by any task 9-17, and
+explicitly NOT this task's "report handlers").
 
 **Commit:** `feat: AREA TASK 17 — per-area analytics and reports`
 
