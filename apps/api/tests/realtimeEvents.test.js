@@ -26,6 +26,7 @@ describe('Realtime order events', () => {
   it('emits order creation to the owning customer and admins', () => {
     const payload = realtimeEvents.emitOrderCreated({
       id: 77,
+      area_id: 1,
       order_number: 'OD-20260529-0001',
       customer_id: 42,
       customer_name: 'Ravi Kumar',
@@ -61,12 +62,13 @@ describe('Realtime order events', () => {
     });
     expect(emitToCustomer).toHaveBeenCalledWith(42, 'order.created', payload);
     expect(emitToCustomer).toHaveBeenCalledWith(42, 'order.updated', payload);
-    expect(emitToAdmins).toHaveBeenCalledWith('admin.order.created', payload);
+    expect(emitToAdmins).toHaveBeenCalledWith(1, 'admin.order.created', payload);
   });
 
   it('emits status updates to the owning customer and admins', () => {
     const payload = realtimeEvents.emitOrderStatusUpdated({
       orderId: 78,
+      areaId: 1,
       orderNumber: 'OD-20260529-0002',
       customerId: 43,
       status: 'Out for Delivery',
@@ -77,12 +79,13 @@ describe('Realtime order events', () => {
 
     expect(emitToCustomer).toHaveBeenCalledWith(43, 'order.status.updated', payload);
     expect(emitToCustomer).toHaveBeenCalledWith(43, 'order.updated', payload);
-    expect(emitToAdmins).toHaveBeenCalledWith('admin.order.updated', payload);
+    expect(emitToAdmins).toHaveBeenCalledWith(1, 'admin.order.updated', payload);
   });
 
   it('emits payment updates to the owning customer and admins', () => {
     const payload = realtimeEvents.emitOrderPaymentUpdated({
       id: 79,
+      area_id: 1,
       order_number: 'OD-20260529-0003',
       customer_id: 44,
       status: 'Delivered',
@@ -93,12 +96,13 @@ describe('Realtime order events', () => {
 
     expect(emitToCustomer).toHaveBeenCalledWith(44, 'order.payment.updated', payload);
     expect(emitToCustomer).toHaveBeenCalledWith(44, 'order.updated', payload);
-    expect(emitToAdmins).toHaveBeenCalledWith('admin.order.updated', payload);
+    expect(emitToAdmins).toHaveBeenCalledWith(1, 'admin.order.updated', payload);
   });
 
   it('emits cancelled orders to the owning customer and admins', () => {
     const payload = realtimeEvents.emitOrderCancelled({
       id: 80,
+      area_id: 1,
       order_number: 'OD-20260529-0004',
       customer_id: 45,
       status: 'Cancelled',
@@ -110,7 +114,7 @@ describe('Realtime order events', () => {
     expect(emitToCustomer).toHaveBeenCalledWith(45, 'order.cancelled', payload);
     expect(emitToCustomer).toHaveBeenCalledWith(45, 'order.status.updated', payload);
     expect(emitToCustomer).toHaveBeenCalledWith(45, 'order.updated', payload);
-    expect(emitToAdmins).toHaveBeenCalledWith('admin.order.updated', payload);
+    expect(emitToAdmins).toHaveBeenCalledWith(1, 'admin.order.updated', payload);
   });
 
   it('emits created notifications and unread count updates', async () => {
@@ -370,6 +374,7 @@ describe('Realtime order events', () => {
   it('emitOrderCancelled emits all expected events including order.updated', () => {
     const order = {
       id: 100,
+      area_id: 1,
       order_number: 'OD-100',
       customer_id: 60,
       status: 'Cancelled',
@@ -382,25 +387,25 @@ describe('Realtime order events', () => {
     expect(emitToCustomer).toHaveBeenCalledWith(60, 'order.cancelled', payload);
     expect(emitToCustomer).toHaveBeenCalledWith(60, 'order.status.updated', payload);
     expect(emitToCustomer).toHaveBeenCalledWith(60, 'order.updated', payload);
-    expect(emitToAdmins).toHaveBeenCalledWith('admin.order.updated', payload);
+    expect(emitToAdmins).toHaveBeenCalledWith(1, 'admin.order.updated', payload);
   });
 
   it('emitOrderCreated and emitOrderStatusUpdated emit different event names', () => {
     realtimeEvents.emitOrderCreated({
-      id: 110, order_number: 'OD-110', customer_id: 70,
+      id: 110, area_id: 1, order_number: 'OD-110', customer_id: 70,
       status: 'Pending', payment_status: 'Pending', total: 100,
       updated_at: '2026-05-29T23:00:00.000Z',
     });
     jest.clearAllMocks();
 
     const statusPayload = realtimeEvents.emitOrderStatusUpdated({
-      id: 110, orderNumber: 'OD-110', customerId: 70,
+      id: 110, areaId: 1, orderNumber: 'OD-110', customerId: 70,
       status: 'Accepted', paymentStatus: 'Pending', total: 100,
       updatedAt: '2026-05-29T23:05:00.000Z',
     });
 
     expect(emitToCustomer).toHaveBeenCalledWith(70, 'order.status.updated', statusPayload);
-    expect(emitToAdmins).toHaveBeenCalledWith('admin.order.updated', statusPayload);
+    expect(emitToAdmins).toHaveBeenCalledWith(1, 'admin.order.updated', statusPayload);
     expect(emitToCustomer).not.toHaveBeenCalledWith(70, 'order.created', expect.anything());
   });
 });

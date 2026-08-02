@@ -98,6 +98,7 @@ describe('UAT 14.1 / 14.10 — delivery_available follows rider online count', (
     expect(r.changed).toBe(true);
     expect(bustSettingsCache).toHaveBeenCalledWith(1);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
+      1,
       'settings.delivery_available.updated',
       expect.objectContaining({ deliveryAvailable: false })
     );

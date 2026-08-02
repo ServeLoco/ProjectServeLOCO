@@ -123,7 +123,7 @@ async function listShopActiveOrders(shopId) {
  */
 async function confirmShopOrder(shopId, orderId, { shopName } = {}) {
   const [countRows] = await pool.query(
-    `SELECT COUNT(*) as cnt, MAX(o.status) as order_status FROM order_items oi
+    `SELECT COUNT(*) as cnt, MAX(o.status) as order_status, MAX(o.area_id) as area_id FROM order_items oi
      JOIN orders o ON o.id = oi.order_id
      WHERE oi.order_id = ? AND oi.shop_id = ? AND o.status IN ('Accepted', 'Preparing')`,
     [orderId, shopId]
@@ -142,7 +142,7 @@ async function confirmShopOrder(shopId, orderId, { shopName } = {}) {
     [orderId, shopId]
   );
 
-  emitToAdmins('admin.order.shop_confirmed', {
+  emitToAdmins(countRows[0].area_id, 'admin.order.shop_confirmed', {
     orderId: Number(orderId),
     shopId: Number(shopId),
     shopName: shopName || null,
@@ -202,7 +202,7 @@ async function rejectShopOrder(shopId, orderId, { shopName } = {}) {
     [orderId, shopId]
   );
 
-  emitToAdmins('admin.order.updated', {
+  emitToAdmins(countRows[0].area_id, 'admin.order.updated', {
     orderId: Number(orderId),
     shopId: Number(shopId),
     shopName: shopName || null,
@@ -231,7 +231,7 @@ async function rejectShopOrder(shopId, orderId, { shopName } = {}) {
  */
 async function readyShopOrder(shopId, orderId, { shopName } = {}) {
   const [countRows] = await pool.query(
-    `SELECT COUNT(*) as cnt FROM order_items oi
+    `SELECT COUNT(*) as cnt, MAX(o.area_id) as area_id FROM order_items oi
      JOIN orders o ON o.id = oi.order_id
      WHERE oi.order_id = ? AND oi.shop_id = ? AND o.status IN ('Accepted', 'Preparing') AND oi.shop_confirmed_at IS NOT NULL`,
     [orderId, shopId]
@@ -250,7 +250,7 @@ async function readyShopOrder(shopId, orderId, { shopName } = {}) {
     [orderId, shopId]
   );
 
-  emitToAdmins('admin.order.shop_ready', {
+  emitToAdmins(countRows[0].area_id, 'admin.order.shop_ready', {
     orderId: Number(orderId),
     shopId: Number(shopId),
     shopName: shopName || null,

@@ -251,7 +251,7 @@ const setOnline = async (req, res) => {
   // Realtime fan-out so admin Riders page updates without refresh.
   try {
     const { emitToAdmins } = require('../realtime/socket');
-    emitToAdmins('admin.rider.updated', {
+    emitToAdmins(req.rider.area_id, 'admin.rider.updated', {
       ...rider,
       reason: raw ? 'online' : 'offline',
     });
@@ -531,7 +531,7 @@ const markPickedUp = async (req, res) => {
         orderId, status: 'picked_up', riderId: req.rider.id, order: summary,
       });
     }
-    emitToAdmins('admin.order.rider_updated', {
+    emitToAdmins(updated.area_id, 'admin.order.rider_updated', {
       orderId, status: 'picked_up', riderId: req.rider.id,
     });
   } catch (_) { /* best-effort */ }
@@ -639,7 +639,7 @@ const updateAssignmentStatus = async (req, res) => {
         orderId, status, riderId: req.rider.id, order: summary,
       });
     }
-    emitToAdmins('admin.order.rider_updated', {
+    emitToAdmins(updated.area_id, 'admin.order.rider_updated', {
       orderId, status, riderId: req.rider.id,
     });
   } catch (_) { /* best-effort */ }
@@ -706,7 +706,7 @@ const markPaid = async (req, res) => {
         orderId, status: updated.status, riderId: req.rider.id, order: summary,
       });
     }
-    emitToAdmins('admin.order.rider_updated', {
+    emitToAdmins(updated.area_id, 'admin.order.rider_updated', {
       orderId, status: updated.status, riderId: req.rider.id,
     });
   } catch (_) { /* best-effort */ }

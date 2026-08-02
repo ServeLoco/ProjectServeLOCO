@@ -43,9 +43,9 @@ const applyScheduledChange = async (shopId, areaId, isOpen) => {
   await pool.query('UPDATE shops SET is_open = ? WHERE id = ? AND area_id = ?', [isOpen ? 1 : 0, shopId, areaId]);
   const [rows] = await pool.query('SELECT id, active FROM shops WHERE id = ? AND area_id = ?', [shopId, areaId]);
   const { emitToAllCustomers, emitToAdmins } = require('./socket');
-  emitToAllCustomers('shop.status.updated', { shopId, isOpen });
+  emitToAllCustomers(areaId, 'shop.status.updated', { shopId, isOpen });
   try {
-    emitToAdmins('admin.shop.updated', {
+    emitToAdmins(areaId, 'admin.shop.updated', {
       shopId, id: shopId, isOpen, is_open: isOpen, active: Boolean(rows[0]?.active),
     });
   } catch (_) { /* best-effort */ }

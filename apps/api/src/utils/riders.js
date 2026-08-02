@@ -337,10 +337,8 @@ const syncDeliveryAvailabilityFromRiders = async (areaId) => {
       }
 
       try {
-        // Not yet area-scoped on the socket layer (per-area rooms land in
-        // TASK 23) — every customer gets this event regardless of area.
         const { emitToAllCustomers } = require('../realtime/socket');
-        emitToAllCustomers('settings.delivery_available.updated', {
+        emitToAllCustomers(areaId, 'settings.delivery_available.updated', {
           deliveryAvailable: Boolean(desired),
           delivery_available: Boolean(desired),
         });

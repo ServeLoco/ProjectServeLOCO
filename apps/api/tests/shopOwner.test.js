@@ -226,7 +226,7 @@ describe('Shop-owner API - /api/shop', () => {
     // First confirm: COUNT > 0, UPDATE confirms 2 rows.
     pool.query
       .mockResolvedValueOnce([SHOP_ROW])             // requireShopOwner lookup
-      .mockResolvedValueOnce([[{ cnt: 2 }]])           // COUNT items for this shop
+      .mockResolvedValueOnce([[{ cnt: 2, area_id: 1 }]])           // COUNT items for this shop
       .mockResolvedValueOnce([{ affectedRows: 2 }]); // UPDATE (2 newly confirmed)
 
     const res1 = await request(app)
@@ -236,6 +236,7 @@ describe('Shop-owner API - /api/shop', () => {
     expect(res1.statusCode).toEqual(200);
     expect(res1.body.message).toBe('Order confirmed');
     expect(emitToAdmins).toHaveBeenCalledWith(
+      1,
       'admin.order.shop_confirmed',
       expect.objectContaining({ orderId: 10, shopId: 1, shopName: 'Burger Point' })
     );

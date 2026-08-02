@@ -1,6 +1,7 @@
 const { pool } = require('../db/mysql');
 const { emitToAdmins } = require('../realtime/socket');
 const { sendPushToMany } = require('./expoPush');
+const { listAreas } = require('./areaScope');
 
 const TYPES = {
   NEW_ORDER: 'new_order',
@@ -51,10 +52,7 @@ const createAdminNotification = async ({ type, title, body, relatedUrl = null, r
     );
     const notification = rows[0];
     if (notification) {
-      // Not yet area-scoped on the socket layer (per-area rooms land in
-      // TASK 23) — every connected admin gets this regardless of area, same
-      // as every other realtime emit in the codebase until then.
-      emitToAdmins('admin.notification.created', notification);
+      emitToAdmins(areaId, 'admin.notification.created', notification);
       // Fire-and-forget updated badge count so all open admin tabs refresh.
       broadcastUnreadCount(areaId);
       // Background push to mobile admin phones (D4 — foreground gets the
@@ -95,9 +93,20 @@ const getUnreadCount = async (areaId) => {
   }
 };
 
+// areaId 'all' (a super admin bulk read/dismiss) has no single room to
+// target — each area's own admin room needs its own area-scoped count, not
+// one global number broadcast everywhere, so fan out one emit per area.
 const broadcastUnreadCount = async (areaId) => {
+  if (areaId === 'all') {
+    const areas = await listAreas();
+    await Promise.all(areas.map(async (area) => {
+      const n = await getUnreadCount(area.id);
+      emitToAdmins(area.id, 'admin.notification.unread_count', { count: n });
+    }));
+    return;
+  }
   const n = await getUnreadCount(areaId);
-  emitToAdmins('admin.notification.unread_count', { count: n });
+  emitToAdmins(areaId, 'admin.notification.unread_count', { count: n });
 };
 
 /**

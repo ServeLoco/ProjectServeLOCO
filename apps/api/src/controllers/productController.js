@@ -821,7 +821,7 @@ const updateProductAvailability = async (req, res) => {
     const { emitToAllCustomers } = require('../realtime/socket');
     const row = updatedRows[0] || {};
     const productId = Number(row.id || id);
-    emitToAllCustomers('product.availability.updated', {
+    emitToAllCustomers(areaId, 'product.availability.updated', {
       productId,
       id: productId,
       available: Boolean(normalizedAvailable),
@@ -865,7 +865,7 @@ const updateVariantAvailability = async (req, res) => {
     const { emitToAllCustomers } = require('../realtime/socket');
     // Same event name product-availability listeners already invalidate the
     // customer app's product/catalog caches on — no new subscription needed.
-    emitToAllCustomers('product.availability.updated', {
+    emitToAllCustomers(areaId, 'product.availability.updated', {
       productId: Number(id),
       id: Number(id),
       variantId: Number(variantId),

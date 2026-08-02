@@ -47,6 +47,7 @@ describe('syncAreaShopOpenState (unit)', () => {
     expect(pool.query).toHaveBeenCalledTimes(2);
     expect(pool.query).toHaveBeenNthCalledWith(2, 'UPDATE settings SET shop_open = 0 WHERE shop_open = 1 AND area_id = ?', [1]);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
+      1,
       'settings.shop_open.updated',
       expect.objectContaining({ shopOpen: false, shop_open: false })
     );
@@ -62,6 +63,7 @@ describe('syncAreaShopOpenState (unit)', () => {
 
     expect(pool.query).toHaveBeenNthCalledWith(3, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = ?', [1, 1, 1]);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
+      1,
       'settings.shop_open.updated',
       expect.objectContaining({ shopOpen: true, shop_open: true })
     );
@@ -77,6 +79,7 @@ describe('syncAreaShopOpenState (unit)', () => {
 
     expect(pool.query).toHaveBeenNthCalledWith(3, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = ?', [0, 0, 1]);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
+      1,
       'settings.shop_open.updated',
       expect.objectContaining({ shopOpen: false, shop_open: false })
     );

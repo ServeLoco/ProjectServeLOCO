@@ -183,6 +183,7 @@ describe('continueAssignment search window', () => {
   it('fails after search window expires with no riders', async () => {
     const order = {
       id: 10,
+      area_id: 1,
       status: 'Accepted',
       rider_id: null,
       rider_assignment_status: 'searching',
@@ -218,6 +219,7 @@ describe('continueAssignment search window', () => {
     expect(adminInbox.createAdminNotification).toHaveBeenCalled();
     const { emitToAdmins } = require('../src/realtime/socket');
     expect(emitToAdmins).toHaveBeenCalledWith(
+      1,
       'admin.order.cancel_request',
       expect.objectContaining({ orderId: 10 })
     );

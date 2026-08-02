@@ -114,19 +114,27 @@ describe('createPresenceTracker', () => {
     expect(t.getLiveSnapshot().peakToday).toBe(2);
   });
 
-  it('emitLiveSnapshot pushes the current snapshot to admins via emitToAdmins', async () => {
+  it('emitLiveSnapshot pushes a per-area snapshot to admin:<areaId> via emitToAdmins', async () => {
     const deps = makeDeps();
     const t = createPresenceTracker(deps);
-    await t.addPresence('s1', { userId: 5, role: 'customer', platform: 'android', appVersion: '1.2' });
+    await t.addPresence('s1', { userId: 5, role: 'customer', platform: 'android', appVersion: '1.2', areaId: 1 });
     t.updateScreen('s1', 'Checkout');
-    t.emitLiveSnapshot();
-    expect(deps.emitToAdmins).toHaveBeenCalledWith('analytics.live', expect.objectContaining({
+    await t.emitLiveSnapshot();
+    expect(deps.emitToAdmins).toHaveBeenCalledWith(1, 'analytics.live', expect.objectContaining({
       online: 1,
       peakToday: 1,
     }));
-    const payload = deps.emitToAdmins.mock.calls[0][1];
+    const payload = deps.emitToAdmins.mock.calls[0][2];
     expect(payload.users[0]).toMatchObject({ userId: 5, screen: 'Checkout', platform: 'android' });
     expect(payload.users[0].connectedMin).toBeDefined();
+  });
+
+  it('emitLiveSnapshot skips the emit entirely when no presence entry has an areaId (NODE_ENV=test skips the listAreas union)', async () => {
+    const deps = makeDeps();
+    const t = createPresenceTracker(deps);
+    await t.addPresence('s1', { userId: 5, role: 'customer', platform: 'android', appVersion: '1.2' });
+    await t.emitLiveSnapshot();
+    expect(deps.emitToAdmins).not.toHaveBeenCalled();
   });
 
   it('getLiveSnapshot returns empty/zero state when nobody is online', () => {
@@ -158,7 +166,7 @@ describe('createPresenceTracker', () => {
   it('stop clears the interval timer', async () => {
     const deps = makeDeps();
     const t = createPresenceTracker(deps, { intervalMs: 10 });
-    await t.addPresence('s1', { userId: 1, role: 'customer', platform: 'android', appVersion: '1' });
+    await t.addPresence('s1', { userId: 1, role: 'customer', platform: 'android', appVersion: '1', areaId: 1 });
     await wait(35);
     expect(deps.emitToAdmins.mock.calls.length).toBeGreaterThan(0);
     const callsBefore = deps.emitToAdmins.mock.calls.length;

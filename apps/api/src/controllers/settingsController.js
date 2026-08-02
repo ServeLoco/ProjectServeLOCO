@@ -434,7 +434,7 @@ const updateSettings = async (req, res) => {
   if (body.shop_open !== undefined || body.delivery_available !== undefined) {
     const { emitToAllCustomers } = require('../realtime/socket');
     const finalOpen = Boolean(updatedSettings?.shop_open);
-    emitToAllCustomers('settings.shop_open.updated', { shopOpen: finalOpen, shop_open: finalOpen });
+    emitToAllCustomers(areaId, 'settings.shop_open.updated', { shopOpen: finalOpen, shop_open: finalOpen });
   }
 
   await bustAreaCaches(areaId);

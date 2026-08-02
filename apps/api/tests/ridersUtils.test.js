@@ -354,6 +354,7 @@ describe('syncDeliveryAvailabilityFromRiders', () => {
     );
     expect(bustSettingsCache).toHaveBeenCalledWith(1);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
+      1,
       'settings.delivery_available.updated',
       expect.objectContaining({ deliveryAvailable: true, delivery_available: true })
     );

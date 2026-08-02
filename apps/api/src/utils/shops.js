@@ -85,7 +85,7 @@ const notifyShopsOrderCancelled = async (order) => {
     for (const row of rows) {
       // Admin Shops panel filters by shopId on shop_* events; include shopId
       // so the open panel for that shop refetches and drops the cancelled order.
-      emitToAdmins('admin.order.updated', {
+      emitToAdmins(order.area_id, 'admin.order.updated', {
         orderId: order.id,
         orderNumber: order.order_number,
         status: 'Cancelled',
@@ -294,7 +294,7 @@ const syncAreaShopOpenState = async (areaId) => {
       // Let connected customer apps flip their "shop closed" banner
       // immediately instead of waiting for the next settings poll.
       const { emitToAllCustomers } = require('../realtime/socket');
-      emitToAllCustomers('settings.shop_open.updated', { shopOpen: areaOpen, shop_open: areaOpen });
+      emitToAllCustomers(areaId, 'settings.shop_open.updated', { shopOpen: areaOpen, shop_open: areaOpen });
     }
   } catch (e) {
     console.error('[shops] syncAreaShopOpenState failed:', e.message);

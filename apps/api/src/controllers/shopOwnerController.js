@@ -65,11 +65,11 @@ const toggleMyShop = async (req, res) => {
 
   await pool.query('UPDATE shops SET is_open = ? WHERE id = ? AND area_id = ?', [isOpen ? 1 : 0, req.shop.id, req.shop.area_id]);
   const [rows] = await pool.query('SELECT id, name, is_open, active, open_time, close_time FROM shops WHERE id = ?', [req.shop.id]);
-  emitToAllCustomers('shop.status.updated', { shopId: req.shop.id, isOpen: Boolean(isOpen) });
+  emitToAllCustomers(req.shop.area_id, 'shop.status.updated', { shopId: req.shop.id, isOpen: Boolean(isOpen) });
   // Admin dashboard's Shops table has no other way to learn a shop owner
   // toggled their own shop — keep it in sync the same way rider toggles do.
   try {
-    emitToAdmins('admin.shop.updated', {
+    emitToAdmins(req.shop.area_id, 'admin.shop.updated', {
       shopId: req.shop.id,
       id: req.shop.id,
       isOpen: Boolean(isOpen),
@@ -181,7 +181,7 @@ const toggleMyProduct = async (req, res) => {
   }
   // Customers listening on dashboard/cart drop OOS lines live (and re-show when
   // the shop marks the item available again via silent catalog refresh).
-  emitToAllCustomers('product.availability.updated', {
+  emitToAllCustomers(req.shop.area_id, 'product.availability.updated', {
     productId,
     id: productId,
     available: isAvailable,
@@ -219,7 +219,7 @@ const toggleMyProductVariant = async (req, res) => {
   if (result.affectedRows === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Variant not found' });
   }
-  emitToAllCustomers('product.availability.updated', {
+  emitToAllCustomers(req.shop.area_id, 'product.availability.updated', {
     productId,
     id: productId,
     variantId,

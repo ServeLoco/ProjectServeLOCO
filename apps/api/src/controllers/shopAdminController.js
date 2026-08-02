@@ -278,14 +278,14 @@ const updateShop = async (req, res) => {
   // immediately instead of waiting for a manual refresh.
   if (is_open !== undefined || active !== undefined) {
     const isOpen = Boolean(shop.is_open) && Boolean(shop.active);
-    emitToAllCustomers('shop.status.updated', {
+    emitToAllCustomers(areaId, 'shop.status.updated', {
       shopId: shop.id,
       isOpen,
     });
     // Other admin dashboards (or this same admin in another tab) need this
     // too — otherwise their Shops table goes stale until manual refresh.
     try {
-      emitToAdmins('admin.shop.updated', {
+      emitToAdmins(areaId, 'admin.shop.updated', {
         shopId: shop.id,
         id: shop.id,
         isOpen: Boolean(shop.is_open),
@@ -403,12 +403,12 @@ const deleteShop = async (req, res) => {
   // product_groups.shop_id has ON DELETE CASCADE — groups go with the shop.
   await pool.query('DELETE FROM shops WHERE id = ? AND area_id = ?', [shopId, areaId]);
 
-  emitToAllCustomers('shop.status.updated', {
+  emitToAllCustomers(areaId, 'shop.status.updated', {
     shopId,
     isOpen: false,
   });
   try {
-    emitToAdmins('admin.shop.updated', { shopId, id: shopId, deleted: true });
+    emitToAdmins(areaId, 'admin.shop.updated', { shopId, id: shopId, deleted: true });
   } catch (_) { /* best-effort */ }
   // Owner phone is no longer a shop owner — open app switches to customer shell.
   if (ownerUserId) {

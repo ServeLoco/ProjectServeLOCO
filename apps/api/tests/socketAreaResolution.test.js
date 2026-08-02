@@ -12,11 +12,14 @@ jest.mock('../src/db/mysql', () => ({
 }));
 jest.mock('../src/utils/areaScope', () => ({
   getDefaultArea: jest.fn(),
+  listAreas: jest.fn(),
 }));
 
 const { pool } = require('../src/db/mysql');
-const { getDefaultArea } = require('../src/utils/areaScope');
-const { resolveAreaIdForSocketUser } = require('../src/realtime/socket');
+const { getDefaultArea, listAreas } = require('../src/utils/areaScope');
+const { resolveAreaIdForSocketUser, joinAreaRoom } = require('../src/realtime/socket');
+
+const fakeSocket = (auth) => ({ data: { auth }, join: jest.fn() });
 
 describe('resolveAreaIdForSocketUser', () => {
   beforeEach(() => {
@@ -55,5 +58,78 @@ describe('resolveAreaIdForSocketUser', () => {
     pool.query.mockRejectedValueOnce(new Error('db down'));
     getDefaultArea.mockRejectedValueOnce(new Error('also down'));
     await expect(resolveAreaIdForSocketUser(42)).resolves.toBeNull();
+  });
+});
+
+/**
+ * TASK 23 — joinAreaRoom (src/realtime/socket.js). Its customer and
+ * super_admin branches call resolveAreaIdForSocketUser/listAreas — both real
+ * DB reads — guarded to skip under NODE_ENV=test at the same call sites
+ * (realtime.test.js exercises real socket.io connections with no db/mysql
+ * mock), so exercising those branches here requires temporarily forcing
+ * NODE_ENV away from 'test'. The area_admin branch has no DB dependency and
+ * is covered directly by realtime.test.js's real socket connections instead.
+ */
+describe('joinAreaRoom', () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  afterEach(() => {
+    process.env.NODE_ENV = originalNodeEnv;
+  });
+
+  it("joins customers:<areaId> using the user's resolved area", async () => {
+    process.env.NODE_ENV = 'production';
+    pool.query.mockResolvedValueOnce([[{ last_area_id: 2 }]]);
+    const socket = fakeSocket({ id: 42, role: 'customer' });
+
+    await joinAreaRoom(socket);
+
+    expect(socket.join).toHaveBeenCalledWith('customers:2');
+    expect(socket.data.areaId).toBe(2);
+  });
+
+  it('joins no customers room when area resolution comes up empty (H7 cold start)', async () => {
+    process.env.NODE_ENV = 'production';
+    pool.query.mockResolvedValueOnce([[]]);
+    getDefaultArea.mockResolvedValueOnce(null);
+    const socket = fakeSocket({ id: 999, role: 'customer' });
+
+    await joinAreaRoom(socket);
+
+    expect(socket.join).not.toHaveBeenCalled();
+    expect(socket.data.areaId).toBeUndefined();
+  });
+
+  it('joins admin:<areaId> directly for an area_admin using the JWT claim, no DB call', async () => {
+    const socket = fakeSocket({ role: 'admin', adminRole: 'area_admin', areaId: 5 });
+
+    await joinAreaRoom(socket);
+
+    expect(socket.join).toHaveBeenCalledWith('admin:5');
+    expect(pool.query).not.toHaveBeenCalled();
+    expect(listAreas).not.toHaveBeenCalled();
+  });
+
+  it('joins every admin:<areaId> room for a super_admin', async () => {
+    process.env.NODE_ENV = 'production';
+    listAreas.mockResolvedValueOnce([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    const socket = fakeSocket({ role: 'admin', adminRole: 'super_admin' });
+
+    await joinAreaRoom(socket);
+
+    expect(socket.join).toHaveBeenCalledWith('admin:1');
+    expect(socket.join).toHaveBeenCalledWith('admin:2');
+    expect(socket.join).toHaveBeenCalledWith('admin:3');
+    expect(socket.data.allAdminAreas).toBe(true);
+  });
+
+  it('is a no-op when the socket has no auth', async () => {
+    const socket = fakeSocket(undefined);
+    await expect(joinAreaRoom(socket)).resolves.toBeUndefined();
+    expect(socket.join).not.toHaveBeenCalled();
   });
 });

@@ -350,7 +350,7 @@ const updateRider = async (req, res) => {
   const rider = mapRiderRow(rows[0]);
 
   try {
-    emitToAdmins('admin.rider.updated', {
+    emitToAdmins(areaId, 'admin.rider.updated', {
       ...rider,
       reason: active !== undefined ? (active ? 'activated' : 'deactivated') : 'updated',
     });
@@ -423,7 +423,7 @@ const deleteRider = async (req, res) => {
   await syncDeliveryAvailabilityFromRiders(areaId);
 
   try {
-    emitToAdmins('admin.rider.updated', {
+    emitToAdmins(areaId, 'admin.rider.updated', {
       id: riderId,
       userId,
       user_id: userId,
@@ -557,7 +557,7 @@ const adminSetRiderOnline = async (req, res) => {
   const rider = mapRiderRow(updated);
 
   try {
-    emitToAdmins('admin.rider.updated', {
+    emitToAdmins(areaId, 'admin.rider.updated', {
       ...rider,
       reason: raw ? 'online' : 'offline',
       byAdmin: true,
@@ -679,7 +679,7 @@ const adminMarkPickedUp = async (req, res) => {
     emitToCustomer(updated.customer_id, 'rider.assignment.updated', {
       orderId, status: 'picked_up', riderId,
     });
-    emitToAdmins('admin.order.rider_updated', {
+    emitToAdmins(order.area_id, 'admin.order.rider_updated', {
       orderId, status: 'picked_up', riderId,
     });
     const riderRow = await loadRiderOr404(riderId, areaId);
@@ -786,7 +786,7 @@ const adminUpdateAssignmentStatus = async (req, res) => {
 
   const summary = shapeOrderSummary(updated);
   try {
-    emitToAdmins('admin.order.rider_updated', {
+    emitToAdmins(updated.area_id, 'admin.order.rider_updated', {
       orderId, status, riderId,
     });
     const riderRow = await loadRiderOr404(riderId, areaId);

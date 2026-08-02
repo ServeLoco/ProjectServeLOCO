@@ -128,13 +128,13 @@ describe('Realtime socket server', () => {
     expect(emitted).toBe(true);
   });
 
-  it('accepts admin tokens and emits to the admin room', async () => {
-    const token = createToken({ sub: '9350238504', role: 'admin' });
+  it('accepts admin tokens and emits to the admin:<areaId> room', async () => {
+    const token = createToken({ sub: '9350238504', role: 'admin', adminRole: 'area_admin', areaId: 1 });
     const client = await connectClient(url, token);
     clients.push(client);
 
     const eventPromise = waitForEvent(client, 'admin.order.updated');
-    const emitted = emitToAdmins('admin.order.updated', { orderId: 1002 });
+    const emitted = emitToAdmins(1, 'admin.order.updated', { orderId: 1002 });
 
     await expect(eventPromise).resolves.toEqual({ orderId: 1002 });
     expect(emitted).toBe(true);
@@ -182,9 +182,9 @@ describe('Realtime socket server', () => {
     await expect(notReceived2).resolves.toBeUndefined();
   });
 
-  it('delivers events to all connected admins', async () => {
-    const token1 = createToken({ sub: 'admin_a', role: 'admin' });
-    const token2 = createToken({ sub: 'admin_b', role: 'admin' });
+  it('delivers events to all connected admins in the same area', async () => {
+    const token1 = createToken({ sub: 'admin_a', role: 'admin', adminRole: 'area_admin', areaId: 1 });
+    const token2 = createToken({ sub: 'admin_b', role: 'admin', adminRole: 'area_admin', areaId: 1 });
     const admin1 = await connectClient(url, token1);
     const admin2 = await connectClient(url, token2);
     clients.push(admin1, admin2);
@@ -192,7 +192,7 @@ describe('Realtime socket server', () => {
     const event1 = waitForEvent(admin1, 'admin.order.created');
     const event2 = waitForEvent(admin2, 'admin.order.created');
 
-    emitToAdmins('admin.order.created', { orderId: 4001 });
+    emitToAdmins(1, 'admin.order.created', { orderId: 4001 });
 
     await expect(event1).resolves.toEqual({ orderId: 4001 });
     await expect(event2).resolves.toEqual({ orderId: 4001 });
@@ -200,7 +200,7 @@ describe('Realtime socket server', () => {
 
   it('does not leak admin events to customer rooms', async () => {
     const customerToken = createToken({ sub: 80, role: 'customer' });
-    const adminToken = createToken({ sub: 'admin_c', role: 'admin' });
+    const adminToken = createToken({ sub: 'admin_c', role: 'admin', adminRole: 'area_admin', areaId: 1 });
     const customerClient = await connectClient(url, customerToken);
     const adminClient = await connectClient(url, adminToken);
     clients.push(customerClient, adminClient);
@@ -208,11 +208,33 @@ describe('Realtime socket server', () => {
     const adminReceived = waitForEvent(adminClient, 'admin.order.updated');
     const customerNotReceived = expectNoEvent(customerClient, 'admin.order.updated');
 
-    emitToAdmins('admin.order.updated', { orderId: 5001 });
+    emitToAdmins(1, 'admin.order.updated', { orderId: 5001 });
 
     await expect(adminReceived).resolves.toEqual({ orderId: 5001 });
     await expect(customerNotReceived).resolves.toBeUndefined();
   });
+
+  it("TASK 23.7 — an area 2 admin event never reaches an area 1 admin socket", async () => {
+    const area1Token = createToken({ sub: 'admin_area1', role: 'admin', adminRole: 'area_admin', areaId: 1 });
+    const area2Token = createToken({ sub: 'admin_area2', role: 'admin', adminRole: 'area_admin', areaId: 2 });
+    const area1Client = await connectClient(url, area1Token);
+    const area2Client = await connectClient(url, area2Token);
+    clients.push(area1Client, area2Client);
+
+    const area2Received = waitForEvent(area2Client, 'delivery_zones.updated');
+    const area1NotReceived = expectNoEvent(area1Client, 'delivery_zones.updated');
+
+    emitToAdmins(2, 'delivery_zones.updated', { reason: 'zone_updated', zoneId: 900 });
+
+    await expect(area2Received).resolves.toEqual({ reason: 'zone_updated', zoneId: 900 });
+    await expect(area1NotReceived).resolves.toBeUndefined();
+  });
+
+  // A super_admin joining every admin:<areaId> room needs areaScope.listAreas()
+  // (a real DB read), which is guarded to skip under NODE_ENV=test the same
+  // way resolveAreaIdForSocketUser is (this file intentionally runs without a
+  // db/mysql mock, exercising real socket.io connections) — that branch is
+  // unit-tested directly instead, see tests/socketAreaResolution.test.js.
 
   it('returns false from emitToCustomer when customerId is falsy', async () => {
     expect(emitToCustomer(null, 'test', {})).toBe(false);
@@ -223,7 +245,7 @@ describe('Realtime socket server', () => {
 
   it('returns false from emitToRoom when io is null after closeRealtime', async () => {
     await closeRealtime();
-    const result = emitToAdmins('test.event', { data: 1 });
+    const result = emitToAdmins(1, 'test.event', { data: 1 });
     expect(result).toBe(false);
   });
 

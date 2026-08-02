@@ -59,36 +59,37 @@ const emitOrderToCustomer = (order, eventName) => {
 
 const emitOrderCreated = (order) => {
   const payload = emitOrderToCustomer(order, 'order.created');
-  emitToAdmins('admin.order.created', payload);
+  emitToAdmins(order.area_id || order.areaId, 'admin.order.created', payload);
   return payload;
 };
 
 const emitOrderCancelled = (order) => {
   const payload = emitOrderToCustomer(order, 'order.cancelled');
   emitToCustomer(payload.customerId, 'order.status.updated', payload);
-  emitToAdmins('admin.order.updated', payload);
+  emitToAdmins(order.area_id || order.areaId, 'admin.order.updated', payload);
   return payload;
 };
 
 const emitOrderStatusUpdated = (order) => {
   const payload = emitOrderToCustomer(order, 'order.status.updated');
-  emitToAdmins('admin.order.updated', payload);
+  emitToAdmins(order.area_id || order.areaId, 'admin.order.updated', payload);
   return payload;
 };
 
 const emitOrderPaymentUpdated = (order) => {
   const payload = emitOrderToCustomer(order, 'order.payment.updated');
-  emitToAdmins('admin.order.updated', payload);
+  emitToAdmins(order.area_id || order.areaId, 'admin.order.updated', payload);
   return payload;
 };
 
 const emitOrderAutoAccepted = (order) => {
   const payload = toOrderEventPayload(order);
+  const areaId = order.area_id || order.areaId;
   // Notify the customer so the tracking screen updates without a manual refresh.
   emitToCustomer(payload.customerId, 'order.status.updated', payload);
   emitToCustomer(payload.customerId, 'order.updated', payload);
-  emitToAdmins('admin.order.updated', payload);
-  emitToAdmins('admin.order.auto_accepted', payload);
+  emitToAdmins(areaId, 'admin.order.updated', payload);
+  emitToAdmins(areaId, 'admin.order.auto_accepted', payload);
   return payload;
 };
 

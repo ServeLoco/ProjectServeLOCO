@@ -221,9 +221,7 @@ const notifyZonesChanged = async (reason, zoneId, areaId) => {
   await bustAreaCaches(areaId);
   // Push so any customer mid-checkout gets the new pricing without waiting
   // for their next pin move — see realtimeClient.js's delivery_zones.updated.
-  // Platform-wide for now (TASK 23 makes this area-scoped); harmless today
-  // since only one area exists, revisit before a second area goes live.
-  emitToAllCustomers('delivery_zones.updated', { reason, zoneId });
+  emitToAllCustomers(areaId, 'delivery_zones.updated', { reason, zoneId });
 };
 
 // Zone pricing with zero active zones blocks delivery for EVERYONE — the

@@ -1380,7 +1380,7 @@ const extendAutoAccept = async (req, res) => {
   const { id } = req.params;
   const extraMs = 30_000;
 
-  const [orderRows] = await pool.query('SELECT id, status, order_number FROM orders WHERE id = ?', [id]);
+  const [orderRows] = await pool.query('SELECT id, status, order_number, area_id FROM orders WHERE id = ?', [id]);
   if (orderRows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Order not found' });
   }
@@ -1394,7 +1394,7 @@ const extendAutoAccept = async (req, res) => {
   }
 
   const payload = { orderId: orderRows[0].id, orderNumber: orderRows[0].order_number, deadline: newDeadline };
-  emitToAdmins('admin.order.snoozed', payload);
+  emitToAdmins(orderRows[0].area_id, 'admin.order.snoozed', payload);
   res.status(200).json({ message: 'Auto-accept window extended', ...payload });
 };
 
@@ -1488,7 +1488,7 @@ const updateOrderRemark = async (req, res) => {
   const updatedOrder = updatedRows[0];
 
   try {
-    emitToAdmins('admin.order.updated', {
+    emitToAdmins(updatedOrder.area_id, 'admin.order.updated', {
       orderId: updatedOrder.id,
       id: updatedOrder.id,
       admin_remark: updatedOrder.admin_remark,

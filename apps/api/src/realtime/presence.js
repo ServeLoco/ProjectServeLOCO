@@ -32,7 +32,12 @@ const createPresenceTracker = (deps, opts = {}) => {
 
   // socketId → entry
   const presence = new Map();
+  // Global peak (areaId omitted) is kept separately from per-area peaks
+  // (areaId → high-water mark) — since emitLiveSnapshot now calls
+  // getLiveSnapshot(areaId) once per real area (23), each area's own room
+  // needs its own peak, not one shared global number.
   let peakToday = 0;
+  const peakByArea = new Map();
   let peakDate = now().toDateString();
 
   const resetPeakIfNewDay = () => {
@@ -40,6 +45,7 @@ const createPresenceTracker = (deps, opts = {}) => {
     if (today !== peakDate) {
       peakDate = today;
       peakToday = 0;
+      peakByArea.clear();
     }
   };
 
@@ -98,12 +104,10 @@ const createPresenceTracker = (deps, opts = {}) => {
   };
 
   /**
-   * areaId filters to one area's online customers; omitted (default)
-   * returns every area combined — today's pre-TASK-17 behavior, unchanged,
-   * since per-area admin socket rooms don't exist yet (TASK 23). Each user
-   * entry still carries its own areaId either way, and the combined
-   * snapshot's `byArea` breakdown lets a caller split it client-side today
-   * without waiting on real rooms.
+   * areaId filters to one area's online customers; omitted returns every
+   * area combined (used by tests and any caller wanting the old global
+   * view). emitLiveSnapshot (below) calls this once per real area so each
+   * admin:<areaId> room gets its own scoped snapshot.
    */
   const getLiveSnapshot = (areaId) => {
     resetPeakIfNewDay();
@@ -140,11 +144,21 @@ const createPresenceTracker = (deps, opts = {}) => {
       });
     }
 
-    if (areaId === undefined && online > peakToday) peakToday = online;
+    let scopedPeak;
+    if (areaId === undefined) {
+      if (online > peakToday) peakToday = online;
+      scopedPeak = peakToday;
+    } else {
+      scopedPeak = peakByArea.get(areaId) || 0;
+      if (online > scopedPeak) {
+        scopedPeak = online;
+        peakByArea.set(areaId, scopedPeak);
+      }
+    }
 
     return {
       online,
-      peakToday,
+      peakToday: scopedPeak,
       byScreen,
       byPlatform,
       byArea,
@@ -152,16 +166,28 @@ const createPresenceTracker = (deps, opts = {}) => {
     };
   };
 
-  // Not yet area-scoped on the socket layer (per-area admin rooms land in
-  // TASK 23) — this still emits one combined snapshot to every admin
-  // regardless of area, same as every other realtime emit in the codebase
-  // until then. getLiveSnapshot(areaId) above is ready for TASK 23 to call
-  // per area room; the `byArea` field on the combined snapshot is the
-  // interim way a client can already split this today.
-  const emitLiveSnapshot = () => {
-    const snap = getLiveSnapshot();
+  // One snapshot per area (§3.5/23) — a super admin's socket already joined
+  // every admin:<areaId> room (socket.js's joinAreaRoom), so they still see
+  // every area; an area_admin now only sees their own. Areas with zero
+  // online customers right now still need their own zeroed snapshot pushed
+  // (via listAreas), or their dashboard just goes stale instead of showing
+  // online: 0. Lazy-required + NODE_ENV guarded like every other DB touch on
+  // this socket-layer timer path (mirrors socket.js's own guard) so presence
+  // unit tests stay DB-free.
+  const emitLiveSnapshot = async () => {
     try {
-      emitToAdmins('analytics.live', snap);
+      const areaIds = new Set();
+      for (const entry of presence.values()) {
+        if (entry.role === 'customer' && entry.areaId != null) areaIds.add(entry.areaId);
+      }
+      if (process.env.NODE_ENV !== 'test') {
+        const { listAreas } = require('../utils/areaScope');
+        const areas = await listAreas();
+        areas.forEach((area) => areaIds.add(area.id));
+      }
+      areaIds.forEach((areaId) => {
+        emitToAdmins(areaId, 'analytics.live', getLiveSnapshot(areaId));
+      });
     } catch (_) {
       // never throw from the timer
     }

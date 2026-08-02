@@ -74,6 +74,7 @@ describe('DELETE /api/admin/riders/:id', () => {
       expect.objectContaining({ rider: null, reason: 'rider_deleted' })
     );
     expect(emitToAdmins).toHaveBeenCalledWith(
+      1,
       'admin.rider.updated',
       expect.objectContaining({ id: 3, reason: 'deleted' })
     );

@@ -187,7 +187,7 @@ const notifyRiderOffer = async (rider, order, offer) => {
     emitToCustomer(userId, 'rider.offer.created', payload);
 
     // Admin web Dispatch panel has no rider-user socket — push the same offer there.
-    emitToAdmins('admin.order.rider_updated', {
+    emitToAdmins(order.area_id, 'admin.order.rider_updated', {
       orderId: order.id,
       orderNumber: order.order_number,
       order_number: order.order_number,
@@ -198,7 +198,7 @@ const notifyRiderOffer = async (rider, order, offer) => {
       expiresAt: offer.expires_at,
       expires_at: offer.expires_at,
     });
-    emitToAdmins('admin.rider.offer.created', payload);
+    emitToAdmins(order.area_id, 'admin.rider.offer.created', payload);
 
     await pushRiderOffer(userId, order, offer, { reminder: false });
   } catch (e) {
@@ -413,7 +413,7 @@ const failAssignment = async (orderId, reason = 'No riders available') => {
 
     try {
       const { emitToAdmins } = require('../realtime/socket');
-      emitToAdmins('admin.order.cancel_request', {
+      emitToAdmins(updated.area_id, 'admin.order.cancel_request', {
         orderId: updated.id,
         orderNumber: updated.order_number,
         order_number: updated.order_number,
@@ -432,7 +432,7 @@ const failAssignment = async (orderId, reason = 'No riders available') => {
         createdAt: updated.created_at,
         created_at: updated.created_at,
       });
-      emitToAdmins('admin.order.rider_updated', {
+      emitToAdmins(updated.area_id, 'admin.order.rider_updated', {
         orderId,
         status: 'failed',
         reason: failReason,
@@ -750,7 +750,7 @@ const acceptOffer = async (offerId, riderId) => {
           status: 'assigned',
         });
       }
-      emitToAdmins('admin.order.rider_updated', {
+      emitToAdmins(updated.area_id, 'admin.order.rider_updated', {
         orderId: updated.id,
         riderId,
         status: 'assigned',

@@ -586,6 +586,8 @@ const createOrder = async (req, res) => {
     const order = {
       id: orderId,
       orderId,
+      areaId: deliveryAreaId,
+      area_id: deliveryAreaId,
       customerId: userId,
       customerName: user.name,
       customer_name: user.name,
