@@ -466,22 +466,84 @@ confirmed the write landed on the correct area's row in MySQL, then reverted and
 predates this session). `npx eslint` clean on all 17 touched files.
 **Commit:** `feat: AREA TASK 9 — per-area settings`
 
-### [ ] TASK 10 — Delivery zones, exclusion zones, pricing (18 sites)
-**Spec:** §3.2 · **Files:** `[api] src/utils/deliveryPricing.js`,
-`src/controllers/deliveryZonesController.js`, `src/controllers/cartController.js`,
-`src/controllers/orderController.js`, `tests/deliveryPricing.test.js`, `tests/deliveryZones*.test.js`
+### [x] TASK 10 — Delivery zones, exclusion zones, pricing (18 sites)
+**Spec:** §3.2 · **Files:** `[api] src/utils/deliveryPricing.js`, `src/utils/areaScope.js`,
+`src/controllers/deliveryZonesController.js`, `src/routes/deliveryZonesRoutes.js`,
+`src/controllers/cartController.js`, `src/controllers/orderController.js`,
+`src/controllers/settingsController.js`, `tests/areaScoping.test.js`,
+`tests/deliveryZonesPublic.test.js`, `tests/deliveryZonesAdmin.test.js`,
+`tests/deliveryZonesFlow.test.js`, `tests/couponZoneDerivation.test.js`,
+`tests/realtimeControllerIntegration.test.js`, `tests/shopPricing.test.js`
 
-- [ ] 10.1 `loadActiveZones(db, areaId)` and `loadActiveExclusionZones(db, areaId)` — signature gains
-      `areaId`, query gains the predicate.
-- [ ] 10.2 Per-area TTL cache for zone rows (order creation still reads on the transaction
-      connection — keep the existing "not cached inside a transaction" reasoning intact).
-- [ ] 10.3 `listActiveZonesPublic` takes a resolved area; cache key `delivery-zones:<areaId>:public`.
-- [ ] 10.4 `notifyZonesChanged` recomputes `areas.min_lat/max_lat/min_lng/max_lng` from that area's
-      zones, then `bustAreaCaches(areaId)`.
-- [ ] 10.5 `matchZone` itself unchanged — nested-child-wins must still hold.
-- [ ] 10.6 **Perf assertion test:** a cart preview in area 1 loads only area 1's zones. This is the
-      biggest win in the spec; prove it.
+- [x] 10.1 `loadActiveZones(db, areaId)` / `loadActiveExclusionZones(db, areaId)` — `areaId` required,
+      not optional; every caller must know which area it's pricing for.
+- [x] 10.2 `areaScope.js`'s `loadZonesForArea` **simplified**, not just left alone: TASK 6 gave it its
+      own inline query specifically because `loadActiveZones` was still platform-wide at the time —
+      now that TASK 10 gave `loadActiveZones` a real area filter, that duplication reason is gone, so
+      `loadZonesForArea` was rewritten to wrap the real `loadActiveZones` in the existing 15s TTL
+      cache instead of maintaining a second copy of the same query. Order creation's zones/exclusion
+      queries still read through the transaction `connection`, uncached, exactly as before — only
+      **which area** to scope them to is resolved via the outer pool + cache (a coarse, rarely-
+      changing routing fact, not pricing data), documented at the call site in `orderController.js`.
+- [x] 10.3 `listActiveZonesPublic` takes `req.areaId` (via `resolveCustomerArea`, newly mounted on
+      `deliveryZonesRoutes.js`); cache key `delivery-zones:<areaId>:public`. A `null` area (pin
+      outside every zone) returns an **empty zone list**, not the default area's — showing another
+      area's shapes on the checkout map would be actively misleading, not helpful (§2.4).
+- [x] 10.4 `notifyZonesChanged` — now `async`, calls the new `areaScope.recomputeAreaBbox(areaId)`
+      (parses every active zone's boundary, unions the min/max lat/lng, writes `areas.min_lat/
+      max_lat/min_lng/max_lng`, clearing back to `NULL` when an area has zero active zones) then
+      `bustAreaCaches(areaId)`. All 3 call sites (`createZone`/`updateZone`/`deleteZone`) updated to
+      `await` it. The customer push (`emitToAllCustomers`) stays platform-wide for now — flagged as
+      TASK 23's job, harmless while only one area exists.
+- [x] 10.5 `matchZone` confirmed untouched — only its callers changed, never its nested-child-wins
+      logic. Reused unchanged everywhere (`resolveAreaForPoint`, `resolveDeliveryPricing`).
+- [x] 10.6 **Perf assertion test**, and made it prove something real rather than just check SQL text:
+      constructs TWO real candidate areas (both bbox-eligible, so the bbox prefilter alone can't rule
+      area 2 out) and deliberately does **not** mock an 8th `pool.query` response — if
+      `resolveAreaForPoint`'s per-area loop ever fell through to querying area 2's zones, the mock
+      queue would run dry and the test would fail with a 500, not a wrong-price assertion. Asserts
+      the exact call count (7) and that every `delivery_zones` query carries `area_id = 1`, never `2`.
+- [x] **Also fixed, beyond the checklist's own scope, found via the guardrail:**
+  - `resolveParentZoneId` (parent-zone lookup) now scoped by `area_id` — a zone can no longer be
+    nested under another area's zone.
+  - `wouldLeaveNoActiveZones`, `createZone`, `updateZone`, `deleteZone`, `listZones` all take a
+    resolved `areaId` and reject `null`/`'all'` (§2.10: Delivery Zones must refuse `all`).
+  - **Real cross-tenant security fix, verified live:** `updateZone`/`deleteZone` used to `SELECT
+    ... WHERE id = ?` with no area check — an `area_admin` could PATCH/DELETE another area's zone by
+    guessing its (globally sequential) numeric id. Now scoped `WHERE id = ? AND area_id = ?`, so a
+    cross-area id reads as 404, not a leak of whether the zone exists elsewhere.
+  - `settingsController.js`'s `radius_pricing_active` guard (`SELECT COUNT(*) ... FROM
+    delivery_zones WHERE active = 1`) was counting zones **across every area**, not the one being
+    toggled — area 1's admin could enable zone pricing believing zones existed when the count was
+    really coming from a different area. Scoped by `area_id`.
+  - Two ancestor-walk queries (`deliveryZonesController.js`'s `resolveParentZoneId`,
+    `coupons.js`'s `getZoneAndAncestorIds`) and one coupon-zone-name JOIN
+    (`couponController.js`) were investigated and deliberately left unscoped, each with a written
+    justification in the guardrail's `ALLOWLIST` — the two ancestor-walks are safe by construction
+    (`parent_zone_id` can only ever point within the same area, enforced at every write in this
+    file), and the coupon-zone JOIN is premature to partially fix ahead of TASK 14's full
+    coupons/coupon_zones redesign.
 
+**Test churn (H3):** `tests/deliveryZonesPublic.test.js`, `tests/deliveryZonesAdmin.test.js`,
+`tests/deliveryZonesFlow.test.js`, `tests/couponZoneDerivation.test.js`,
+`tests/realtimeControllerIntegration.test.js`, `tests/shopPricing.test.js`
+all needed mock-sequence updates for the new area-resolution queries. One genuinely useful discovery
+along the way: `couponZoneDerivation.test.js`'s second describe block was **passing before this task
+for the wrong reason** — cross-test mock-queue contamination from the first block's failing tests was
+masking that its own area-resolution mocks were missing too; adding `areaScope._resetCachesForTests()`
+per `beforeEach` (now standard practice for any file touching `areaScope`) surfaced the real gap.
+
+**Done when:** the perf test proves it. **Verified locally** 2026-08-01: `npm test` 88/88 suites
+(985/986, same 1 pre-existing unrelated skip); `npx eslint` clean on all touched files; guardrail's
+`SWEPT_TABLES` now includes `delivery_zones` + `delivery_exclusion_zones` (violations: 419 → 402,
+4 real bugs found and fixed via the guardrail, 3 genuinely-safe sites allowlisted with reasons).
+**Live-verified against the real dev DB**, not just mocks: booted the server, confirmed public zones
+resolves through the default area; created a real zone via a throwaway `area_admin` and watched
+`areas.min_lat/max_lat/min_lng/max_lng` and `catalog_version` update correctly in MySQL; **created a
+second real area row and a throwaway `area_admin` for it, then confirmed that admin gets a clean 404
+— not a leak, not a success — trying to PATCH and DELETE area 1's zone by numeric id**; deleted the
+zone via its real owner and confirmed the bbox correctly shrank back down; cleaned up every throwaway
+row afterward.
 **Commit:** `feat: AREA TASK 10 — per-area delivery zones and pricing`
 
 ### [ ] TASK 11 — Catalog: categories, products, combos, groups, store modes (162 sites)
