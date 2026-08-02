@@ -5,7 +5,7 @@
 const { pool } = require('../db/mysql');
 const { validatePagination } = require('../validators');
 const { requestAreaId, bustAreaCaches } = require('../utils/areaScope');
-const { materializeToArea, LibraryError } = require('../utils/productLibrary');
+const { materializeToArea, syncLibraryVariants, propagateLibraryEdit, LibraryError } = require('../utils/productLibrary');
 
 // add-to-area targets exactly one area — an area_admin's own (resolveAdminArea
 // already pins that), or a super_admin's explicit X-Area-Id. Never 'all': a
@@ -161,12 +161,16 @@ const createLibraryProduct = async (req, res) => {
 
 // PATCH /admin/library/:id — requireSuperAdmin. Identity fields only; the
 // actual per-area propagation of an edit is TASK 20's job (propagateLibraryEdit).
+// PATCH /admin/library/:id — requireSuperAdmin. Scalar identity fields and/or
+// a `variants` array (upsert-by-id, hard-delete-missing at the library level
+// — see syncLibraryVariants). Every change here fans out to every area that
+// carries this item via propagateLibraryEdit (TASK 20, §3.7/§6.7) in the
+// SAME transaction as the write, so an admin can never see the library say
+// one thing while an area's products still say another.
 const updateLibraryProduct = async (req, res) => {
   const { id } = req.params;
-  const [existing] = await pool.query('SELECT id FROM product_library WHERE id = ?', [id]);
-  if (existing.length === 0) {
-    return res.status(404).json({ code: 'NOT_FOUND', message: 'Library product not found' });
-  }
+  const libraryProductId = Number(id);
+  const { variants } = req.body || {};
 
   const fieldMap = {
     name: 'name', description: 'description',
@@ -187,14 +191,45 @@ const updateLibraryProduct = async (req, res) => {
     sets.push(`${column} = ?`);
     values.push(req.body[key]);
   }
-  if (sets.length === 0) {
+  if (sets.length === 0 && variants === undefined) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'No fields to update' });
   }
-  values.push(id);
-  await pool.query(`UPDATE product_library SET ${sets.join(', ')} WHERE id = ?`, values);
 
-  const [rows] = await pool.query('SELECT * FROM product_library WHERE id = ?', [id]);
+  const connection = await pool.getConnection();
+  let propagation;
+  try {
+    await connection.beginTransaction();
+
+    const [existing] = await connection.query('SELECT id FROM product_library WHERE id = ? FOR UPDATE', [libraryProductId]);
+    if (existing.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Library product not found' });
+    }
+
+    if (sets.length > 0) {
+      await connection.query(`UPDATE product_library SET ${sets.join(', ')} WHERE id = ?`, [...values, libraryProductId]);
+    }
+    if (variants !== undefined) {
+      await syncLibraryVariants(connection, libraryProductId, variants);
+    }
+    propagation = await propagateLibraryEdit(connection, libraryProductId);
+
+    await connection.commit();
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    connection.release();
+  }
+
+  const [rows] = await pool.query('SELECT * FROM product_library WHERE id = ?', [libraryProductId]);
   res.status(200).json({ message: 'Library product updated', data: libraryRowShape(rows[0]) });
+
+  // 20.4: bust every affected area's caches AFTER the response is sent —
+  // never make the admin wait on N cache busts for an edit that already
+  // committed.
+  Promise.all(propagation.areaIds.map((areaId) => bustAreaCaches(areaId)))
+    .catch((err) => console.error('[library] post-propagation cache bust failed:', err.message));
 };
 
 // POST /admin/library/:id/archive — requireSuperAdmin. Archiving never
