@@ -46,8 +46,9 @@ async function listShopActiveOrders(shopId) {
     return [];
   }
 
+  // stopgap area 1 (TASK 13 scopes shop order actions by area)
   const [settingsRows] = await pool.query(
-    'SELECT standard_delivery_minutes, fast_delivery_minutes FROM settings LIMIT 1'
+    'SELECT standard_delivery_minutes, fast_delivery_minutes FROM settings WHERE area_id = 1 LIMIT 1'
   );
   const settings = settingsRows[0] || {};
 

@@ -301,7 +301,8 @@ const getDashboard = async (req, res) => {
     LIMIT 5
   `);
 
-  const [settingsRow] = await queryRows('SELECT shop_open, delivery_available, rain_charge_enabled FROM settings LIMIT 1');
+  // stopgap area 1 (TASK 17 scopes the admin dashboard/reports by area)
+  const [settingsRow] = await queryRows('SELECT shop_open, delivery_available, rain_charge_enabled FROM settings WHERE area_id = 1 LIMIT 1');
 
   res.status(200).json({
     data: {

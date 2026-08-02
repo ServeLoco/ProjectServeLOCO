@@ -202,7 +202,8 @@ const notifyZonesChanged = (reason, zoneId) => {
 // rather than quietly reverting to flat pricing. Refuse the write and tell
 // them to turn zone pricing off first.
 const wouldLeaveNoActiveZones = async (excludedZoneId) => {
-  const [settingsRows] = await pool.query('SELECT radius_pricing_active FROM settings LIMIT 1');
+  // stopgap area 1 (TASK 10 threads the resolved area through zone writes)
+  const [settingsRows] = await pool.query('SELECT radius_pricing_active FROM settings WHERE area_id = 1 LIMIT 1');
   const zonePricingOn = Number(settingsRows[0]?.radius_pricing_active) === 1;
   if (!zonePricingOn) return false;
   const [zoneRows] = await pool.query(

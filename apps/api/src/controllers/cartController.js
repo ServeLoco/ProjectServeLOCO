@@ -16,7 +16,7 @@ const calculateCart = async (req, res) => {
   }
 
   const [settingRows] = await pool.query(
-    'SELECT shop_open, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, delivery_radius_km, shop_latitude, shop_longitude, radius_pricing_active FROM settings LIMIT 1'
+    'SELECT shop_open, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, delivery_radius_km, shop_latitude, shop_longitude, radius_pricing_active FROM settings WHERE area_id = 1 LIMIT 1' // stopgap area 1 (TASK 13 threads the resolved area through cart/order pricing)
   );
   const settings = settingRows[0] || {
     shop_open: 1, delivery_charge: 0, night_charge: 0,
@@ -657,7 +657,7 @@ const validateCouponHandler = async (req, res) => {
   let zoneId = null;
   if (hasCoords) {
     const [settingRows] = await pool.query(
-      'SELECT delivery_charge, night_charge, night_charge_start, night_charge_end, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings LIMIT 1'
+      'SELECT delivery_charge, night_charge, night_charge_start, night_charge_end, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings WHERE area_id = 1 LIMIT 1' // stopgap area 1 (TASK 13 threads the resolved area through cart/order pricing)
     );
     const zoneSettings = settingRows[0] || {};
     if (zoneSettings.radius_pricing_active) {
@@ -764,7 +764,7 @@ const getAvailableCoupons = async (req, res) => {
   let zoneId = null;
   if (hasCoords) {
     const [settingRows] = await pool.query(
-      'SELECT delivery_charge, night_charge, night_charge_start, night_charge_end, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings LIMIT 1'
+      'SELECT delivery_charge, night_charge, night_charge_start, night_charge_end, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings WHERE area_id = 1 LIMIT 1' // stopgap area 1 (TASK 13 threads the resolved area through cart/order pricing)
     );
     const zoneSettings = settingRows[0] || {};
     if (zoneSettings.radius_pricing_active) {

@@ -1887,6 +1887,18 @@ const migrate = async () => {
     await ensureUniqueIndex('admin_notifications', 'uniq_admin_inbox_area_event', 'area_id, type, related_id');
     console.log('[migrate] per-area unique keys in place.');
 
+    // ---- TASK 9 — settings becomes genuinely one row per area ----------
+    // `settings` was never a UNIQUE-key-enforced singleton — every query
+    // just relied on there only ever being one row and used LIMIT 1. Now
+    // that it's one row PER AREA (settingsController.js), the same "just
+    // one row" assumption needs a real constraint, or a duplicate INSERT
+    // (e.g. two concurrent requests both finding zero rows for a brand new
+    // area) creates a second row that LIMIT-1-style reads pick between
+    // unpredictably. Safe to add now — exactly one settings row exists
+    // (area 1's) at this point in the rollout.
+    await ensureUniqueIndex('settings', 'uniq_settings_area', 'area_id');
+    console.log('[migrate] settings.area_id unique key in place.');
+
     // users.last_area_id — a cold-start cache (§2.2), NOT an authorization
     // input, and deliberately NO foreign key (a stale/wrong cached area is
     // harmless; areas are deactivate-only per §6.8 so it could never

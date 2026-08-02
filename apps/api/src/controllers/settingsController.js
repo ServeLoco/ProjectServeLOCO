@@ -1,10 +1,10 @@
 const { pool } = require('../db/mysql');
 const { normalizeStoreType } = require('../utils/storeMode');
 const { createTtlCache } = require('../utils/ttlCache');
-const microCache = require('../utils/microCache');
 const config = require('../config/env');
 const { cleanupOrphanedImage } = require('./imageController');
 const { syncGlobalShopOpenState } = require('../utils/shops');
+const { requestAreaId, getDefaultArea, bustAreaCaches } = require('../utils/areaScope');
 
 // Settings is a singleton (1 row) today, read by every app open and every
 // public endpoint. 15-second cache eliminates most SELECTs while keeping
@@ -121,8 +121,22 @@ const attachOfferProductImageUrls = async (products) => {
 };
 
 const getSettings = async (req, res) => {
-  const settings = await settingsCache.wrap(settingsKey(SETTINGS_AREA_ID_STOPGAP), async () => {
-    const [rows] = await pool.query('SELECT * FROM settings LIMIT 1');
+  // resolveCustomerArea (mounted on this route) resolves req.areaId: a real
+  // area id when the pin matched a zone (or there was no pin, falling back
+  // to the customer's last area / the platform default), or null when a
+  // supplied pin fell outside every zone. Settings is lightweight, mostly
+  // non-delivery info (app version gate, support contact) — falling back to
+  // the default area here rather than erroring is deliberately more lenient
+  // than the catalog/dashboard endpoints, which must show "we don't deliver
+  // here" for that same null (§2.4). getSettings never does.
+  let areaId = requestAreaId(req);
+  if (typeof areaId !== 'number') {
+    const defaultArea = await getDefaultArea();
+    areaId = defaultArea ? defaultArea.id : 1;
+  }
+
+  const settings = await settingsCache.wrap(settingsKey(areaId), async () => {
+    const [rows] = await pool.query('SELECT * FROM settings WHERE area_id = ? LIMIT 1', [areaId]);
     const s = rows[0] || {
       shop_open: 1,
       minimum_order_amount: 50,
@@ -182,6 +196,20 @@ const getActiveOffer = async (req, res) => {
 };
 
 const updateSettings = async (req, res) => {
+  // req.areaId is set by resolveAdminArea, chained inside requireAdmin
+  // (TASK 8): a real number for an area_admin (always their own area) or a
+  // super_admin who picked one via X-Area-Id. This is a write targeting
+  // exactly one area's settings, so — unlike getSettings — null (no header)
+  // and 'all' are both rejected outright rather than guessed at (§2.10:
+  // Settings is one of the endpoints that must refuse 'all').
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required to update settings' });
+  }
+  if (areaId === 'all') {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Settings cannot be updated for "all" areas at once — pick one area' });
+  }
+
   const fields = [
     'shop_open', 'delivery_available', 'minimum_order_amount', 'delivery_charge',
     'night_charge', 'night_charge_start', 'night_charge_end',
@@ -303,7 +331,7 @@ const updateSettings = async (req, res) => {
       } else {
         // shop_open-only request (the Dashboard's standalone toggle) — an
         // explicit attempt to open while delivery is off gets a clear error.
-        const [currentRows] = await pool.query('SELECT delivery_available FROM settings LIMIT 1');
+        const [currentRows] = await pool.query('SELECT delivery_available FROM settings WHERE area_id = ? LIMIT 1', [areaId]);
         const deliveryAvailable = currentRows.length > 0 ? Boolean(currentRows[0].delivery_available) : true;
         if (!deliveryAvailable) {
           return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Cannot open Shop Status while delivery is turned off.' });
@@ -342,22 +370,28 @@ const updateSettings = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'No valid fields provided' });
   }
 
-  const [rows] = await pool.query('SELECT id, upi_qr_image_id FROM settings LIMIT 1');
+  const [rows] = await pool.query('SELECT id, upi_qr_image_id FROM settings WHERE area_id = ? LIMIT 1', [areaId]);
   let settingsId = rows[0]?.id;
   const previousImageId = rows[0]?.upi_qr_image_id;
   if (rows.length === 0) {
-    const [insertResult] = await pool.query('INSERT INTO settings (shop_open) VALUES (1)');
+    // Should be unreachable once TASK 24's area-creation endpoint calls
+    // createSettingsForArea (below) for every new area — kept as a safety
+    // net, not the primary path.
+    const [insertResult] = await pool.query('INSERT INTO settings (area_id, shop_open) VALUES (?, 1)', [areaId]);
     settingsId = insertResult?.insertId;
   }
 
-  await pool.query(`UPDATE settings SET ${updates.join(', ')} WHERE id = ?`, [...params, settingsId]);
-  settingsCache.del(settingsKey(SETTINGS_AREA_ID_STOPGAP));
+  // area_id in the WHERE is redundant with id (already a unique per-row
+  // key) — kept anyway as a defense-in-depth guard against settingsId ever
+  // resolving to the wrong area's row.
+  await pool.query(`UPDATE settings SET ${updates.join(', ')} WHERE id = ? AND area_id = ?`, [...params, settingsId, areaId]);
+  settingsCache.del(settingsKey(areaId));
   // delivery_available just changed — re-derive shop_open from it (forces
   // closed if delivery just went off, or auto-opens if it just came back on
   // and some shop is open).
   if (body.delivery_available !== undefined) {
     await syncGlobalShopOpenState();
-    settingsCache.del(settingsKey(SETTINGS_AREA_ID_STOPGAP));
+    settingsCache.del(settingsKey(areaId));
   }
   if (
     body.upi_qr_image_id !== undefined &&
@@ -366,7 +400,7 @@ const updateSettings = async (req, res) => {
   ) {
     await cleanupOrphanedImage(previousImageId);
   }
-  const [updatedRows] = await pool.query('SELECT * FROM settings LIMIT 1');
+  const [updatedRows] = await pool.query('SELECT * FROM settings WHERE area_id = ? LIMIT 1', [areaId]);
   const updatedSettings = await attachSettingsImageUrls(updatedRows[0]);
 
   // Manual admin flip of the global banner (or a delivery_available change
@@ -378,7 +412,7 @@ const updateSettings = async (req, res) => {
     emitToAllCustomers('settings.shop_open.updated', { shopOpen: finalOpen, shop_open: finalOpen });
   }
 
-  microCache.bust('dashboard', 1);
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Settings updated successfully', data: updatedSettings });
 };
 
@@ -403,7 +437,8 @@ const createOffer = async (req, res) => {
     [title, description || '', isActive, finalImageId, finalStoreType, finalIsClickable]
   );
 
-  microCache.bust('dashboard', 1);
+  // offers isn't area-scoped yet (TASK 12) — stopgap area 1, same pattern as TASK 4.
+  await bustAreaCaches(1);
   res.status(201).json({ message: 'Offer created', id: result.insertId });
 };
 
@@ -477,7 +512,7 @@ const updateOffer = async (req, res) => {
     await cleanupOrphanedImage(previousImageId);
   }
 
-  microCache.bust('dashboard', 1);
+  await bustAreaCaches(1); // offers isn't area-scoped yet (TASK 12) — stopgap area 1.
   res.status(200).json({ message: 'Offer updated' });
 };
 
@@ -509,7 +544,7 @@ const deleteOffer = async (req, res) => {
   }
   await pool.query('UPDATE offers SET deleted = 1 WHERE id = ? AND deleted = 0', [id]);
   await cleanupOrphanedImage(rows[0].image_id);
-  microCache.bust('dashboard', 1);
+  await bustAreaCaches(1); // offers isn't area-scoped yet (TASK 12) — stopgap area 1.
   res.status(200).json({ message: 'Offer soft deleted' });
 };
 
@@ -571,11 +606,11 @@ const addOfferProduct = async (req, res) => {
       'INSERT INTO offer_products (offer_id, product_id, display_order) VALUES (?, ?, ?)',
       [id, finalProductId, display_order || 0]
     );
-    microCache.bust('dashboard', 1);
+    await bustAreaCaches(1); // offers isn't area-scoped yet (TASK 12) — stopgap area 1.
     res.status(201).json({ message: 'Product added to offer' });
   } catch (err) {
     if (err.code === 'ER_DUP_ENTRY') {
-      microCache.bust('dashboard', 1);
+      await bustAreaCaches(1);
       res.status(200).json({ message: 'Product already attached' });
     } else {
       throw err;
@@ -586,7 +621,7 @@ const addOfferProduct = async (req, res) => {
 const removeOfferProduct = async (req, res) => {
   const { id, productId } = req.params;
   await pool.query('DELETE FROM offer_products WHERE offer_id = ? AND product_id = ?', [id, productId]);
-  microCache.bust('dashboard', 1);
+  await bustAreaCaches(1); // offers isn't area-scoped yet (TASK 12) — stopgap area 1.
   res.status(200).json({ message: 'Product removed from offer' });
 };
 
@@ -602,8 +637,18 @@ const reorderOfferProducts = async (req, res) => {
     await pool.query('UPDATE offer_products SET display_order = ? WHERE offer_id = ? AND product_id = ?', [i, id, productIds[i]]);
   }
 
-  microCache.bust('dashboard', 1);
+  await bustAreaCaches(1); // offers isn't area-scoped yet (TASK 12) — stopgap area 1.
   res.status(200).json({ message: 'Products reordered' });
+};
+
+// Every area needs exactly one settings row (§9.3) — called by TASK 24's
+// POST /admin/areas inside the same transaction that creates the area
+// itself. Not called from anywhere yet; updateSettings's own INSERT above
+// is the safety net until TASK 24 lands. Accepts an optional connection so
+// the caller can run it inside its own transaction instead of a separate
+// pool.query.
+const createSettingsForArea = async (areaId, connection = pool) => {
+  await connection.query('INSERT IGNORE INTO settings (area_id, shop_open) VALUES (?, 1)', [areaId]);
 };
 
 module.exports = {
@@ -618,6 +663,7 @@ module.exports = {
   addOfferProduct,
   removeOfferProduct,
   reorderOfferProducts,
+  createSettingsForArea,
   // For code that writes settings outside this controller (e.g.
   // syncGlobalShopOpenState flipping shop_open) — without this, public
   // /api/settings keeps serving the stale cached value for up to 15s.

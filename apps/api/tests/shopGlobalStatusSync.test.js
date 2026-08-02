@@ -44,7 +44,7 @@ describe('syncGlobalShopOpenState (unit)', () => {
     await syncGlobalShopOpenState();
 
     expect(pool.query).toHaveBeenCalledTimes(2);
-    expect(pool.query).toHaveBeenNthCalledWith(2, 'UPDATE settings SET shop_open = 0 WHERE shop_open = 1');
+    expect(pool.query).toHaveBeenNthCalledWith(2, 'UPDATE settings SET shop_open = 0 WHERE shop_open = 1 AND area_id = 1');
     expect(emitToAllCustomers).toHaveBeenCalledWith(
       'settings.shop_open.updated',
       expect.objectContaining({ shopOpen: false, shop_open: false })
@@ -59,7 +59,7 @@ describe('syncGlobalShopOpenState (unit)', () => {
 
     await syncGlobalShopOpenState();
 
-    expect(pool.query).toHaveBeenNthCalledWith(3, 'UPDATE settings SET shop_open = ? WHERE shop_open != ?', [1, 1]);
+    expect(pool.query).toHaveBeenNthCalledWith(3, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = 1', [1, 1]);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
       'settings.shop_open.updated',
       expect.objectContaining({ shopOpen: true, shop_open: true })
@@ -74,7 +74,7 @@ describe('syncGlobalShopOpenState (unit)', () => {
 
     await syncGlobalShopOpenState();
 
-    expect(pool.query).toHaveBeenNthCalledWith(3, 'UPDATE settings SET shop_open = ? WHERE shop_open != ?', [0, 0]);
+    expect(pool.query).toHaveBeenNthCalledWith(3, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = 1', [0, 0]);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
       'settings.shop_open.updated',
       expect.objectContaining({ shopOpen: false, shop_open: false })
@@ -139,7 +139,7 @@ describe('toggleMyShop wiring — PATCH /api/shop/me/toggle', () => {
       .send({ is_open: true });
 
     expect(res.statusCode).toEqual(200);
-    expect(pool.query).toHaveBeenLastCalledWith('UPDATE settings SET shop_open = ? WHERE shop_open != ?', [1, 1]);
+    expect(pool.query).toHaveBeenLastCalledWith('UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = 1', [1, 1]);
   });
 
   it('closing the last open shop syncs the global banner off', async () => {
@@ -158,7 +158,7 @@ describe('toggleMyShop wiring — PATCH /api/shop/me/toggle', () => {
       .send({ is_open: false });
 
     expect(res.statusCode).toEqual(200);
-    expect(pool.query).toHaveBeenLastCalledWith('UPDATE settings SET shop_open = ? WHERE shop_open != ?', [0, 0]);
+    expect(pool.query).toHaveBeenLastCalledWith('UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = 1', [0, 0]);
   });
 });
 
@@ -196,6 +196,6 @@ describe('updateShop wiring — PATCH /api/admin/shops/:id', () => {
       .send({ is_open: false });
 
     expect(res.statusCode).toEqual(200);
-    expect(pool.query).toHaveBeenLastCalledWith('UPDATE settings SET shop_open = ? WHERE shop_open != ?', [0, 0]);
+    expect(pool.query).toHaveBeenLastCalledWith('UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = 1', [0, 0]);
   });
 });

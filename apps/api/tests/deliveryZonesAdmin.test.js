@@ -21,7 +21,14 @@ const app = express();
 app.use(express.json());
 app.use('/api/admin', adminRoutes);
 
-const adminToken = jwt.sign({ id: 'admin', role: 'admin' }, process.env.JWT_SECRET || 'secret');
+// adminRole/areaId added for the "Settings radius_pricing_active guard"
+// block below, which goes through updateSettings (requires a real
+// req.areaId since TASK 9); harmless no-op for every other test in this
+// file, which don't touch settings.
+const adminToken = jwt.sign(
+  { sub: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 },
+  process.env.JWT_SECRET || 'secret'
+);
 
 const SQUARE_BOUNDARY = [
   { lat: 29.51, lng: 75.45 },

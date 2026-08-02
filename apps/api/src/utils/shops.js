@@ -246,12 +246,14 @@ const syncGlobalShopOpenState = async () => {
     let changed = false;
     let globalOpen = null;
 
-    const [settingsRows] = await pool.query('SELECT delivery_available FROM settings LIMIT 1');
+    // stopgap area 1 throughout this function (TASK 15 renames it to
+    // syncAreaShopOpenState(areaId) and scopes the shops query too)
+    const [settingsRows] = await pool.query('SELECT delivery_available FROM settings WHERE area_id = 1 LIMIT 1');
     if (settingsRows.length === 0) return;
 
     const deliveryAvailable = Boolean(settingsRows[0].delivery_available);
     if (!deliveryAvailable) {
-      const [result] = await pool.query('UPDATE settings SET shop_open = 0 WHERE shop_open = 1');
+      const [result] = await pool.query('UPDATE settings SET shop_open = 0 WHERE shop_open = 1 AND area_id = 1');
       changed = result.affectedRows > 0;
       globalOpen = false;
     } else {
@@ -266,7 +268,7 @@ const syncGlobalShopOpenState = async () => {
 
       const totalOpen = Number(shopRows[0]?.total_open) || 0;
       const desiredOpen = totalOpen > 0 ? 1 : 0;
-      const [result] = await pool.query('UPDATE settings SET shop_open = ? WHERE shop_open != ?', [desiredOpen, desiredOpen]);
+      const [result] = await pool.query('UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = 1', [desiredOpen, desiredOpen]);
       changed = result.affectedRows > 0;
       globalOpen = Boolean(desiredOpen);
     }

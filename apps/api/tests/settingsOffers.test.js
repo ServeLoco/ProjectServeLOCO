@@ -14,7 +14,10 @@ const app = express();
 app.use(express.json());
 app.use('/api/admin', adminRoutes);
 
-const adminToken = jwt.sign({ id: 'admin', role: 'admin' }, process.env.JWT_SECRET || 'secret');
+const adminToken = jwt.sign(
+  { sub: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 },
+  process.env.JWT_SECRET || 'secret'
+);
 
 describe('Settings and Offers Tests', () => {
   beforeEach(() => {
@@ -155,7 +158,11 @@ describe('Settings and Offers Tests', () => {
       .send({ active: true });
 
     expect(res.statusCode).toEqual(200);
-    expect(pool.query).toHaveBeenCalledTimes(2);
+    // 3, not 2: SELECT existing + UPDATE offer + bustAreaCaches's
+    // catalog_version bump (TASK 9). The assertion this test actually
+    // cares about — no extra "deactivate other offers" UPDATE — is the
+    // one below.
+    expect(pool.query).toHaveBeenCalledTimes(3);
     expect(pool.query.mock.calls.some(([query]) => query.includes('id != ?'))).toBe(false);
   });
 });

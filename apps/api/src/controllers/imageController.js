@@ -12,12 +12,19 @@ const buildFilename = (fieldname, ext) => {
   return `${fieldname}-${uniqueSuffix}.${ext}`;
 };
 
+// `images` is global (shared/deduplicated across every area, §2.5/§2.6),
+// so "is this image used anywhere" is deliberately a CROSS-AREA scan —
+// none of these six queries filter by area_id, on purpose. The settings
+// one specifically used to carry a `LIMIT 1`, which only ever checked
+// area 1's UPI QR image; every other area's would report as unused and
+// get deleted by cleanupOrphanedImage/the admin Images page (§6.4). Fixed
+// by dropping the LIMIT — addUsage already iterates every row returned.
 const getUsedImageIds = async () => {
   const [products] = await pool.query('SELECT DISTINCT image_id FROM products WHERE image_id IS NOT NULL AND deleted = 0');
   const [categories] = await pool.query('SELECT DISTINCT image_id FROM categories WHERE image_id IS NOT NULL AND deleted = 0');
   const [combos] = await pool.query('SELECT DISTINCT image_id FROM combos WHERE image_id IS NOT NULL AND deleted = 0');
   const [offers] = await pool.query('SELECT DISTINCT image_id FROM offers WHERE image_id IS NOT NULL AND deleted = 0');
-  const [settings] = await pool.query('SELECT upi_qr_image_id FROM settings WHERE upi_qr_image_id IS NOT NULL LIMIT 1');
+  const [settings] = await pool.query('SELECT upi_qr_image_id FROM settings WHERE upi_qr_image_id IS NOT NULL');
   const [storeModes] = await pool.query('SELECT DISTINCT icon_image_id FROM store_modes WHERE icon_image_id IS NOT NULL');
 
   const used = new Set();

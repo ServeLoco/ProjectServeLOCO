@@ -349,7 +349,7 @@ describe('syncDeliveryAvailabilityFromRiders', () => {
     expect(result.changed).toBe(true);
     expect(result.deliveryAvailable).toBe(true);
     expect(pool.query).toHaveBeenCalledWith(
-      'UPDATE settings SET delivery_available = ? WHERE delivery_available != ?',
+      'UPDATE settings SET delivery_available = ? WHERE delivery_available != ? AND area_id = 1',
       [1, 1]
     );
     expect(bustSettingsCache).toHaveBeenCalled();
@@ -371,7 +371,7 @@ describe('syncDeliveryAvailabilityFromRiders', () => {
     expect(result.changed).toBe(true);
     expect(result.deliveryAvailable).toBe(false);
     expect(pool.query).toHaveBeenCalledWith(
-      'UPDATE settings SET delivery_available = ? WHERE delivery_available != ?',
+      'UPDATE settings SET delivery_available = ? WHERE delivery_available != ? AND area_id = 1',
       [0, 0]
     );
     expect(syncGlobalShopOpenState).toHaveBeenCalled();

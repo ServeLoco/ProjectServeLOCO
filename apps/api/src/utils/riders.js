@@ -308,7 +308,8 @@ const syncDeliveryAvailabilityFromRiders = async () => {
     const activeCount = await countActiveRiders();
     const desired = activeCount > 0 ? 1 : 0;
 
-    const [settingsRows] = await pool.query('SELECT delivery_available FROM settings LIMIT 1');
+    // stopgap area 1 (TASK 15 scopes rider availability by area)
+    const [settingsRows] = await pool.query('SELECT delivery_available FROM settings WHERE area_id = 1 LIMIT 1');
     if (settingsRows.length === 0) return { changed: false, activeCount, deliveryAvailable: Boolean(desired) };
 
     const current = settingsRows[0].delivery_available ? 1 : 0;
@@ -316,7 +317,7 @@ const syncDeliveryAvailabilityFromRiders = async () => {
 
     if (current !== desired) {
       const [result] = await pool.query(
-        'UPDATE settings SET delivery_available = ? WHERE delivery_available != ?',
+        'UPDATE settings SET delivery_available = ? WHERE delivery_available != ? AND area_id = 1',
         [desired, desired]
       );
       changed = result.affectedRows > 0;
