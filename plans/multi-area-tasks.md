@@ -2083,19 +2083,69 @@ adding the params is confirmed non-regressive, not just non-erroring).
 
 **Commit:** `feat: AREA TASK 28 — pin-driven area resolution in the app`
 
-### [ ] TASK 29 — Area-change invalidation
+### [x] TASK 29 — Area-change invalidation
 **Spec:** §2.4 · **Files:** `[app] src/hooks/useDeliveryLocationSync.js`, `src/stores/useCartStore.js`,
 `src/api/realtimeClient.js`, `__tests__/cartZoneRevalidation.test.js`
 
-- [ ] 29.1 Detect an **area** change, not only a zone change.
-- [ ] 29.2 On area change: clear the cart, refetch settings/dashboard/catalog, clear cached search
-      results, rejoin the socket room.
-- [ ] 29.3 A cart assembled at area 1 prices must never reach checkout against area 2 zones.
-- [ ] 29.4 Pin outside every zone → "we don't deliver here yet" state. Not an empty catalog, not the
-      default area's catalog.
-- [ ] 29.5 Extend `__tests__/cartZoneRevalidation.test.js` with the area-change case.
-- [ ] 29.6 Reorder from an old order whose product does not exist in the current area: show the
-      order, **disable** reorder, explain why. Never substitute another area's product (§9.4 item 2).
+- [x] 29.1 `applyBootstrapResult` (shared by 28.1's `syncAreaInfo` and 28.7's `HomeScreen.loadHomeData`)
+      captures the store's `areaId` *before* calling `setAreaInfo`, then compares it to the resolved
+      response's `area.id` — a genuine area-to-area change, not merely `zoneId` moving within the same
+      area (two sibling zones in area 1 never trigger this).
+- [x] 29.2 New `invalidateForAreaChange(newAreaId)` in `useDeliveryLocationSync.js`, fired only on a
+      real area-to-area change: `useCartStore.clearCart()`, `invalidate('products:'|'product:'|
+      'categories:'|'dashboard:')` (the generic SWR cache from `utils/apiCache.js` — settings already
+      refetch via `applyBootstrapResult`'s existing `useSettingsStore.setSettings`, TASK 28), and a new
+      `emitAreaChanged(areaId)` in `realtimeClient.js` (`socket.emit('area:changed', {areaId})`).
+      Server-side handling already existed and was already tested (TASK 23's `socket.js`
+      `on('area:changed', ...)` → `rejoinAreaRoom`) — this task's only gap was the client never calling
+      it; verified the emitted payload shape (`{areaId}`, `Number(...)`-coerced) against the exact
+      server handler source before wiring it, no backend change needed.
+      "Clear cached search results" (29.2's own wording) needed no separate code: research confirmed
+      `ProductListScreen.js`'s search mode reuses the exact same `products:` cache key as category
+      browsing (no dedicated search cache exists), and `HomeScreen.js`'s inline dashboard search
+      dropdown doesn't cache at all — both already covered by the `invalidate()` calls above.
+- [x] 29.3 Enforced by 29.2's `clearCart()` — fires before the customer can act on a newly-resolved
+      area, so a cart assembled at the old area's prices never survives to see the new area's zones at
+      checkout. (Server-side, order creation already re-resolves the area from the submitted pin and
+      re-validates every line against `products WHERE area_id = ?` — TASK 13 — so this is UX-layer
+      cleanliness on top of an already-enforced server invariant, not the only thing standing between a
+      customer and a cross-area order.)
+- [x] 29.4 Already correct, pre-existing, unaffected by TASK 28/29: `HomeScreen.js`'s
+      `insideDeliveryZone === false` (from the existing `checkInsideZone`/`cart calculate` chain, not
+      bootstrap's own `deliverable` flag) already renders "We don't deliver here yet" instead of any
+      catalog — verified this covers both "pin genuinely outside every zone" AND "pin inside a zone but
+      an excluded square" (both correctly report `insideZone: false` per `checkInsideZone`'s own
+      exclusion-zone handling). TASK 28's `setAreaInfo` clearing `areaId`/`catalogVersion` etc. on
+      `deliverable: false` is a complementary correctness improvement (nothing downstream can read a
+      stale area while un-deliverable), not a duplicate of this gate.
+- [x] 29.5 `__tests__/cartZoneRevalidation.test.js` — new `area-change invalidation (TASK 29)` describe
+      block, 4 cases: first-ever resolve (null→id) does NOT clear anything; a genuine area-to-area
+      change clears the cart (items + applied coupon), invalidates seeded `products:`/`dashboard:`
+      cache entries, and calls `emitAreaChanged`; a same-area zone change does none of that; a pin
+      leaving every zone (id→null) does none of that either (29.4's gate handles it, not a cart wipe).
+      21 tests total in the file now (was 17 after TASK 28).
+- [x] 29.6 No existing reorder feature to retrofit — built it (net new, not previously in the app).
+      New `showReorder`/`canReorder`/`blockedReason` via a pure, independently-unit-tested
+      `src/utils/reorderEligibility.js`: shown only for a `Delivered` order with items; disabled with
+      an explanatory caption when the customer's current resolved area doesn't match the order's own
+      `area_id`/`areaId` (comparing areas directly rather than probing per-product existence, since no
+      bulk product-check endpoint exists and areas are operationally independent per §9.4 item 2 — a
+      mismatch means the order's product ids are certain not to resolve in the current area); also
+      disabled (different reason) when the customer has no resolved area yet. Wired into
+      `OrderDetailScreen.js`'s existing sticky footer (same row as Cancel/Contact Rider/Help & Support).
+      When enabled, tapping it adds every order line to the cart via the existing `useCartStore`
+      `addItem`/`addCombo` actions and navigates to Cart — deliberately does NOT re-validate each
+      product's live availability itself, reusing Cart's own existing price/availability reconciliation
+      (`applyCatalogProductPrices`/`cartApi.calculate`, the same mechanism a zone change already relies
+      on) instead of building a second, parallel validation path. New `__tests__/reorderEligibility.test.js`,
+      8 cases covering the pure eligibility function.
+
+Verification: `apps/customer-app` — `npx jest --runInBand` (43 suites / 330 tests) and `npx eslint`
+(touched files) both clean. No backend changes this task (server-side `area:changed`/`rejoinAreaRoom`
+already existed and was already tested under TASK 23) — `apps/api` suite unaffected, not re-run.
+Live device/simulator verification wasn't available in this environment (same constraint as TASK
+28's client-side work); relied on the same rigor as TASK 28 instead — full test suite, lint, and
+direct source-level verification of the client emit payload against the real server handler it targets.
 
 **Commit:** `feat: AREA TASK 29 — area-change invalidation`
 
