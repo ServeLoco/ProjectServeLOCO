@@ -28,8 +28,9 @@ import {
   RiderLiveMap,
 } from '../../../components';
 import { colors, typography, spacing, radius, shadows } from '../../../theme';
-import { useSettingsStore } from '../../../stores';
+import { useSettingsStore, useCartStore, useDeliveryLocationStore } from '../../../stores';
 import { ordersApi, subscribeOrderEvents, subscribeRealtime, subscribeRealtimeLifecycle } from '../../../api';
+import { showToast } from '../../../components/Toast';
 import { normalizeImageUrl, normalizeOrder } from '../../../utils';
 import * as Notifications from 'expo-notifications';
 import { requestNotificationPermission, checkNotificationPermission, readAskedState } from '../../../hooks/useLocalNotifications';
@@ -43,6 +44,7 @@ import {
   formatCancelReasonForCustomer,
   pickCancelReason,
 } from '../../../utils/cancelReason';
+import { getReorderEligibility } from '../../../utils/reorderEligibility';
 
 const WIN_H = Dimensions.get('window').height;
 // Checkout-style sheet: collapsed = big map; expanded = order details.
@@ -410,6 +412,45 @@ export default function OrderDetailScreen() {
   const isDelivered = order?.status === 'Delivered';
   const showContactRider = Boolean(riderPhone) && !isDelivered;
   const showHelpSupport = Boolean(supportPhone) && !showContactRider;
+
+  // TASK 29.6 — see getReorderEligibility's own comment for why this is an
+  // area comparison rather than a per-product existence check.
+  const currentAreaId = useDeliveryLocationStore(state => state.areaId);
+  const addCartItem = useCartStore(state => state.addItem);
+  const addCartCombo = useCartStore(state => state.addCombo);
+  const { showReorder, canReorder, blockedReason: reorderBlockedReason } = getReorderEligibility(order, currentAreaId);
+
+  const handleReorder = () => {
+    if (!canReorder) return;
+    let addedCount = 0;
+    order.items.forEach((item) => {
+      const product = {
+        id: item.product_id ?? item.productId,
+        name: item.product_name ?? item.productName ?? 'Item',
+        price: Number(item.unit_price ?? item.unitPrice ?? 0),
+        available: true,
+      };
+      if (!product.id) return;
+      const quantity = Number(item.quantity) || 1;
+      if (item.item_type === 'combo' || item.type === 'combo') {
+        addCartCombo(product, quantity);
+      } else {
+        const variantId = item.variant_id ?? item.variantId;
+        const variant = variantId ? { id: variantId, label: item.variant_label ?? item.variantLabel ?? null, price: product.price } : null;
+        addCartItem(product, quantity, variant);
+      }
+      addedCount += 1;
+    });
+    if (addedCount === 0) {
+      showToast('Could not add these items to cart', { type: 'error' });
+      return;
+    }
+    // CartScreen's own price/availability reconciliation (same mechanism a
+    // zone change already relies on) catches anything actually gone since —
+    // reorder doesn't need its own per-product validation on top of that.
+    showToast('Added to cart', { type: 'success' });
+    navigation.navigate('Cart');
+  };
 
   const handleContactRider = () => {
     if (!riderPhone) return;
@@ -853,15 +894,38 @@ export default function OrderDetailScreen() {
 
           </ScrollView>
 
-          {/* Sticky sheet footer — cancel / contact rider (with number) / help */}
-          {(order.canCancel || showContactRider || showHelpSupport) ? (
+          {/* Sticky sheet footer — cancel / contact rider (with number) / help / reorder */}
+          {(order.canCancel || showContactRider || showHelpSupport || showReorder) ? (
             <View
               style={[
                 styles.sheetFooter,
                 { paddingBottom: Math.max(insets.bottom, spacing.sm) },
               ]}
             >
+              {/* 29.6 — never silently substitute another area's product;
+                  show the order, disable Reorder, explain why instead. */}
+              {reorderBlockedReason ? (
+                <Text style={styles.reorderBlockedText}>{reorderBlockedReason}</Text>
+              ) : null}
               <View style={styles.actionButtonsRow}>
+                {showReorder ? (
+                  <View style={styles.btnWrapper}>
+                    <PressableScale
+                      onPress={handleReorder}
+                      disabled={!canReorder}
+                      style={[styles.bottomBtn, styles.outlineBtn, !canReorder && styles.bottomBtnDisabled]}
+                      scaleTo={0.96}
+                      accessibilityRole="button"
+                      accessibilityState={{ disabled: !canReorder }}
+                      accessibilityLabel={canReorder ? 'Reorder' : `Reorder unavailable: ${reorderBlockedReason}`}
+                    >
+                      <View style={styles.btnContent}>
+                        <AppIcon name="orders" size={16} color={canReorder ? colors.success : colors.textMuted} />
+                        <Text style={[styles.outlineBtnText, !canReorder && { color: colors.textMuted }]}>Reorder</Text>
+                      </View>
+                    </PressableScale>
+                  </View>
+                ) : null}
                 {order.canCancel ? (
                   <View style={styles.btnWrapper}>
                     <PressableScale
@@ -1882,6 +1946,17 @@ const styles = StyleSheet.create({
     borderRadius: radius.lg,
     borderWidth: 1.5,
     overflow: 'hidden',
+  },
+  bottomBtnDisabled: {
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceMuted || '#F3F4F6',
+    opacity: 0.7,
+  },
+  reorderBlockedText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    textAlign: 'center',
+    marginBottom: spacing.xs,
   },
   btnContent: {
     flex: 1,

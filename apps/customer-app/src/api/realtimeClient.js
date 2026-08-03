@@ -314,10 +314,29 @@ function emitAnalyticsScreen(screen) {
   }
 }
 
+// TASK 29.2 — the server resolves this socket's room from
+// users.last_area_id only on the initial connect (apps/api/src/realtime/
+// socket.js's joinAreaRoom); a pin that moves to a different area mid-
+// session needs an explicit push so admin broadcasts (order updates,
+// shop-closed, etc.) reach the room for the area the customer is actually
+// in now. Server-side handler already exists: socket.js's
+// `on('area:changed', ...)` calls rejoinAreaRoom. Silently no-ops if the
+// socket isn't connected — the next real connect already joins the
+// current area via users.last_area_id anyway.
+function emitAreaChanged(areaId) {
+  if (!socket || !socket.connected || areaId == null) return;
+  try {
+    socket.emit('area:changed', { areaId });
+  } catch (_) {
+    // best-effort — see comment above
+  }
+}
+
 export {
   connectCustomerRealtime,
   disconnectCustomerRealtime,
   emitAnalyticsScreen,
+  emitAreaChanged,
   emitRealtimeForeground,
   getRealtimeConnectionState,
   subscribeAuthRoleEvents,

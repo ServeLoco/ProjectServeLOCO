@@ -5,6 +5,7 @@ export { getRealtimeBaseUrl } from './realtimeConfig';
 export {
   connectCustomerRealtime,
   disconnectCustomerRealtime,
+  emitAreaChanged,
   emitRealtimeForeground,
   getRealtimeConnectionState,
   subscribeNotificationEvents,

@@ -9,11 +9,12 @@
 jest.mock('../src/api', () => ({
   cartApi: { calculate: jest.fn() },
   bootstrapApi: { getBootstrap: jest.fn() },
+  emitAreaChanged: jest.fn(),
 }));
 jest.mock('../src/components/Toast', () => ({ showToast: jest.fn() }));
 
 const Location = require('expo-location');
-const { cartApi, bootstrapApi } = require('../src/api');
+const { cartApi, bootstrapApi, emitAreaChanged } = require('../src/api');
 const { showToast } = require('../src/components/Toast');
 const { useDeliveryLocationStore } = require('../src/stores/useDeliveryLocationStore');
 const { useCartStore } = require('../src/stores/useCartStore');
@@ -54,6 +55,7 @@ describe('syncDeliveryLocation revalidates the cart on a zone change', () => {
       recentLocations: [], isInitialSyncComplete: false,
     });
     useCartStore.setState({ items: [] });
+    require('../src/utils/apiCache').clearAll();
     Location.getForegroundPermissionsAsync.mockResolvedValue({ granted: true, canAskAgain: true });
     Location.getCurrentPositionAsync.mockResolvedValue({ coords: { latitude: 12.9, longitude: 77.6 } });
     // Default: no bootstrap response configured — the sync's own try/catch
@@ -331,6 +333,83 @@ describe('syncDeliveryLocation revalidates the cart on a zone change', () => {
       const state = useDeliveryLocationStore.getState();
       expect(state.insideZone).toBe(true);
       expect(state.zoneId).toBe(9);
+    });
+  });
+
+  // TASK 29.1/29.2/29.3 — an AREA change (not merely a zone change within
+  // the same area) clears the cart, drops the catalog/dashboard/search SWR
+  // cache, and rejoins the realtime room for the new area.
+  describe('area-change invalidation (TASK 29)', () => {
+    function bootstrapResponse({ areaId, catalogVersion = 3 } = {}) {
+      return {
+        deliverable: true,
+        area: { id: areaId, code: 'A', name: `Area ${areaId}`, brandColor: '#123456' },
+        zone: { id: 9, name: 'Zone A' },
+        settings: { support_phone: '9990001111', upi_id: `area${areaId}@upi` },
+        storeModes: [],
+        zoneGeometry: [],
+        catalogVersion,
+      };
+    }
+
+    it('does NOT clear the cart/cache/socket room on the first-ever area resolve (null -> id)', async () => {
+      useCartStore.setState({ items: [CART_ITEM] });
+      cartApi.calculate.mockResolvedValueOnce(zoneCalculateResponse({ zoneId: 9, zoneName: 'Zone A' }));
+      bootstrapApi.getBootstrap.mockResolvedValueOnce(bootstrapResponse({ areaId: 1 }));
+
+      await syncDeliveryLocation();
+
+      expect(useCartStore.getState().items).toHaveLength(1);
+      expect(emitAreaChanged).not.toHaveBeenCalled();
+    });
+
+    it('clears the cart, invalidates the catalog/dashboard cache, and rejoins the socket room when the resolved area actually changes', async () => {
+      const { setCached } = require('../src/utils/apiCache');
+      useDeliveryLocationStore.setState({ areaId: 1, zoneId: 9, catalogVersion: 3 });
+      useCartStore.setState({ items: [CART_ITEM], appliedCouponCode: 'SAVE10', appliedCouponId: 7 });
+      // A cached catalog/dashboard/search entry from area 1 that must not
+      // survive into area 2 — ProductListScreen's search results ride the
+      // same `products:` cache key as browsing.
+      setCached('products:{"zoneId":9}', { data: [{ id: 1 }] });
+      setCached('dashboard:fast_food', { data: [{ id: 1 }] });
+
+      cartApi.calculate.mockResolvedValueOnce(zoneCalculateResponse({ zoneId: 12, zoneName: 'Zone B' }));
+      bootstrapApi.getBootstrap.mockResolvedValueOnce(bootstrapResponse({ areaId: 2 }));
+
+      await syncDeliveryLocation();
+
+      expect(useCartStore.getState().items).toEqual([]);
+      expect(useCartStore.getState().appliedCouponCode).toBeNull();
+      const { getCached } = require('../src/utils/apiCache');
+      expect(getCached('products:{"zoneId":9}')).toBeNull();
+      expect(getCached('dashboard:fast_food')).toBeNull();
+      expect(emitAreaChanged).toHaveBeenCalledWith(2);
+    });
+
+    it('does NOT clear the cart when the zone changes but the area stays the same', async () => {
+      useDeliveryLocationStore.setState({ areaId: 1, zoneId: 9, catalogVersion: 3 });
+      useCartStore.setState({ items: [CART_ITEM] });
+      cartApi.calculate.mockResolvedValueOnce(zoneCalculateResponse({ zoneId: 12, zoneName: 'Zone B' }));
+      bootstrapApi.getBootstrap.mockResolvedValueOnce(bootstrapResponse({ areaId: 1 }));
+
+      await syncDeliveryLocation();
+
+      expect(useCartStore.getState().items).toHaveLength(1);
+      expect(emitAreaChanged).not.toHaveBeenCalled();
+    });
+
+    it('does NOT clear the cart when the pin leaves every zone (area id -> null) — the "we don\'t deliver here yet" gate handles that, not a cart wipe', async () => {
+      useDeliveryLocationStore.setState({ areaId: 1, zoneId: 9, catalogVersion: 3 });
+      useCartStore.setState({ items: [CART_ITEM] });
+      cartApi.calculate.mockResolvedValueOnce(zoneCalculateResponse({ zoneId: null, zoneName: null }));
+      bootstrapApi.getBootstrap.mockResolvedValueOnce({
+        deliverable: false, area: null, zone: null, settings: null, storeModes: [], zoneGeometry: [], catalogVersion: null,
+      });
+
+      await syncDeliveryLocation();
+
+      expect(useCartStore.getState().items).toHaveLength(1);
+      expect(emitAreaChanged).not.toHaveBeenCalled();
     });
   });
 });

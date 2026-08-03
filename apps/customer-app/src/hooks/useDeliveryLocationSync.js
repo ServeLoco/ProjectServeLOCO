@@ -1,12 +1,13 @@
 import { useEffect } from 'react';
 import { AppState } from 'react-native';
 import * as Location from 'expo-location';
-import { cartApi, bootstrapApi } from '../api';
+import { cartApi, bootstrapApi, emitAreaChanged } from '../api';
 import { useDeliveryLocationStore } from '../stores/useDeliveryLocationStore';
 import { useCartStore } from '../stores/useCartStore';
 import { useSettingsStore } from '../stores/useSettingsStore';
 import { normalizeCartCalculation, normalizeSettings } from '../utils/apiMappers';
 import { showToast } from '../components/Toast';
+import { invalidate } from '../utils/apiCache';
 
 const GPS_TIMEOUT_MS = 8000;
 const INITIAL_SYNC_TIMEOUT_MS = 10_000;
@@ -49,6 +50,26 @@ function buildAreaETag({ areaId, zoneId, catalogVersion }) {
     : undefined;
 }
 
+// TASK 29.1/29.2/29.3 — an AREA change, not merely a zone change within the
+// same area: clear the cart (an area-1-priced cart must never reach
+// checkout against area-2 zones — §2.4), drop the SWR catalog/dashboard
+// cache (ProductListScreen's search results ride the same `products:` key
+// as browsing — see its own cache-key comment — so this covers search too,
+// 29.2's "clear cached search results"), and push the socket into the new
+// area's room so admin broadcasts reach it. Deliberately only fires between
+// two REAL areas (both non-null, and different) — a first-ever resolve
+// (null -> id) has nothing assembled against the wrong area yet, and a pin
+// that leaves every zone (id -> null) is already covered by the existing
+// "we don't deliver here yet" gate (29.4) without needing a cart wipe.
+function invalidateForAreaChange(newAreaId) {
+  useCartStore.getState().clearCart();
+  invalidate('products:');
+  invalidate('product:');
+  invalidate('categories:');
+  invalidate('dashboard:');
+  emitAreaChanged(newAreaId);
+}
+
 // Fans a GET /bootstrap response out into the two stores it feeds. Shared
 // between this hook's own periodic sync and HomeScreen's cold-start call so
 // "what a bootstrap response means" is defined exactly once (§4.5-style
@@ -56,13 +77,18 @@ function buildAreaETag({ areaId, zoneId, catalogVersion }) {
 // whatever it already had.
 function applyBootstrapResult(result) {
   if (result === null) return;
+  const previousAreaId = useDeliveryLocationStore.getState().areaId;
+  const nextAreaId = result.area?.id ?? null;
   useDeliveryLocationStore.getState().setAreaInfo({
     deliverable: Boolean(result.deliverable),
-    areaId: result.area?.id ?? null,
+    areaId: nextAreaId,
     areaName: result.area?.name ?? null,
     brandColor: result.area?.brandColor ?? result.area?.brand_color ?? null,
     catalogVersion: result.catalogVersion ?? null,
   });
+  if (previousAreaId != null && nextAreaId != null && previousAreaId !== nextAreaId) {
+    invalidateForAreaChange(nextAreaId);
+  }
   // 28.6 — support_phone/whatsapp_number/UPI must reflect the resolved
   // area, not a stale globally-cached value. Same store, same normalizer
   // CheckoutScreen/ProfileScreen/OrderDetailScreen already read from.
