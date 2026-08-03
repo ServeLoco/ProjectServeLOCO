@@ -1145,6 +1145,25 @@ yet. Do not block the connection waiting for an area.
 the natural UX is "import into the area I am currently switched to". Easy, but it is a 578-line file
 that the catalog sweep must not miss.
 
+**H13. `mobileAdminController.js` was missed by every task's file list — fixed 2026-08-03.**
+`mobile_admins` is in `AREA_SCOPED_TABLES` (TASK 3) and its `area_id` column is `NOT NULL` with no
+default, but `mobileAdminController.js` never appeared in any TASK 9-17 file list. `createMobileAdmin`'s
+`INSERT` never supplied `area_id`, so creating a mobile admin threw outright against the real schema —
+first flagged as a reported-not-fixed gap during TASK 16/17, now closed. Fix follows the same
+`requireOneArea` / `WHERE id = ? AND area_id = ?` pattern as `shops`/`riders`: `listMobileAdmins` and
+`createMobileAdmin` require one concrete area (reject missing/`'all'`, same as shops/riders/settings —
+§2.10), `updateMobileAdmin`'s existing-row lookup and `UPDATE` are now `WHERE id = ? AND area_id = ?`.
+`checkRoleExclusivity` (shop-owner/rider conflict) and the phone-duplicate check stay global identity
+lookups, unscoped — same reasoning as `mobile_admins.phone`/`riders.user_id` staying globally unique
+(§1.3: "a phone admins at most one area"). `mintMobileSession` and every helper in `utils/mobileAdmins.js`
+(`getMobileAdminForUser`, `isActiveMobileAdminPhone`) are unchanged: they look up by `user_id`/`phone`,
+a global identity key, not an area — same "identity is the boundary" reasoning TASK 15 already applied
+to riders' self-service endpoints. Note: mobile-admin JWTs still carry no `adminRole`/`areaId`
+(`authMiddleware.js`'s `requireAdmin` comment calls this out explicitly as "a separate, unrelated admin
+concept") — a mobile admin's own write requests to *other* area-scoped admin endpoints will still hit
+`requestAreaId`'s missing-middleware guard. That is a pre-existing, separately-scoped gap, not
+introduced or closed by this fix.
+
 ### 9.3 Ops and tooling gaps
 
 **H9. CI provisions MySQL and Mongo but never runs the migration.**

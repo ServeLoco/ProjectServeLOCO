@@ -28,7 +28,7 @@ app.use(express.json());
 app.use('/api/admin', adminRoutes);
 
 const adminToken = () => jwt.sign(
-  { id: 'admin-1', role: 'admin' },
+  { id: 'admin-1', role: 'admin', adminRole: 'area_admin', areaId: 1 },
   process.env.JWT_SECRET || 'test_jwt_secret_that_is_long_enough'
 );
 
@@ -157,6 +157,52 @@ describe('Admin mobile-admins API', () => {
 
     expect(res.statusCode).toBe(409);
     expect(res.body.code).toBe('ROLE_CONFLICT');
+  });
+
+  it('super_admin with no X-Area-Id gets 400, never a guessed area', async () => {
+    const superToken = jwt.sign(
+      { id: 'admin-1', role: 'admin', adminRole: 'super_admin' },
+      process.env.JWT_SECRET || 'test_jwt_secret_that_is_long_enough'
+    );
+
+    const res = await request(app)
+      .get('/api/admin/mobile-admins')
+      .set('Authorization', `Bearer ${superToken}`);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.code).toBe('VALIDATION_ERROR');
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('list scopes the query to the admin\'s own area_id', async () => {
+    pool.query.mockResolvedValueOnce([[]]);
+
+    await request(app)
+      .get('/api/admin/mobile-admins')
+      .set('Authorization', `Bearer ${adminToken()}`);
+
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toContain('ma.area_id = ?');
+    expect(params).toEqual([1]);
+  });
+
+  it('create INSERTs with the admin\'s area_id, never a null/omitted value', async () => {
+    pool.query
+      .mockResolvedValueOnce([[]]) // users lookup — no user yet
+      .mockResolvedValueOnce([{ insertId: 9 }]) // INSERT mobile_admins
+      .mockResolvedValueOnce([[{
+        id: 9, phone: '9876543210', display_name: 'New Admin', user_id: null,
+        active: 1, created_at: null, user_name: null,
+      }]]);
+
+    await request(app)
+      .post('/api/admin/mobile-admins')
+      .set('Authorization', `Bearer ${adminToken()}`)
+      .send({ phone: '9876543210', displayName: 'New Admin' });
+
+    const [insertSql, insertParams] = pool.query.mock.calls[1];
+    expect(insertSql).toContain('INSERT INTO mobile_admins (area_id,');
+    expect(insertParams[0]).toBe(1);
   });
 
   it('patch phone change while active fails 409 if new phone is a shop owner', async () => {
