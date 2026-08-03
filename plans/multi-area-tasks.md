@@ -1922,23 +1922,79 @@ warning also present before this task). All test rows and accounts deleted after
 
 ## Phase G — Payload optimization + customer app
 
-### [ ] TASK 27 — Catalog version, ETags, `/bootstrap`
+### [x] TASK 27 — Catalog version, ETags, `/bootstrap`
 **Spec:** §3.10, §9.4 item 4 · **Files:** `[api] src/utils/areaScope.js`,
 `src/controllers/bootstrapController.js` (new), `src/app.js`, public GET handlers
 
-- [ ] 27.1 `catalog_version` bumps inside `bustAreaCaches` (already wired in 6.5) — verify every
-      catalog/settings/zone write path reaches it.
-- [ ] 27.2 `ETag: "<areaId>-<catalogVersion>"` + `If-None-Match` → **304** on the public catalog,
-      categories, settings and zone-geometry endpoints.
-- [ ] 27.3 `GET /bootstrap?lat=&lng=` → `{ area, zone, settings, storeModes, zoneGeometry,
-      catalogVersion }` in one response.
-- [ ] 27.4 Pin resolving to no zone → the "we don't deliver here yet" shape, **never** the default
-      area (§2.4).
-- [ ] 27.5 **`settings` in the payload carries the resolved area's `upi_id`, `upi_qr_image_id`,
-      `support_phone`, `whatsapp_number`.** The UPI target decides which bank account receives real
-      money — get this wrong and payments go to the wrong area.
-- [ ] 27.6 Every existing endpoint keeps working unchanged; `/bootstrap` is purely additive.
-- [ ] 27.7 Measure: cold-start round trips before vs after. Record in the commit body.
+- [x] 27.1 Verified `bustAreaCaches` (hence `bumpCatalogVersion`) is already reached from every
+      catalog/settings/zone write path — categories, combos, coupons, dashboard, delivery zones,
+      product/category/store-mode libraries, products, settings, shops all call it. **One real gap
+      found and fixed:** `storeModeController.js`'s `createStoreMode`/`updateStoreMode` only ever called
+      `invalidateStoreModeCache(areaId)` directly — never `bustAreaCaches`, so a store-mode change
+      (which gates which dashboard/products a customer can even reach, §2.4 catalog data) never bumped
+      `catalog_version` and would never invalidate an ETag. Fixed by routing both through
+      `bustAreaCaches` instead (which already calls `invalidateStoreModeCache` internally, so this is
+      also strictly fewer lines). New `tests/storeModeCatalogVersion.test.js` (2 cases) covers it.
+- [x] 27.2 New `catalogETag` middleware in `areaScope.js` — `ETag: "<areaId>-<catalogVersion>"`,
+      short-circuits to a bare 304 on a matching `If-None-Match`, never blocks the real response if the
+      area lookup fails. Mounted after `resolveCustomerArea` on categories, settings, delivery-zones and
+      products. **Correctness guard added beyond the checklist's own wording:** `getProducts` and
+      `getCategories` both read query params (`search`, `categoryId`, `type`, `isCombo`, `featured`,
+      `offerId`, …) that narrow the response body without changing `catalog_version` — applying the flat
+      area+version ETag to those would 304 a genuinely different result set. Both routes wrap
+      `catalogETag` in a small guard that skips straight to the real handler whenever any such param is
+      present, so the ETag only ever applies to the true unfiltered catalog fetch.
+- [x] 27.3 New `bootstrapController.js` / `GET /api/bootstrap?latitude=&longitude=` →
+      `{ deliverable, area, zone, settings, storeModes, zoneGeometry, catalogVersion }`. Reuses
+      `resolveCustomerArea` (same §2.4 chain every other public endpoint already uses) plus three
+      extracted helpers — `getSettingsForArea` (from `settingsController.js`), `getActiveStoreModesForArea`
+      (from `storeModeController.js`), `getActiveZonesForArea` (from `deliveryZonesController.js`) — so
+      `/bootstrap`'s response can never drift from what the standalone endpoints themselves return; it
+      calls the exact same cached functions, not a reimplementation.
+- [x] 27.4 A pin that resolves to no zone (`req.areaId === null`, exactly `resolveCustomerArea`'s
+      existing "pin supplied but matched nothing" signal) returns
+      `{ deliverable: false, area: null, zone: null, settings: null, storeModes: [], zoneGeometry: [],
+      catalogVersion: null }` — never the default area. A pin genuinely absent from the request still
+      falls through `resolveCustomerArea`'s own `last_area_id` → default-area chain, same as every other
+      public endpoint (this is the documented "no pin at all" case, distinct from 27.4's "pin supplied,
+      matched nothing").
+- [x] 27.5 Live-verified against the real dev DB: `settings` in the response carries the resolved
+      area's real `upi_id` (`9350238504@mbk`), `upi_qr_image_id`, `support_phone`, `whatsapp_number` —
+      exactly what `GET /api/settings` itself returns for that area, since both go through
+      `getSettingsForArea`.
+- [x] 27.6 Confirmed by the full Jest suite (101/101 suites unaffected) and by hitting the real running
+      dev server: every extraction (`getSettingsForArea`, `getActiveStoreModesForArea`,
+      `getActiveZonesForArea`) is a pure refactor — the original `getSettings`/`getStoreModes`/
+      `listActiveZonesPublic` handlers call the same extracted function and still return byte-identical
+      shapes. `/bootstrap` is a new, additive route.
+- [x] 27.7 **Measured on the real running dev server, real local dev DB, not an estimate:** old
+      cold-start pattern (4 sequential calls — `/api/settings`, `/api/store-modes`,
+      `/api/delivery-zones`, `/api/categories`) averaged **~30ms** wall time across 3 runs; the new
+      single `/api/bootstrap` call averaged **~3-4ms** — a 4:1 reduction in round trips and roughly an
+      8-10x wall-time reduction on localhost, where round-trip latency is near zero. On a real mobile
+      network the saving is larger still, since each of the old approach's 4 round trips pays full RTT
+      (typically 100-300ms on 3G/4G) on top of server time — this is the case ETags/§3.10 specifically
+      calls out. Also confirmed live: a real `ETag: "1-9"` was returned for area 1's actual
+      `catalog_version`, and re-requesting with `If-None-Match: "1-9"` correctly 304d with an empty body.
+
+**Bug caught along the way, not in the original task list:** the `storeModeController.js` gap in 27.1
+above — a real, previously-silent correctness gap (store-mode edits never invalidated an ETag or bumped
+`catalog_version`) that this task's own verification step was specifically designed to catch.
+
+**Live verification (real dev server, real dev DB):** hit the actual running `api-dev` server (already
+up on port 3000) directly with `curl` — `GET /api/bootstrap` outside every zone returns
+`deliverable:false`; a real coordinate inside area 1's actual `gkp` zone returns the full real payload
+(real zone geometry, real settings incl. UPI id, real store modes); the ETag round-trip (fresh fetch →
+304 on repeat with the returned `If-None-Match`) was verified against the live server, not just mocked
+tests. The 27.7 timing measurement above is from this same live server.
+
+**Test churn:** `tests/storeModeCatalogVersion.test.js` (2 cases, the 27.1 fix), `catalogETag` describe
+block added to `tests/areaScope.test.js` (6 cases), new `tests/bootstrapController.test.js` (4 cases).
+Full API suite: 101/101 suites, 1099/1100 tests, 1 pre-existing skip. `npm run lint`: clean.
+
+**Guardrail:** informational violation count: 247 (unchanged from TASK 24's fix) — none of this task's
+queries touch a not-yet-swept table in a new way; the extracted helpers are the exact same queries the
+original handlers already ran, just callable directly.
 
 **Commit:** `feat: AREA TASK 27 — catalog version, ETags, bootstrap endpoint`
 
