@@ -82,33 +82,76 @@ async function revalidateCartForZoneChange(lat, lng) {
 }
 
 let lastSyncAt = 0;
+// Flipped by the first live GPS fix actually stored in this JS process. Module
+// scope is the point: a full app close+reopen builds a fresh JS context, so
+// this resets exactly when a cold start happens and never on a warm resume.
+// It is deliberately NOT set when the fix is skipped (permission not granted,
+// GPS timeout) — otherwise a cold start that only gets permission part-way
+// through would burn the override on a sync that never wrote anything.
+let coldStartGpsApplied = false;
+
+// Test seam. In the app this state resets only when the JS context is rebuilt
+// (a real cold start), which tests cannot reproduce — so they set the side of
+// that boundary they mean to exercise instead of depending on execution order.
+function __setColdStartGpsAppliedForTests(value) {
+  coldStartGpsApplied = value;
+}
+
+// Persisted coords/source land asynchronously from AsyncStorage. Deciding the
+// manual-pin branch before that arrives would both misread `source` and let a
+// late hydration overwrite the fix this sync just stored.
+function waitForHydration() {
+  const persistApi = useDeliveryLocationStore.persist;
+  if (!persistApi?.onFinishHydration || persistApi.hasHydrated?.()) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      unsubscribe?.();
+      resolve();
+    };
+    const unsubscribe = persistApi.onFinishHydration(finish);
+    // Hydration can land between the check above and this subscription, which
+    // would leave nothing left to fire `finish`.
+    if (persistApi.hasHydrated?.()) finish();
+  });
+}
 
 /**
  * One-shot: obtains the customer's delivery location — live GPS unless
  * they've dropped a manual pin (Home's "Change Location", which wins until
- * they change it again on a resume sync) — and checks it against the admin's
- * delivery zones. Feeds useDeliveryLocationStore, which Home reads for the
- * outside-zone banner and Cart/Checkout read for pricing. Exported so
+ * they change it again) — and checks it against the admin's delivery zones.
+ * Feeds useDeliveryLocationStore, which Home reads for the outside-zone
+ * banner and Cart/Checkout read for pricing. Exported so
  * LocationPermissionGate can fire it the instant permission is granted,
  * instead of waiting for the next foreground/background cycle.
  *
- * `coldStart`: true only for the mount-time call from a full app
- * close+reopen — live GPS overrides even a saved manual pin as the default
- * in that case. Foreground-resume calls omit it, keeping the manual pin's
- * normal precedence.
+ * The one exception to "manual pin wins": the first live fix after a cold
+ * start always becomes the default delivery location. That is tracked by
+ * process state rather than a caller-passed flag because the launch that ends
+ * up applying it varies — with permission already granted it is App's
+ * mount-time call, but when the customer grants permission during the launch
+ * that call bails early and the Home permission card / LocationPermissionGate
+ * fires the sync that actually lands the fix.
  */
-async function syncDeliveryLocation({ coldStart = false } = {}) {
+async function syncDeliveryLocation() {
   lastSyncAt = Date.now();
-  const {
-    coords, source, zoneId: previousZoneId,
-    setGpsLocation, setInsideZone, setZone, markInitialSyncComplete,
-  } = useDeliveryLocationStore.getState();
+  const { markInitialSyncComplete } = useDeliveryLocationStore.getState();
 
   const sync = async () => {
-    // A full app close+reopen always defaults to live GPS, even over a saved
-    // manual pin — only a background/foreground resume respects the manual
-    // pin's normal precedence.
-    if (!coldStart && source === 'manual' && coords) {
+    await waitForHydration();
+
+    const {
+      coords, source, zoneId: previousZoneId,
+      setGpsLocation, setInsideZone, setZone,
+    } = useDeliveryLocationStore.getState();
+
+    // See coldStartGpsApplied above — true only until this process has stored
+    // its first live fix, which is what lets a cold start override a manual pin.
+    const forceGps = !coldStartGpsApplied;
+
+    if (!forceGps && source === 'manual' && coords) {
       // Re-validate the saved pin (a zone may have since changed/been
       // removed) without moving it — only Home's Change Location does that.
       const result = await checkInsideZone(coords.lat, coords.lng);
@@ -164,8 +207,11 @@ async function syncDeliveryLocation({ coldStart = false } = {}) {
       result?.insideZone ?? null,
       result?.zoneName ?? null,
       result?.zoneId ?? null,
-      { force: coldStart },
+      { force: forceGps },
     );
+    // Only now — a fix was actually stored, so the cold-start override is
+    // spent and every later sync this process respects the manual pin again.
+    coldStartGpsApplied = true;
     if (result !== null && result.zoneId !== previousZoneId) {
       revalidateCartForZoneChange(latitude, longitude);
     }
@@ -190,11 +236,13 @@ async function syncDeliveryLocation({ coldStart = false } = {}) {
 /**
  * Global, always-mounted (once authenticated) background sync — runs
  * syncDeliveryLocation() on mount and again on each foreground resume
- * (throttled).
+ * (throttled). The mount call is normally the one that applies the
+ * cold-start live-GPS default; when permission is still ungranted it bails
+ * and whichever sync follows the grant applies it instead.
  */
 function useDeliveryLocationSync() {
   useEffect(() => {
-    syncDeliveryLocation({ coldStart: true });
+    syncDeliveryLocation();
 
     const sub = AppState.addEventListener('change', (next) => {
       if (next !== 'active') return;
@@ -206,4 +254,4 @@ function useDeliveryLocationSync() {
   }, []);
 }
 
-export { useDeliveryLocationSync, syncDeliveryLocation };
+export { useDeliveryLocationSync, syncDeliveryLocation, __setColdStartGpsAppliedForTests };
