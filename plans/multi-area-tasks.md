@@ -1838,22 +1838,83 @@ full API suite 98/98 suites, 1064/1065 tests, 1 pre-existing skip, unaffected ot
 
 **Commit:** `feat: AREA TASK 25 — admin area switcher and all-areas mode`
 
-### [ ] TASK 26 — Areas, Admins and Library pages
+### [x] TASK 26 — Areas, Admins and Library pages
 **Spec:** §2.10, §4.7 · **Files:** `[adm] src/pages/Areas.jsx`, `Admins.jsx`, `Library.jsx` + CSS,
 `src/App.jsx`, `src/pages/Products.jsx`
 
-- [ ] 26.1 Areas page — list, create, edit, deactivate, brand colour, logo, feature toggles.
-- [ ] 26.2 Admins page — list, create, edit, deactivate; role + area picker.
-- [ ] 26.3 Library page — **one page, three tabs** (Products / Categories / Store Modes), not three
-      pages. Grid of image + name + variants.
-- [ ] 26.4 Per-row "Add to area…" opening a price form; multi-select "Add to areas…" bulk action
-      with a per-area price map.
-- [ ] 26.5 Each library row shows which areas already carry it.
-- [ ] 26.6 `Products.jsx` gains "+ Add from Library" next to "+ New Product".
-- [ ] 26.7 `Products.jsx` renders library-managed fields (name, image, description, unit, variant
-      labels) **read-only** with a "Managed in Library — edit there" link (§2.5).
-- [ ] 26.8 Route the three pages in `App.jsx` behind a super-admin guard.
-- [ ] 26.9 **No parallel copies of the existing 23 pages** (§4.7).
+**Backend gap closed first, not in the original file list:** TASK 21 only ever built the edit-sync
+direction for the category/store-mode libraries (`propagateCategoryLibraryEdit`/
+`propagateStoreModeLibraryEdit`) — there was no create/browse/"add to area" endpoint for either,
+unlike the product library (TASK 19). The Library page's Categories/Store Modes tabs are meaningless
+without one, so this task added: `materializeCategoryToArea`/`materializeStoreModeToArea` in
+`productLibrary.js` (idempotent by `(area_id, slug)`, not just by the library-id link — an `is_system`
+store mode like `packed` is already auto-seeded into every area with no library link yet, so "adding"
+one from the library backlinks that existing row instead of colliding on
+`uniq_store_modes_area_slug`), two new controllers (`categoryLibraryController.js`,
+`storeModeLibraryController.js`, sharing a `libraryShared.js` `requireOneArea` with the product one),
+and their routes (`/admin/category-library`, `/admin/store-mode-library`, same
+GET-any-admin/write-super-admin/add-to-area-own-area shape as `/admin/library`). 20 new test cases in
+`tests/categoryStoreModeLibrary.test.js`; live-verified against the real dev DB (create → add-to-area →
+identity edit → confirmed the per-area row's name actually changed via propagation), cleaned up after.
+
+- [x] 26.1 `Areas.jsx` — list/create/edit/deactivate, brand colour (native colour picker), logo
+      (reuses the same `useImageCropper`/`ImageCropper` upload flow as Categories/Settings), and a raw
+      JSON textarea for feature toggles (`areas.features` has no defined schema anywhere in the
+      codebase — grepped to confirm zero existing usages — so a generic JSON editor is honest here
+      rather than inventing specific flag semantics nothing else defines).
+- [x] 26.2 `Admins.jsx` — list/create/edit/deactivate; role dropdown (`area_admin`/`super_admin`) with
+      an area picker that only renders for `area_admin` (mirrors the backend's own §2.9 invariant:
+      `super_admin` always has `areaId: null`).
+- [x] 26.3 `Library.jsx` — one page, three tabs (`Products`/`Categories`/`Store Modes`), a `TABS` array
+      mapping each to its own API client rather than three separate page components. Grid cards show
+      image (or a placeholder), name/label, slug, variant count (products only), and archived state.
+- [x] 26.4 Per-card "Add to area…" targets **the currently selected area** (the global switcher from
+      TASK 25 — §4.4 forbids any page from picking its own area, so this is the only coherent reading:
+      switch areas via the header, then "add to area" adds to that one). For products, opens a small
+      form asking for a categoryId (fetched live from `CategoriesApi.list()`, i.e. real categories in
+      the current area) and a price, pre-filled from the library's suggested price. Multi-select +
+      "Add N to areas…" bulk action (products tab only — categories/store-modes have no bulk endpoint)
+      opens one row per real area (from `AreasApi.list()`) for a categoryId + price each, then calls
+      `addToAreas` once per selected product. Documented simplification: since the client cannot send
+      an ad-hoc `X-Area-Id` override per request (§4.4's "only place" rule), the bulk form asks for a
+      raw categoryId per area rather than fetching each area's own category list inline.
+- [x] 26.5 Every card renders `areaIds`/`area_ids` (already returned by all three list endpoints since
+      TASK 19/this task) as area-code chips, resolved against the switcher's own already-fetched area
+      list.
+- [x] 26.6 `Products.jsx` — "📚 Add from Library" button next to "+ New Product", opening a search →
+      pick → categoryId/price form that calls the same `LibraryApi.addToArea` the Library page's own
+      per-card action uses.
+- [x] 26.7 `Products.jsx`'s edit drawer: `isLibraryManaged = Boolean(product.libraryProductId ||
+      product.library_product_id)` gates `readOnly` on the name, unit, description and every variant
+      label input, disables the image-upload zone (shows "Managed in Library" in its place), and shows
+      a banner linking to `/library`. Price, availability, category, shop and display order all stay
+      editable — those are area-owned (§2.5).
+- [x] 26.8 New `SuperAdminRoute.jsx` (mirrors `ProtectedRoute.jsx`'s shape) wraps `/areas`, `/admins`,
+      `/library` in `App.jsx`, redirecting to `/` for a non-super_admin. Sidebar's new "Multi-Area" nav
+      group only renders for `isSuperAdmin`.
+- [x] 26.9 Confirmed no parallel copies: Categories/StoreModes pages are untouched except for the
+      "pick an area" gate already added in TASK 25; `Products.jsx` gained the read-only gating and one
+      new button/modal in place, not a second products page.
+
+**Bug caught live while testing, not in the original task list:** none this task — TASK 25's `me()` and
+`areaPending` fixes already covered the boot-race classes of bug that would otherwise have surfaced
+here too; this task's live pass (creating a real library product, adding it to the real area, editing it
+in `Products.jsx`, checking the `area_admin` redirect) found no new ones.
+
+**Live verification (real browser, real backend):** reused the same throwaway `browsertest_super`/
+`browsertest_area` accounts from TASK 25 (recreated, deleted again after). Confirmed: Areas page lists
+the real Area 1 row; Admins page lists both real admins; Library → Products tab creates a real
+`product_library` row, "Add to area…" materializes it into Area 1 with a real category picked from a
+live `CategoriesApi.list()` call, and the area-code chip (`A1`) appears immediately after; `Products.jsx`
+shows the new product with its variant, and its edit drawer renders the read-only banner with the name
+field genuinely `readOnly: true` (checked via `input.readOnly` in the page, not just visually);
+`area_admin` login hitting `/library` directly redirects to `/` and shows no "Multi-Area" sidebar group
+at all. No new console errors on any of these (only the pre-existing, unrelated Dashboard duplicate-key
+warning also present before this task). All test rows and accounts deleted afterward.
+
+**Test churn:** new `tests/categoryStoreModeLibrary.test.js` (20 cases, see the backend-gap note above).
+`npm run lint` (admin app): clean. `npm run build:dev`: clean, 178 modules. Backend: full API suite
+99/99 suites, 1087/1088 tests, 1 pre-existing skip.
 
 **Commit:** `feat: AREA TASK 26 — areas, admins and library admin pages`
 
