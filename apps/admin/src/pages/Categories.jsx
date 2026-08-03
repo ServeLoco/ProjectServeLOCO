@@ -10,8 +10,12 @@ import ImageCropper from '../components/ImageCropper/ImageCropper';
 import './Categories.css';
 
 import { GENERIC_ERROR } from '../utils/constants';
+import PickAreaNotice from '../components/PickAreaNotice';
+import { useAreaStore } from '../stores/useAreaStore';
 
 export default function Categories() {
+  const { areaId } = useAreaStore() || {};
+  const isAllAreas = areaId === 'all';
   const { modes } = useStoreModes();
   const [categories, setCategories] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -21,9 +25,12 @@ export default function Categories() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingCategory, setEditingCategory] = useState(null);
 
+  // 25.4 — Categories can't be managed for "all" areas at once (the API
+  // 400s); skip the doomed fetch and render the inline notice instead.
   useEffect(() => {
+    if (isAllAreas) return;
     fetchCategories();
-  }, []);
+  }, [isAllAreas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchCategories = async () => {
     try {
@@ -79,6 +86,10 @@ export default function Categories() {
       setError(err.message || GENERIC_ERROR);
     }
   };
+
+  if (isAllAreas) {
+    return <div className="categories-container"><PickAreaNotice label="Categories" /></div>;
+  }
 
   return (
     <div className="categories-container">

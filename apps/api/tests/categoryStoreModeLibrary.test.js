@@ -108,6 +108,21 @@ describe('materializeCategoryToArea', () => {
     await expect(materializeCategoryToArea(fakeConn, { libraryCategoryId: 999, areaId: 2 }))
       .rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
+
+  // Bug fix (multi-area audit finding #11): uniq_categories_area_slug
+  // (area_id, slug) has no `deleted` column, so a SOFT-deleted category
+  // sharing this slug still occupies the unique key even though the
+  // existence check only looks at deleted = 0 rows — the INSERT used to
+  // throw an uncaught ER_DUP_ENTRY (opaque 500).
+  it('surfaces a clear CONFLICT (not an uncaught 500) when a soft-deleted category already holds this slug', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 10, name: 'Fruits', slug: 'fruits', type: 'packed', image_id: null, archived: 0 }]])
+      .mockResolvedValueOnce([[]]) // existence check finds nothing (it's soft-deleted, excluded by deleted = 0)
+      .mockRejectedValueOnce(Object.assign(new Error('dup'), { code: 'ER_DUP_ENTRY' })); // INSERT collides anyway
+
+    await expect(materializeCategoryToArea(fakeConn, { libraryCategoryId: 10, areaId: 2 }))
+      .rejects.toMatchObject({ code: 'CONFLICT' });
+  });
 });
 
 describe('materializeStoreModeToArea', () => {
@@ -194,8 +209,9 @@ describe('Category library admin endpoints (TASK 26)', () => {
       [[{ id: 10 }]], // FOR UPDATE existence check
       [{ affectedRows: 1 }], // UPDATE category_library
       [[{ id: 10, name: 'Renamed', slug: 'fruits', type: 'packed', image_id: null }]], // propagateCategoryLibraryEdit's own SELECT * FROM category_library
-      [{ affectedRows: 2 }], // propagateCategoryLibraryEdit's UPDATE categories
       [[{ area_id: 1 }, { area_id: 2 }]], // propagateCategoryLibraryEdit's SELECT DISTINCT area_id
+      [{ affectedRows: 1 }], // propagateCategoryLibraryEdit's per-area UPDATE categories, area 1 (bug fix #10)
+      [{ affectedRows: 1 }], // propagateCategoryLibraryEdit's per-area UPDATE categories, area 2
     ]);
     pool.getConnection.mockResolvedValueOnce(conn);
     pool.query.mockResolvedValueOnce([[{ id: 10, name: 'Renamed', slug: 'fruits', type: 'packed', image_id: null, archived: 0, created_at: null, updated_at: null }]]);
@@ -313,5 +329,24 @@ describe('Store-mode library admin endpoints (TASK 26)', () => {
 
     expect(res.statusCode).toEqual(201);
     expect(res.body.alreadyLinked).toBe(false);
+  });
+
+  // Bug fix (multi-area audit finding #7): store_modes.slug IS the
+  // canonical store_type value categories/combos/offers/coupons/
+  // dashboard_sections reference by string in every area — renaming it via
+  // the library used to fan out through propagateStoreModeLibraryEdit's
+  // batched UPDATE with zero validation, silently orphaning that reference
+  // everywhere. Unlike category_library.slug (still editable — categories
+  // freely rewrite their own slug per-area), this one must never be
+  // PATCHable after creation.
+  it('PATCH rejects a slug change — slug is immutable after creation', async () => {
+    const res = await request(app)
+      .patch('/api/admin/store-mode-library/20')
+      .set('Authorization', `Bearer ${superToken}`)
+      .send({ slug: 'renamed_mode' });
+
+    expect(res.statusCode).toEqual(400);
+    expect(res.body.code).toEqual('VALIDATION_ERROR');
+    expect(pool.query).not.toHaveBeenCalled();
   });
 });

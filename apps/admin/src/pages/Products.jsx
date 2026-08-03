@@ -11,10 +11,14 @@ import { useStoreModes } from '../hooks/useStoreModes';
 import ImageCropper from '../components/ImageCropper/ImageCropper';
 import MessageBanner from '../components/MessageBanner';
 import { GENERIC_ERROR } from '../utils/constants';
+import PickAreaNotice from '../components/PickAreaNotice';
+import { useAreaStore } from '../stores/useAreaStore';
 import './Products.css';
 
 export default function Products() {
   const navigate = useNavigate();
+  const { areaId } = useAreaStore() || {};
+  const isAllAreas = areaId === 'all';
   const { modes } = useStoreModes();
   const [products, setProducts] = useState([]);
   const [categories, setCategories] = useState([]);
@@ -45,16 +49,24 @@ export default function Products() {
   const [editingProduct, setEditingProduct] = useState(null);
   const [libraryPickerOpen, setLibraryPickerOpen] = useState(false);
 
-  useEffect(() => { fetchCategories(); fetchShops(); }, []);
+  // 25.4 — Products can't be listed/managed for "all" areas at once (the
+  // API 400s); skip the doomed fetches and render the inline notice instead
+  // of a generic "something went wrong" error.
+  useEffect(() => {
+    if (isAllAreas) return;
+    fetchCategories();
+    fetchShops();
+  }, [isAllAreas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const paginationRef = useRef({ page: 1 });
   useEffect(() => { paginationRef.current = pagination; }, [pagination]);
-  useAdminRefresh(() => fetchProducts(paginationRef.current.page));
+  useAdminRefresh(() => { if (!isAllAreas) fetchProducts(paginationRef.current.page); });
 
   useEffect(() => {
+    if (isAllAreas) return;
     const timer = setTimeout(() => fetchProducts(1), 500);
     return () => clearTimeout(timer);
-  }, [filters]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [filters, isAllAreas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchCategories = async () => {
     try {
@@ -294,6 +306,10 @@ export default function Products() {
 
   // Categories filtered by current mode tab for the move-to-category dropdown
   const filteredCategoriesForBulk = categories.filter(c => c.type === filters.type && !c.deleted);
+
+  if (isAllAreas) {
+    return <div className="products-container"><PickAreaNotice label="Products" /></div>;
+  }
 
   return (
     <div className="products-container">

@@ -114,6 +114,7 @@ describe('Admin riders API', () => {
       .mockResolvedValueOnce([[{ cnt: 0 }]])
       .mockResolvedValueOnce([[{ delivery_available: 1 }]])
       .mockResolvedValueOnce([{ affectedRows: 1 }])
+      .mockResolvedValueOnce([{ affectedRows: 1 }]) // bumpCatalogVersion's UPDATE areas (bug fix #8)
       .mockResolvedValueOnce([[{
         id: 3, user_id: 5, display_name: 'Ravi', phone: '999', active: 0, is_online: 0,
         last_heartbeat_at: null, created_at: null, user_name: 'Ravi', user_phone: '999',

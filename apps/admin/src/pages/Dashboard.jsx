@@ -8,6 +8,8 @@ import {
 import { Link } from 'react-router-dom';
 import { useAdminRefresh } from '../hooks/useAdminRefresh';
 import { GENERIC_ERROR } from '../utils/constants';
+import PickAreaNotice from '../components/PickAreaNotice';
+import { useAreaStore } from '../stores/useAreaStore';
 import './Dashboard.css';
 
 const ORDER_STATUS_LABELS = {
@@ -77,6 +79,8 @@ const IconChartBar = () => (
 );
 
 export default function Dashboard() {
+  const { areaId } = useAreaStore() || {};
+  const isAllAreas = areaId === 'all';
   const [metrics, setMetrics] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -103,9 +107,18 @@ export default function Dashboard() {
     refreshTimerRef.current = setTimeout(() => fetchDashboardData(false), delay);
   }, [fetchDashboardData]);
 
-  useEffect(() => { fetchDashboardData(); }, [fetchDashboardData]);
+  // 25.4 — the Dashboard mixes per-area KPIs with the same shop_open/
+  // delivery_available toggles the Settings page owns, so the API requires
+  // exactly one area (§2.10). Dashboard is also the DEFAULT landing route,
+  // so without this a super_admin switching to "All areas" lands straight on
+  // a dead-end "Failed to load dashboard / Try Again" that can never
+  // succeed. Skip the doomed fetch and render the inline notice instead.
+  useEffect(() => {
+    if (isAllAreas) { setLoading(false); return; }
+    fetchDashboardData();
+  }, [fetchDashboardData, isAllAreas]);
 
-  useAdminRefresh(fetchDashboardData);
+  useAdminRefresh(() => { if (!isAllAreas) fetchDashboardData(); });
 
   useEffect(() => {
     const unsubscribeOrders = subscribeAdminOrderEvents(() => queueDashboardRefresh());
@@ -155,6 +168,10 @@ export default function Dashboard() {
       setTogglingRain(false);
     }
   };
+
+  if (isAllAreas) {
+    return <div className="dashboard-container"><PickAreaNotice label="The Dashboard" /></div>;
+  }
 
   if (loading) {
     return (

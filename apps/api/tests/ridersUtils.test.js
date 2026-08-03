@@ -359,6 +359,13 @@ describe('syncDeliveryAvailabilityFromRiders', () => {
       expect.objectContaining({ deliveryAvailable: true, delivery_available: true })
     );
     expect(syncAreaShopOpenState).toHaveBeenCalledWith(1);
+    // Bug fix (multi-area audit finding #8): without this, a client holding
+    // the public /api/settings ETag kept getting a bare 304 with the stale
+    // delivery_available baked into its cached body.
+    expect(pool.query).toHaveBeenCalledWith(
+      'UPDATE areas SET catalog_version = catalog_version + 1 WHERE id = ?',
+      [1]
+    );
   });
 
   it('turns delivery_available OFF when zero active riders and currently on', async () => {

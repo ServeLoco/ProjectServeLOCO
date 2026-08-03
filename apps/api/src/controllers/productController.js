@@ -468,10 +468,21 @@ const getProductById = async (req, res) => {
   const { id } = req.params;
   const requestedCombo = req.query.type === 'combo' || req.query.isCombo === 'true' || req.query.is_combo === '1';
 
+  // Catalog data (§2.4): scoped like every other customer catalog route —
+  // never fetchable across areas, including by a guessed/crafted id (bug
+  // fix, multi-area audit finding #4). A pin outside every zone (null) or
+  // 'all' (not a real customer-route value, defensive only) can't resolve a
+  // single area to check against, so treat it the same as "not found" —
+  // never fall back to leaking whichever area the id happens to belong to.
+  const areaId = requestAreaId(req);
+  if (areaId === null || areaId === 'all') {
+    return res.status(404).json({ code: 'NOT_FOUND', message: requestedCombo ? 'Combo not found' : 'Product not found' });
+  }
+
   const loadCombo = async () => {
     const [comboRows] = await pool.query(
-      "SELECT p.*, 1 as is_combo, NULL as category_name, p.store_type as category_type FROM combos p WHERE p.id = ? AND p.deleted = 0",
-      [id]
+      "SELECT p.*, 1 as is_combo, NULL as category_name, p.store_type as category_type FROM combos p WHERE p.id = ? AND p.deleted = 0 AND p.area_id = ?",
+      [id, areaId]
     );
     if (comboRows.length === 0) return null;
     const combo = comboRows[0];
@@ -489,8 +500,8 @@ const getProductById = async (req, res) => {
   }
 
   const [rows] = await pool.query(
-    'SELECT p.*, c.name as category_name, c.type as category_type FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ? AND p.deleted = 0',
-    [id]
+    'SELECT p.*, c.name as category_name, c.type as category_type FROM products p LEFT JOIN categories c ON p.category_id = c.id WHERE p.id = ? AND p.deleted = 0 AND p.area_id = ?',
+    [id, areaId]
   );
 
   if (rows.length === 0) {

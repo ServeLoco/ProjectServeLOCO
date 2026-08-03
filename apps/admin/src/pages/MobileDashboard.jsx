@@ -3,6 +3,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { MobileDashboardApi, ProductsApi, CategoriesApi, OffersApi, CombosApi, ShopsApi } from '../api';
 import './MobileDashboard.css';
 import { GENERIC_ERROR } from '../utils/constants';
+import PickAreaNotice from '../components/PickAreaNotice';
+import { useAreaStore } from '../stores/useAreaStore';
 
 import { readList } from '../utils/apiResponse';
 import { normalizeImageUrl, FALLBACK_IMAGE, handleImageError } from '../utils/imageUrl';
@@ -17,6 +19,8 @@ const DEFAULT_MAX_VISIBLE_BY_SECTION = {
 
 
 export default function MobileDashboard() {
+  const { areaId } = useAreaStore() || {};
+  const isAllAreas = areaId === 'all';
   const { modes } = useStoreModes();
   const [sections, setSections] = useState([]);
   const [selectedSection, setSelectedSection] = useState(null);
@@ -67,7 +71,10 @@ export default function MobileDashboard() {
 
   // Load categories, offers and shops once for the linked_*_id selects and the
   // assign-item filters.
+  // 25.4 — App Home sections are per-area (the API 400s for "all"); skip the
+  // doomed preload + fetch and render the inline notice instead.
   useEffect(() => {
+    if (isAllAreas) return;
     (async () => {
       try {
         const [catRes, offRes, shopRes] = await Promise.all([
@@ -82,12 +89,13 @@ export default function MobileDashboard() {
         console.warn('MobileDashboard: failed to preload categories/offers/shops', err);
       }
     })();
-  }, []);
+  }, [isAllAreas]);
 
   useEffect(() => {
+    if (isAllAreas) return;
     fetchSections();
     setNewSectionForm(prev => ({ ...prev, store_type: storeType }));
-  }, [storeType]);
+  }, [storeType, isAllAreas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (selectedSection) {
@@ -574,6 +582,10 @@ export default function MobileDashboard() {
   // Shop/category filters only make sense for product_block — combos have no
   // shop_id, and category/offer sections' candidates ARE categories/offers.
   const showAssignFilters = selectedSection?.section_type === 'product_block';
+
+  if (isAllAreas) {
+    return <PickAreaNotice label="App Home" />;
+  }
 
   return (
     <div>

@@ -18,8 +18,21 @@ describe('decideSearchMode', () => {
   });
 
   it('strips boolean-mode operators before prefixing', () => {
-    expect(decideSearchMode('milk+cheese')).toEqual({ mode: 'fulltext', term: 'milk cheese*' });
+    // "milk+cheese" sanitizes to two words ("milk", "cheese") — a real
+    // multi-word term, so it gets AND semantics (bug fix #14) below, not a
+    // single trailing wildcard.
+    expect(decideSearchMode('milk+cheese')).toEqual({ mode: 'fulltext', term: '+milk +cheese*' });
     expect(decideSearchMode('"amul"')).toEqual({ mode: 'fulltext', term: 'amul*' });
+  });
+
+  // Bug fix (multi-area audit finding #14): plain boolean mode with no
+  // operators between words is an implicit OR, not the AND a substring LIKE
+  // used to imply — "fresh milk" would otherwise match any product
+  // containing just "fresh". Every earlier word gets a required `+`; only
+  // the last (still-being-typed) word keeps the prefix wildcard.
+  it('requires every word in a multi-word search (AND, not MySQL boolean mode\'s implicit OR)', () => {
+    expect(decideSearchMode('fresh milk')).toEqual({ mode: 'fulltext', term: '+fresh +milk*' });
+    expect(decideSearchMode('whole wheat bread')).toEqual({ mode: 'fulltext', term: '+whole +wheat +bread*' });
   });
 
   it('returns none for empty or pure-operator input, never an unfiltered scan', () => {

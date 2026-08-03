@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AdminInboxApi } from '../api';
 import { subscribeRealtime } from '../api/realtimeClient';
+import { useAreaStore } from '../stores/useAreaStore';
 import './AdminNotificationsBell.css';
 
 const TYPE_ICONS = {
@@ -40,8 +41,17 @@ export default function AdminNotificationsBell() {
   const wrapperRef = useRef(null);
   const buttonRef = useRef(null);
 
-  // Initial fetch
+  // Initial fetch. Gated on the area store being initialized: this bell lives
+  // in Header, OUTSIDE the routed subtree AdminLayout gates on `initialized`,
+  // so without this it fires before a super_admin's area is resolved (right
+  // after login, where areaHeader.reset() has just cleared the persisted
+  // pick) and the request 400s with no X-Area-Id. Re-runs the moment the area
+  // lands, and on every later area switch so the bell shows THAT area's inbox.
+  const { areaId, isSuperAdmin, initialized } = useAreaStore() || {};
+  const areaPending = isSuperAdmin && !initialized;
+
   useEffect(() => {
+    if (areaPending) return undefined;
     let cancelled = false;
     (async () => {
       try {
@@ -54,7 +64,7 @@ export default function AdminNotificationsBell() {
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [areaPending, areaId]);
 
   // Live push: new notification
   useEffect(() => {

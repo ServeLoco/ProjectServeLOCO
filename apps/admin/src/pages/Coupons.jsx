@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { CouponsApi, CustomersApi, DeliveryZonesApi } from '../api';
 import { Loading, ErrorState, EmptyState } from '../components/SharedUI';
 import { useStoreModes } from '../hooks/useStoreModes';
+import PickAreaNotice from '../components/PickAreaNotice';
+import { useAreaStore } from '../stores/useAreaStore';
 import './Coupons.css';
 
 const DISCOUNT_TYPES = [
@@ -221,6 +223,8 @@ function CouponPreview({ form }) {
 }
 
 export default function Coupons() {
+  const { areaId } = useAreaStore() || {};
+  const isAllAreas = areaId === 'all';
   const { modes } = useStoreModes();
   const appliesToOptions = [
     { value: 'all', label: 'All Orders' },
@@ -244,9 +248,12 @@ export default function Coupons() {
   const [selectedTemplateId, setSelectedTemplateId] = useState(null);
   const [zones, setZones] = useState([]);
 
+  // 25.4 — Coupons can't be managed for "all" areas at once (the API 400s);
+  // skip the doomed fetches and render the inline notice instead.
   useEffect(() => {
+    if (isAllAreas) return;
     DeliveryZonesApi.list().then(res => setZones(res.data || [])).catch(() => setZones([]));
-  }, []);
+  }, [isAllAreas]);
 
   const fetchCoupons = useCallback(async (params = {}) => {
     setLoading(true); setError(null);
@@ -259,7 +266,10 @@ export default function Coupons() {
     finally { setLoading(false); }
   }, []);
 
-  useEffect(() => { fetchCoupons(filters); }, [fetchCoupons, filters]);
+  useEffect(() => {
+    if (isAllAreas) { setLoading(false); return; }
+    fetchCoupons(filters);
+  }, [fetchCoupons, filters, isAllAreas]);
 
   const handleFilterChange = (field, value) => {
     setFilters(prev => ({ ...prev, [field]: value }));
@@ -434,6 +444,7 @@ export default function Coupons() {
     return '—';
   };
 
+  if (isAllAreas) return <PickAreaNotice label="Coupons" />;
   if (loading) return <Loading />;
   if (error) return <ErrorState message={error} />;
 

@@ -135,7 +135,21 @@ const updateCategoryLibraryItem = async (req, res) => {
   }
 
   const [rows] = await pool.query('SELECT * FROM category_library WHERE id = ?', [libraryCategoryId]);
-  res.status(200).json({ message: 'Library category updated', data: shape(rows[0]) });
+  const hasSkips = propagation?.skippedAreaIds?.length > 0;
+  res.status(200).json({
+    message: hasSkips
+      ? `Library category updated — skipped ${propagation.skippedAreaIds.length} area(s) where the new slug collides with an existing local category`
+      : 'Library category updated',
+    data: shape(rows[0]),
+    // Bug fix (multi-area audit finding #10): propagateCategoryLibraryEdit
+    // now skips (rather than fails outright) any single area whose slug
+    // collision would otherwise have rolled back every other area's update.
+    // Surface which areas were skipped so an admin can go rename the
+    // colliding local category and re-save, instead of silently losing the
+    // rename there.
+    skippedAreaIds: propagation?.skippedAreaIds || [],
+    skipped_area_ids: propagation?.skippedAreaIds || [],
+  });
 
   if (propagation) {
     Promise.all(propagation.areaIds.map((areaId) => bustAreaCaches(areaId)))
@@ -156,6 +170,7 @@ const archiveCategoryLibraryItem = async (req, res) => {
 const materializeErrorStatus = (code) => {
   if (code === 'NOT_FOUND') return 404;
   if (code === 'ARCHIVED' || code === 'VALIDATION_ERROR') return 400;
+  if (code === 'CONFLICT') return 409;
   return 500;
 };
 

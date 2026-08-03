@@ -7,9 +7,9 @@
  * rows pulled straight from the DB, and recoverStuckAssignments' own eligible-
  * rider lookup is scoped per order's area_id (utils/riders.js, TASK 15) — so
  * running this sweep globally across every area in one tick is safe, not a
- * gap. The one real gap: their admin.* socket emits still go to every
- * connected admin regardless of area (emitToAdmins), same as every other
- * realtime emit in the codebase until per-area rooms land in TASK 23.
+ * gap. Their admin.* socket emits (riderAssignment.js) key off each order's
+ * own area_id into emitToAdmins' per-area room (TASK 23), same as every
+ * other realtime emit in the codebase.
  */
 
 const config = require('../config/env');

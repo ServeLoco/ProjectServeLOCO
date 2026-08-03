@@ -1,7 +1,7 @@
 /**
  * TASK 9.7 — settings is genuinely one row per area, not a global singleton.
  */
-const { getSettings, updateSettings } = require('../src/controllers/settingsController');
+const { getSettings, getAdminSettings, updateSettings } = require('../src/controllers/settingsController');
 const { getImages } = require('../src/controllers/imageController');
 
 jest.mock('../src/db/mysql', () => ({
@@ -62,6 +62,49 @@ describe('getSettings — per area', () => {
     await getSettings(req, res);
 
     expect(pool.query).toHaveBeenLastCalledWith('SELECT * FROM settings WHERE area_id = ? LIMIT 1', [5]);
+  });
+});
+
+/**
+ * Bug fix (found by live multi-area flow testing): GET /api/admin/settings
+ * used to reuse the PUBLIC getSettings above, inheriting its deliberate
+ * default-area fallback (§2.4). On the admin route that silently served the
+ * DEFAULT area's row — including its `upi_id` — to a super_admin on "All
+ * areas" or with no area picked, indistinguishable from having genuinely
+ * selected area 1, while PATCH on the same screen correctly refused 'all'.
+ * Reading the wrong area's payment target is exactly the money-routing
+ * confusion §9.4 item 4 exists to prevent.
+ */
+describe('getAdminSettings — admin read refuses to guess an area', () => {
+  it("400s on 'all' instead of silently serving the default area's row", async () => {
+    const req = { areaId: 'all' };
+    const res = mockRes();
+    await getAdminSettings(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('400s when no area is picked (super_admin, no X-Area-Id)', async () => {
+    const req = { areaId: null };
+    const res = mockRes();
+    await getAdminSettings(req, res);
+
+    expect(res.status).toHaveBeenCalledWith(400);
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  // A fresh area id: getSettingsForArea reads through a TTL cache, and
+  // areas 1/2/5 are already warm from the getSettings tests above.
+  it('serves the requested area normally when exactly one is picked', async () => {
+    pool.query.mockResolvedValueOnce([[{ id: 7, area_id: 7, shop_open: 0, upi_qr_image_id: null }]]);
+
+    const req = { areaId: 7 };
+    const res = mockRes();
+    await getAdminSettings(req, res);
+
+    expect(pool.query).toHaveBeenCalledWith('SELECT * FROM settings WHERE area_id = ? LIMIT 1', [7]);
+    expect(res.json).toHaveBeenCalledWith({ data: expect.objectContaining({ area_id: 7 }) });
   });
 });
 

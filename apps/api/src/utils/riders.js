@@ -336,6 +336,18 @@ const syncDeliveryAvailabilityFromRiders = async (areaId) => {
         // best-effort
       }
 
+      // bumpCatalogVersion too (bug fix, multi-area audit finding #8) —
+      // without it, a client holding the public /api/settings ETag
+      // (catalogETag, keyed on <areaId>-<catalog_version>) kept getting a
+      // bare 304 with the stale delivery_available baked into its cached
+      // body, since nothing here ever changed catalog_version.
+      try {
+        const { bumpCatalogVersion } = require('./areaScope');
+        await bumpCatalogVersion(areaId);
+      } catch (_) {
+        // best-effort
+      }
+
       try {
         const { emitToAllCustomers } = require('../realtime/socket');
         emitToAllCustomers(areaId, 'settings.delivery_available.updated', {

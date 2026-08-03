@@ -372,14 +372,15 @@ describe('30.12 — a library category rename reaches both areas and changes nei
     const conn = {
       query: jest.fn()
         .mockResolvedValueOnce([[{ id: 9, name: 'Dairy', slug: 'dairy', type: 'packed', image_id: 3 }]])
-        .mockResolvedValueOnce([{ affectedRows: 2 }])
-        .mockResolvedValueOnce([[{ area_id: 1 }, { area_id: 2 }]]),
+        .mockResolvedValueOnce([[{ area_id: 1 }, { area_id: 2 }]])
+        .mockResolvedValueOnce([{ affectedRows: 1 }]) // per-area UPDATE, area 1 (bug fix #10)
+        .mockResolvedValueOnce([{ affectedRows: 1 }]), // per-area UPDATE, area 2
     };
 
     const { areaIds } = await propagateCategoryLibraryEdit(conn, 9);
 
     expect(areaIds.sort()).toEqual([1, 2]);
-    const [sql] = conn.query.mock.calls[1];
+    const [sql] = conn.query.mock.calls[2];
     expect(sql).toMatch(/UPDATE categories SET name = \?, slug = \?, type = \?, image_id = \?/);
     expect(sql).not.toMatch(/display_order/i);
   });

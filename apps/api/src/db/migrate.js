@@ -712,7 +712,18 @@ const migrate = async () => {
         [config.MYSQL_DATABASE, tableName, indexName]
       );
       if (rows.length === 0) {
-        await connection.query(`ALTER TABLE ${tableName} ADD FULLTEXT INDEX ${indexName} (${columns})`);
+        // ALGORITHM=INPLACE, LOCK=SHARED explicit (multi-area audit finding
+        // #17). LOCK=SHARED — not LOCK=NONE — is deliberate and is the
+        // strictest MySQL actually permits here: InnoDB refuses fulltext
+        // index creation with LOCK=NONE outright ("Fulltext index creation
+        // requires a lock", ER_ALTER_OPERATION_NOT_SUPPORTED_REASON), so
+        // asking for NONE fails the whole migration rather than degrading.
+        // SHARED keeps the table READABLE for the duration (customers keep
+        // browsing) and blocks only writes, where the COPY fallback would
+        // block both. Naming both explicitly makes the migration fail loudly
+        // if a server can't honor them, instead of silently falling back to
+        // a fully-blocking COPY rebuild.
+        await connection.query(`ALTER TABLE ${tableName} ADD FULLTEXT INDEX ${indexName} (${columns}), ALGORITHM=INPLACE, LOCK=SHARED`);
       }
     };
     await ensureFulltextIndex('products', 'ft_products_name', 'name');
@@ -756,8 +767,14 @@ const migrate = async () => {
     `);
     console.log('Platform flags table ready.');
 
-    // Dashboard section item lookups by section + type + active.
-    await ensureIndex('dashboard_section_items', 'idx_dsi_section_type_active', 'section_id, item_type, active');
+    // NOTE: dashboard_section_items' own index is NOT here — that table is
+    // created much further down this file, so indexing it at this point
+    // fails outright on a fresh database (ER_NO_SUCH_TABLE). It now lives
+    // immediately after its CREATE TABLE instead. Pre-existing bug, not
+    // introduced by the multi-area work: it only ever reproduced on a brand
+    // new database (a first-time local setup or a fresh environment), since
+    // any already-migrated database — including production — already had the
+    // table by the time this line ran.
     await ensureIndex('orders', 'idx_orders_rider', 'rider_id, status');
     // Rider-sweeper recover scan (every ~5s): orders stuck 'searching'/'offered'
     // with no rider. Leading on rider_assignment_status because those two values
@@ -1167,6 +1184,11 @@ const migrate = async () => {
     await ensureColumn('dashboard_section_items', 'starts_at', 'starts_at TIMESTAMP NULL DEFAULT NULL AFTER active');
     await ensureColumn('dashboard_section_items', 'ends_at', 'ends_at TIMESTAMP NULL DEFAULT NULL AFTER starts_at');
     await ensureColumn('dashboard_section_items', 'deleted_at', 'deleted_at TIMESTAMP NULL DEFAULT NULL AFTER ends_at');
+    // Dashboard section item lookups by section + type + active. Lives here,
+    // immediately after the table exists — NOT up in the main index block,
+    // which runs long before this CREATE TABLE and so failed outright on a
+    // fresh database (ER_NO_SUCH_TABLE).
+    await ensureIndex('dashboard_section_items', 'idx_dsi_section_type_active', 'section_id, item_type, active');
     console.log('Dashboard section items table ready.');
 
     // ---------------------------------------------------------
@@ -1763,20 +1785,33 @@ const migrate = async () => {
            LIMIT ${BATCH_SIZE}`
         );
         if (rows.length === 0) break;
-        for (const row of rows) {
+
+        // Bug fix (multi-area audit finding #16): fetch + hash every row in
+        // this batch CONCURRENTLY. The S3/disk round trip — not the CPU
+        // hash — is what made this serial loop slow enough to noticeably
+        // delay every deploy's boot; getStoredBuffer never touches
+        // `connection`, so there is nothing connection-specific to
+        // serialize here. Only the UPDATE writes below stay sequential
+        // against the single migration connection (mysql2 connections
+        // don't support concurrent queries on one connection).
+        const results = await Promise.all(rows.map(async (row) => {
           try {
             const buffer = await getStoredBuffer(row.storage_type, row.filename);
             const hash = crypto.createHash('sha256').update(buffer).digest('hex');
-            await connection.query('UPDATE images SET sha256 = ? WHERE id = ?', [hash, row.id]);
-            totalHashed += 1;
+            return { id: row.id, hash };
           } catch (e) {
             console.error(`[migrate] could not hash image id=${row.id} (${row.filename}):`, e.message);
-            // Mark it hashed-but-empty so the batch loop terminates instead of
-            // retrying the same unreadable row forever; a real dedupe miss on
-            // one broken row is fine, an infinite migration loop is not.
-            await connection.query("UPDATE images SET sha256 = '' WHERE id = ?", [row.id]);
-            totalSkipped += 1;
+            return { id: row.id, hash: '' };
           }
+        }));
+
+        for (const { id, hash } of results) {
+          // Empty string (not null) so the outer WHERE sha256 IS NULL loop
+          // terminates instead of retrying the same unreadable row forever;
+          // a real dedupe miss on one broken row is fine, an infinite
+          // migration loop is not.
+          await connection.query('UPDATE images SET sha256 = ? WHERE id = ?', [hash, id]);
+          if (hash) totalHashed += 1; else totalSkipped += 1;
         }
       }
       if (totalHashed > 0 || totalSkipped > 0) {

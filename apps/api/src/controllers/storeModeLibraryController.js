@@ -88,7 +88,22 @@ const updateStoreModeLibraryItem = async (req, res) => {
   const libraryStoreModeId = Number(req.params.id);
   const { slug, label, iconImageId, icon_image_id, archived } = req.body || {};
 
-  const fieldMap = { slug: 'slug', label: 'label', iconImageId: 'icon_image_id', icon_image_id: 'icon_image_id' };
+  // slug is deliberately NOT editable after creation (bug fix, multi-area
+  // audit finding #7). Unlike category_library.slug (which the per-area
+  // categoryController.js already lets `updateCategory` rewrite freely),
+  // store_modes.slug IS the canonical `store_type` value that
+  // categories.type, combos/offers/coupons/dashboard_sections.store_type
+  // all reference by string, in EVERY area at once via
+  // propagateStoreModeLibraryEdit's batched UPDATE. Renaming it here would
+  // silently orphan that reference everywhere the library item is used,
+  // and reusing another mode's slug isn't validated at all — the per-area
+  // updateStoreMode (storeModeController.js) already omits slug from its
+  // own editable fields for the same reason.
+  if (slug !== undefined) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'slug cannot be changed after creation — archive this item and create a new one instead' });
+  }
+
+  const fieldMap = { label: 'label', iconImageId: 'icon_image_id', icon_image_id: 'icon_image_id' };
   const sets = [];
   const values = [];
   const seenColumns = new Set();
@@ -117,7 +132,7 @@ const updateStoreModeLibraryItem = async (req, res) => {
       return res.status(404).json({ code: 'NOT_FOUND', message: 'Library store mode not found' });
     }
     await connection.query(`UPDATE store_mode_library SET ${sets.join(', ')} WHERE id = ?`, [...values, libraryStoreModeId]);
-    if (slug !== undefined || label !== undefined || iconImageId !== undefined || icon_image_id !== undefined) {
+    if (label !== undefined || iconImageId !== undefined || icon_image_id !== undefined) {
       propagation = await propagateStoreModeLibraryEdit(connection, libraryStoreModeId);
     }
     await connection.commit();

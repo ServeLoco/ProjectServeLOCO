@@ -114,6 +114,18 @@ describe('Admin area resolution (TASK 8 — requireAdmin -> resolveAdminArea)', 
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.statusCode).toEqual(200);
   });
+
+  // Bug fix (multi-area audit finding #2): a pre-TASK-7 token still
+  // authenticates (above), but any area-aware endpoint used to throw an
+  // uncaught error the instant it read requestAreaId(req) — since req.areaId
+  // is left unset by resolveAdminArea's no-op — which the global error
+  // handler turned into an opaque 500 instead of a clean re-login prompt.
+  it('a pre-TASK-7 admin token hitting an area-aware endpoint gets a clean 401, not a 500', async () => {
+    const res = await request(app)
+      .get('/api/admin/dashboard')
+      .set('Authorization', `Bearer ${adminToken}`);
+    expect(res.statusCode).toEqual(401);
+  });
 });
 
 describe('requireSuperAdmin', () => {

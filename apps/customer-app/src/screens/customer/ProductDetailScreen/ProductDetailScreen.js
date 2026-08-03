@@ -17,7 +17,7 @@ import {
   VariantSheet,
 } from '../../../components';
 import { colors, typography, spacing, radius, shadows, layout } from '../../../theme';
-import { useCartStore } from '../../../stores';
+import { useCartStore, useDeliveryLocationStore } from '../../../stores';
 import { useAuthGate } from '../../../hooks';
 import { productsApi } from '../../../api';
 import { trackEvent } from '../../../api/analyticsClient';
@@ -58,6 +58,7 @@ export default function ProductDetailScreen() {
   const [loadError, setLoadError] = useState('');
 
   // Stores
+  const deliveryCoords = useDeliveryLocationStore(state => state.coords);
   const items = useCartStore(state => state.items);
   const addItem = useCartStore(state => state.addItem);
   const addCombo = useCartStore(state => state.addCombo);
@@ -125,7 +126,14 @@ export default function ProductDetailScreen() {
     }
 
     // Background revalidate (always). Fresh result replaces initial paint wholesale.
-    productsApi.getProduct(productId, productType ? { type: productType } : undefined)
+    // latitude/longitude let the server resolve THIS area (multi-area audit
+    // finding #4 — without a pin, resolveCustomerArea falls back to the
+    // default area regardless of which area the id actually belongs to).
+    productsApi.getProduct(productId, {
+      ...(productType ? { type: productType } : undefined),
+      latitude: deliveryCoords?.lat,
+      longitude: deliveryCoords?.lng,
+    })
       .then(response => {
         if (!isMounted) return;
         const data = response?.product || response?.data || response;
@@ -158,7 +166,11 @@ export default function ProductDetailScreen() {
   const hasFocusedOnceRef = useRef(false);
   const revalidateProductSilently = useCallback(() => {
     if (!productId) return;
-    productsApi.getProduct(productId, productType ? { type: productType } : undefined)
+    productsApi.getProduct(productId, {
+      ...(productType ? { type: productType } : undefined),
+      latitude: deliveryCoords?.lat,
+      longitude: deliveryCoords?.lng,
+    })
       .then(response => {
         const data = response?.product || response?.data || response;
         const { normalized, related } = applyProductPayload(data);
@@ -169,7 +181,7 @@ export default function ProductDetailScreen() {
         }
       })
       .catch(() => {});
-  }, [productId, productType, cacheKey]);
+  }, [productId, productType, cacheKey, deliveryCoords]);
 
   useFocusEffect(
     useCallback(() => {

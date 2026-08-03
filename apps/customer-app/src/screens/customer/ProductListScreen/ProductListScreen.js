@@ -274,6 +274,9 @@ export default function ProductListScreen() {
         response = await dashboardApi.getSectionItems(sectionSlug, {
           storeType: sectionStoreType,
           include_closed_shops: 1,
+          // Same reasoning as the getProducts pin below.
+          latitude: deliveryCoords?.lat,
+          longitude: deliveryCoords?.lng,
         });
         if (isStale()) return;
         filtered = asArray(response, ['items']).map(normalizeProduct);
@@ -293,6 +296,12 @@ export default function ProductListScreen() {
           include_closed_shops: 1,
           limit: PAGE_SIZE,
           offset: pageOffset,
+          // Without a pin, resolveCustomerArea (server) falls back to the
+          // default area for this route — every customer would browse the
+          // SAME area's catalog regardless of where they actually are
+          // (multi-area audit finding #4).
+          latitude: deliveryCoords?.lat,
+          longitude: deliveryCoords?.lng,
         });
         if (isStale()) return;
         filtered = asArray(response, ['products']).map(normalizeProduct);

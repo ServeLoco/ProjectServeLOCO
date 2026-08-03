@@ -8,6 +8,8 @@ import ShopLocationPicker from '../components/ShopLocationPicker';
 import ShopManageModal from './ShopManageModal';
 import { readList } from '../utils/apiResponse';
 import { GENERIC_ERROR } from '../utils/constants';
+import PickAreaNotice from '../components/PickAreaNotice';
+import { useAreaStore } from '../stores/useAreaStore';
 import './Shops.css';
 
 // Patches (or drops) a shop row from a live admin.shop.updated event —
@@ -35,6 +37,8 @@ function mergeShopUpdate(list, payload) {
 }
 
 export default function Shops() {
+  const { areaId } = useAreaStore() || {};
+  const isAllAreas = areaId === 'all';
   const [shops, setShops] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -47,9 +51,12 @@ export default function Shops() {
   const [manageShop, setManageShop] = useState(null);
   const [manageTab, setManageTab] = useState('overview');
 
+  // 25.4 — Shops can't be managed for "all" areas at once (the API 400s);
+  // skip the doomed fetch and render the inline notice instead.
   useEffect(() => {
+    if (isAllAreas) return;
     fetchShops();
-  }, []);
+  }, [isAllAreas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     connectAdminRealtime();
@@ -146,6 +153,10 @@ export default function Shops() {
       throw err;
     }
   };
+
+  if (isAllAreas) {
+    return <div className="shops-container"><PickAreaNotice label="Shops" /></div>;
+  }
 
   return (
     <div className="shops-container">

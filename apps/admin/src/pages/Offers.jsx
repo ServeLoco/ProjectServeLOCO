@@ -11,8 +11,12 @@ import ImageCropper from '../components/ImageCropper/ImageCropper';
 import './Offers.css';
 
 import { GENERIC_ERROR } from '../utils/constants';
+import PickAreaNotice from '../components/PickAreaNotice';
+import { useAreaStore } from '../stores/useAreaStore';
 
 export default function Offers() {
+  const { areaId } = useAreaStore() || {};
+  const isAllAreas = areaId === 'all';
   const { modes } = useStoreModes();
   const [offers, setOffers] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -22,9 +26,12 @@ export default function Offers() {
   const [editingOffer, setEditingOffer] = useState(null);
   const [storeType, setStoreType] = useState('packed');
 
+  // 25.4 — Offers can't be managed for "all" areas at once (the API 400s);
+  // skip the doomed fetch and render the inline notice instead.
   useEffect(() => {
+    if (isAllAreas) return;
     fetchOffers();
-  }, [storeType]);
+  }, [storeType, isAllAreas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchOffers = async () => {
     try {
@@ -68,6 +75,10 @@ export default function Offers() {
       setError(GENERIC_ERROR);
     }
   };
+
+  if (isAllAreas) {
+    return <div className="offers-container"><PickAreaNotice label="Offers" /></div>;
+  }
 
   return (
     <div className="offers-container">

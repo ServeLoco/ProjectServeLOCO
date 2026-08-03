@@ -132,14 +132,27 @@ async function resolveAreaIdForPricing(lat, lng) {
 // ---------------------------------------------------------------------
 
 /**
- * The single place req.areaId is read from. Throws if area middleware
- * never ran (req.areaId still undefined) — a bug at the call site, not a
- * legitimate state. `null` (customer: no resolvable area; super_admin: no
- * area picked) and `'all'` (super_admin cross-area) are both valid
- * resolved values and are returned as-is.
+ * The single place req.areaId is read from. `null` (customer: no resolvable
+ * area; super_admin: no area picked) and `'all'` (super_admin cross-area)
+ * are both valid resolved values and are returned as-is.
+ *
+ * req.areaId still undefined here is one of two cases:
+ *  - req.admin exists but adminRole doesn't: a legacy admin token minted
+ *    before this deploy (resolveAdminArea no-ops for it — see
+ *    authMiddleware.js's requireAdmin). A real, user-facing condition, not a
+ *    bug — surface a clean 401 so the client re-logs in, rather than an
+ *    opaque 500 (multi-area audit finding #2).
+ *  - anything else: area-resolution middleware genuinely never ran on this
+ *    route — a bug at the call site.
  */
 function requestAreaId(req) {
   if (req.areaId === undefined) {
+    if (req.admin && req.admin.adminRole === undefined) {
+      const err = new Error('Session is no longer valid. Please log in again.');
+      err.statusCode = 401;
+      err.code = 'UNAUTHORIZED';
+      throw err;
+    }
     throw new Error('req.areaId was read before area-resolution middleware ran');
   }
   return req.areaId;

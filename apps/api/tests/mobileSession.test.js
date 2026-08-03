@@ -38,24 +38,31 @@ describe('POST /api/admin/mobile-session', () => {
   });
 
   it('mints an admin token for an active mobile admin found by user_id', async () => {
-    pool.query.mockResolvedValueOnce([[{ id: 4, phone: '9876543210', user_id: 12, active: 1 }]]);
+    pool.query.mockResolvedValueOnce([[{ id: 4, phone: '9876543210', user_id: 12, active: 1, area_id: 7 }]]);
 
     const res = await request(app)
       .post('/api/admin/mobile-session')
       .set('Authorization', `Bearer ${customerToken(12)}`);
 
     expect(res.statusCode).toBe(200);
-    expect(res.body.user).toEqual({ id: 4, role: 'admin', mobileAdminId: 4 });
+    // adminRole/areaId are required on the token (bug fix, multi-area audit
+    // finding #1) — without them, requestAreaId() throws for every
+    // admin-route controller a mobile admin's app calls afterward.
+    expect(res.body.user).toEqual({
+      id: 4, role: 'admin', mobileAdminId: 4, adminRole: 'area_admin', areaId: 7, area_id: 7,
+    });
     const decoded = verifyToken(res.body.token);
     expect(decoded.role).toBe('admin');
     expect(decoded.sub).toBe('mobile:4');
+    expect(decoded.adminRole).toBe('area_admin');
+    expect(decoded.areaId).toBe(7);
   });
 
   it('backfills user_id when found by phone but not yet linked', async () => {
     pool.query
       .mockResolvedValueOnce([[]]) // not found by user_id
       .mockResolvedValueOnce([[{ phone: '9876543210' }]]) // users lookup for phone
-      .mockResolvedValueOnce([[{ id: 4, phone: '9876543210', user_id: null, active: 1 }]]) // found by phone
+      .mockResolvedValueOnce([[{ id: 4, phone: '9876543210', user_id: null, active: 1, area_id: 7 }]]) // found by phone
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // UPDATE user_id backfill
 
     const res = await request(app)

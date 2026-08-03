@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { RidersApi, subscribeRealtime, connectAdminRealtime } from '../api';
 import { readList } from '../utils/apiResponse';
 import { GENERIC_ERROR } from '../utils/constants';
+import PickAreaNotice from '../components/PickAreaNotice';
+import { useAreaStore } from '../stores/useAreaStore';
 import './Shops.css';
 
 function mergeRiderUpdate(list, payload) {
@@ -37,6 +39,8 @@ function mergeRiderUpdate(list, payload) {
 }
 
 export default function Riders() {
+  const { areaId } = useAreaStore() || {};
+  const isAllAreas = areaId === 'all';
   const [riders, setRiders] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -62,9 +66,12 @@ export default function Riders() {
     }
   }, []);
 
+  // 25.4 — Riders can't be managed for "all" areas at once (the API 400s);
+  // skip the doomed fetch and render the inline notice instead.
   useEffect(() => {
+    if (isAllAreas) return;
     fetchRiders();
-  }, [fetchRiders]);
+  }, [fetchRiders, isAllAreas]);
 
   useEffect(() => {
     connectAdminRealtime();
@@ -174,6 +181,10 @@ export default function Riders() {
   const handleRiderPatched = useCallback((payload) => {
     setRiders((prev) => mergeRiderUpdate(prev, payload));
   }, []);
+
+  if (isAllAreas) {
+    return <div className="shops-container"><PickAreaNotice label="Riders" /></div>;
+  }
 
   return (
     <div className="shops-container">

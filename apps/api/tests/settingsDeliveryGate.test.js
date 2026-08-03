@@ -97,6 +97,7 @@ describe('PATCH /api/admin/settings — delivery_available master gate', () => {
       .mockResolvedValueOnce([{}])                           // UPDATE delivery_available = 0
       .mockResolvedValueOnce([[{ delivery_available: 0 }]])  // sync: settings lookup
       .mockResolvedValueOnce([{ affectedRows: 1 }])          // sync: UPDATE shop_open = 0
+      .mockResolvedValueOnce([{ affectedRows: 1 }])          // sync: bumpCatalogVersion (bug fix #8)
       .mockResolvedValueOnce([[{ delivery_available: 0, shop_open: 0 }]]); // return updated
 
     const res = await request(app)
@@ -115,6 +116,7 @@ describe('PATCH /api/admin/settings — delivery_available master gate', () => {
       .mockResolvedValueOnce([[{ delivery_available: 1 }]])            // sync: settings lookup
       .mockResolvedValueOnce([[{ total_active: 2, total_open: 1 }]])   // sync: shops SUM
       .mockResolvedValueOnce([{ affectedRows: 1 }])                    // sync: UPDATE shop_open = 1
+      .mockResolvedValueOnce([{ affectedRows: 1 }])                    // sync: bumpCatalogVersion (bug fix #8)
       .mockResolvedValueOnce([[{ delivery_available: 1, shop_open: 1 }]]); // return updated
 
     const res = await request(app)

@@ -67,7 +67,18 @@ const AREA_2 = { id: 2, code: 'A2', name: 'Area 2', active: 1, is_default: 0, ti
 
 describe('Area + admin management (TASK 24)', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    // resetAllMocks (not clearAllMocks) — a test whose real code path takes
+    // an early-return branch consumes fewer queued mockResolvedValueOnce
+    // values than it queued; clearAllMocks does not drain that leftover
+    // queue, silently corrupting the NEXT test's mock sequence. resetAllMocks
+    // also wipes the jest.mock() factory-level default implementations
+    // below (not just once-queues), so they have to be re-established here
+    // every time, not just once at module load.
+    jest.resetAllMocks();
+    bcrypt.hash.mockResolvedValue('hashed-password');
+    areaScope.seedSystemStoreModes.mockResolvedValue(undefined);
+    areaScope.bustAreaCaches.mockResolvedValue(undefined);
+    createSettingsForArea.mockResolvedValue(undefined);
   });
 
   describe('access control', () => {
@@ -109,6 +120,30 @@ describe('Area + admin management (TASK 24)', () => {
         .post('/api/admin/areas')
         .set('Authorization', `Bearer ${superToken}`)
         .send({ name: 'No code' });
+      expect(res.statusCode).toEqual(400);
+    });
+
+    // Bug fix (multi-area audit finding, minor): areas.code is VARCHAR(16)
+    // and lands verbatim in every order number this area generates
+    // (OD-<date>-<CODE>-<seq>) — an overlong or non-alphanumeric code used
+    // to reach the INSERT unchecked, either overflowing the column (a 500
+    // mid-transaction) or embedding punctuation in a generated order number.
+    it('400s a code longer than 16 characters, without ever writing to the DB', async () => {
+      pool.query.mockResolvedValueOnce([[{ areas_sweep_complete: 1 }]]);
+      const res = await request(app)
+        .post('/api/admin/areas')
+        .set('Authorization', `Bearer ${superToken}`)
+        .send({ code: 'A'.repeat(17), name: 'Too Long' });
+      expect(res.statusCode).toEqual(400);
+      expect(pool.query).toHaveBeenCalledTimes(1); // only the sweep-flag check
+    });
+
+    it('400s a code containing non-alphanumeric characters', async () => {
+      pool.query.mockResolvedValueOnce([[{ areas_sweep_complete: 1 }]]);
+      const res = await request(app)
+        .post('/api/admin/areas')
+        .set('Authorization', `Bearer ${superToken}`)
+        .send({ code: 'A-2', name: 'Bad Chars' });
       expect(res.statusCode).toEqual(400);
     });
 
@@ -188,6 +223,31 @@ describe('Area + admin management (TASK 24)', () => {
       expect(res.body.data.name).toEqual('Renamed');
       expect(res.body.data.active).toBe(false);
       expect(areaScope.invalidateAreasCache).toHaveBeenCalled();
+    });
+
+    // Bug fix (multi-area audit finding #9): deactivating the default area
+    // used to be a plain field update — getDefaultArea() filters
+    // activeOnly, so this would leave every pin-less customer request
+    // resolving to req.areaId = null (empty catalog, platform-wide).
+    it('400s deactivating the default area, without ever writing to the DB', async () => {
+      areaScope.getAreaById.mockResolvedValueOnce(AREA_1);
+      const res = await request(app)
+        .patch('/api/admin/areas/1')
+        .set('Authorization', `Bearer ${superToken}`)
+        .send({ active: false });
+      expect(res.statusCode).toEqual(400);
+      expect(res.body.code).toEqual('VALIDATION_ERROR');
+      expect(pool.query).not.toHaveBeenCalled();
+    });
+
+    it('still allows other fields to be updated on the default area', async () => {
+      areaScope.getAreaById.mockResolvedValueOnce(AREA_1).mockResolvedValueOnce({ ...AREA_1, name: 'Renamed Default' });
+      pool.query.mockResolvedValueOnce([{ affectedRows: 1 }]);
+      const res = await request(app)
+        .patch('/api/admin/areas/1')
+        .set('Authorization', `Bearer ${superToken}`)
+        .send({ name: 'Renamed Default' });
+      expect(res.statusCode).toEqual(200);
     });
   });
 
@@ -476,6 +536,73 @@ describe('Area + admin management (TASK 24)', () => {
         .set('Authorization', `Bearer ${superToken}`)
         .send({ role: 'super_admin' }); // still carries area_id: 2 from the existing row
       expect(res.statusCode).toEqual(400);
+    });
+
+    // Bug fix (multi-area audit finding #9): nothing stopped a super_admin
+    // from deactivating or demoting themselves — or the only OTHER
+    // super_admin — leaving zero accounts that could ever reach this
+    // endpoint (or /admin/areas) again.
+    it('400s deactivating the last active super_admin, without ever writing to the DB', async () => {
+      pool.query
+        .mockResolvedValueOnce([[{ id: 1, username: 'super', role: 'super_admin', area_id: null, active: 1 }]])
+        .mockResolvedValueOnce([[{ cnt: 0 }]]); // zero OTHER active super_admins
+
+      const res = await request(app)
+        .patch('/api/admin/admins/1')
+        .set('Authorization', `Bearer ${superToken}`)
+        .send({ active: false });
+
+      expect(res.statusCode).toEqual(400);
+      expect(res.body.code).toEqual('VALIDATION_ERROR');
+      expect(pool.query).toHaveBeenCalledTimes(2);
+    });
+
+    it('400s demoting the last active super_admin to area_admin', async () => {
+      areaScope.getAreaById.mockResolvedValueOnce(AREA_1); // validateRoleAreaInvariant's own check
+      pool.query
+        .mockResolvedValueOnce([[{ id: 1, username: 'super', role: 'super_admin', area_id: null, active: 1 }]])
+        .mockResolvedValueOnce([[{ cnt: 0 }]]);
+
+      const res = await request(app)
+        .patch('/api/admin/admins/1')
+        .set('Authorization', `Bearer ${superToken}`)
+        .send({ role: 'area_admin', areaId: 1 });
+
+      expect(res.statusCode).toEqual(400);
+      // Confirms this 400 came from the last-super_admin guard, not the
+      // separate role/area invariant check (which would have short-circuited
+      // after only 1 pool.query call, never reaching the COUNT query).
+      expect(pool.query).toHaveBeenCalledTimes(2);
+    });
+
+    it('allows deactivating a super_admin when another active one remains', async () => {
+      pool.query
+        .mockResolvedValueOnce([[{ id: 1, username: 'super', role: 'super_admin', area_id: null, active: 1 }]])
+        .mockResolvedValueOnce([[{ cnt: 1 }]]) // one OTHER active super_admin
+        .mockResolvedValueOnce([{ affectedRows: 1 }])
+        .mockResolvedValueOnce([[{ id: 1, username: 'super', role: 'super_admin', area_id: null, area_code: null, display_name: null, active: 0, created_at: null }]]);
+
+      const res = await request(app)
+        .patch('/api/admin/admins/1')
+        .set('Authorization', `Bearer ${superToken}`)
+        .send({ active: false });
+
+      expect(res.statusCode).toEqual(200);
+    });
+
+    it('does not run the last-super_admin check for an already-inactive super_admin', async () => {
+      pool.query
+        .mockResolvedValueOnce([[{ id: 1, username: 'super', role: 'super_admin', area_id: null, active: 0 }]])
+        .mockResolvedValueOnce([{ affectedRows: 1 }])
+        .mockResolvedValueOnce([[{ id: 1, username: 'super', role: 'super_admin', area_id: null, area_code: null, display_name: null, active: 0, created_at: null }]]);
+
+      const res = await request(app)
+        .patch('/api/admin/admins/1')
+        .set('Authorization', `Bearer ${superToken}`)
+        .send({ displayName: 'Renamed' });
+
+      expect(res.statusCode).toEqual(200);
+      expect(pool.query).toHaveBeenCalledTimes(3);
     });
   });
 });

@@ -10,9 +10,13 @@ import ImageCropper from '../components/ImageCropper/ImageCropper';
 import MessageBanner from '../components/MessageBanner';
 import { useAdminRefresh } from '../hooks/useAdminRefresh';
 import { GENERIC_ERROR } from '../utils/constants';
+import PickAreaNotice from '../components/PickAreaNotice';
+import { useAreaStore } from '../stores/useAreaStore';
 import './Products.css';
 
 export default function Combos() {
+  const { areaId } = useAreaStore() || {};
+  const isAllAreas = areaId === 'all';
   // Combos are bundles and do not require category.
   const { modes } = useStoreModes();
   const [products, setProducts] = useState([]);
@@ -36,17 +40,21 @@ export default function Combos() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
 
+  // 25.4 — Combos can't be managed for "all" areas at once (the API 400s);
+  // skip the doomed fetches and render the inline notice instead.
   useEffect(() => {
+    if (isAllAreas) return;
     fetchComboProducts();
-  }, []);
+  }, [isAllAreas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const paginationRef = useRef({ page: 1 });
   useEffect(() => { paginationRef.current = pagination; }, [pagination]);
-  useAdminRefresh(() => fetchProducts(paginationRef.current.page));
+  useAdminRefresh(() => { if (!isAllAreas) fetchProducts(paginationRef.current.page); });
 
   useEffect(() => {
+    if (isAllAreas) return;
     fetchProducts(1);
-  }, [filters]);
+  }, [filters, isAllAreas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const readProducts = (res) => readList(res, ['products', 'combos']);
 
@@ -169,6 +177,10 @@ export default function Combos() {
     setDrawerOpen(false);
     setEditingProduct(null);
   };
+
+  if (isAllAreas) {
+    return <div className="products-container"><PickAreaNotice label="Combos" /></div>;
+  }
 
   return (
     <div className="products-container">

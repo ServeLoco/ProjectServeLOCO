@@ -181,7 +181,7 @@ const mintMobileSession = async (req, res) => {
   const userId = req.user.id;
 
   const [rows] = await pool.query(
-    'SELECT id, phone, user_id, active FROM mobile_admins WHERE user_id = ? AND active = 1 LIMIT 1',
+    'SELECT id, phone, user_id, active, area_id FROM mobile_admins WHERE user_id = ? AND active = 1 LIMIT 1',
     [userId]
   );
   let mobileAdmin = rows[0] || null;
@@ -193,7 +193,7 @@ const mintMobileSession = async (req, res) => {
     const phone = userRows[0]?.phone;
     if (phone) {
       const [byPhone] = await pool.query(
-        'SELECT id, phone, user_id, active FROM mobile_admins WHERE phone = ? AND active = 1 LIMIT 1',
+        'SELECT id, phone, user_id, active, area_id FROM mobile_admins WHERE phone = ? AND active = 1 LIMIT 1',
         [phone]
       );
       mobileAdmin = byPhone[0] || null;
@@ -207,10 +207,16 @@ const mintMobileSession = async (req, res) => {
     return res.status(403).json({ code: 'NOT_MOBILE_ADMIN', message: 'This phone is not an active mobile admin.' });
   }
 
-  const token = signAdminToken(`mobile:${mobileAdmin.id}`);
+  // A mobile admin is area-scoped exactly like an area_admin (their own
+  // mobile_admins.area_id, never a choice) — without adminRole/areaId on
+  // this token, resolveAdminArea no-ops and req.areaId stays unresolved, so
+  // every admin-route controller reading requestAreaId(req) throws (bug
+  // fix, multi-area audit finding #1). adminRole here is a session-shape
+  // label only; it grants no admins-table capability.
+  const token = signAdminToken(`mobile:${mobileAdmin.id}`, { adminRole: 'area_admin', areaId: mobileAdmin.area_id });
   res.status(200).json({
     token,
-    user: { id: mobileAdmin.id, role: 'admin', mobileAdminId: mobileAdmin.id },
+    user: { id: mobileAdmin.id, role: 'admin', mobileAdminId: mobileAdmin.id, adminRole: 'area_admin', areaId: mobileAdmin.area_id, area_id: mobileAdmin.area_id },
   });
 };
 

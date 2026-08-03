@@ -180,6 +180,33 @@ const getSettings = async (req, res) => {
   res.status(200).json({ data: settings });
 };
 
+/**
+ * GET /api/admin/settings — the ADMIN read, deliberately NOT getSettings.
+ *
+ * getSettings above is lenient by design for the PUBLIC route (§2.4: a
+ * customer whose pin resolves nowhere still gets support contact / version
+ * gate rather than an error). Reusing it for the admin route inherited that
+ * leniency where it is wrong: a super_admin on "All areas" (or with no area
+ * picked) silently got the DEFAULT area's settings — including its `upi_id`
+ * and support numbers — with nothing in the response saying which area they
+ * belonged to, while PATCH /admin/settings on the same screen correctly
+ * refuses 'all' (§2.10). Reading Area 1's payment target while believing it
+ * to be global is exactly the money-routing confusion §9.4 item 4 calls out.
+ * Mirrors updateSettings' own gate instead.
+ */
+const getAdminSettings = async (req, res) => {
+  const areaId = requestAreaId(req);
+  if (areaId === null) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'X-Area-Id is required to view settings' });
+  }
+  if (areaId === 'all') {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Settings cannot be shown for "all" areas at once — pick one area' });
+  }
+
+  const settings = await getSettingsForArea(areaId);
+  res.status(200).json({ data: settings });
+};
+
 // Public endpoint. Also mounted under /api/admin/offers/active with
 // requireAdmin (req.areaId already resolved there) — same handler either
 // way since requestAreaId() reads whichever middleware ran.
@@ -727,6 +754,7 @@ const createSettingsForArea = async (areaId, connection = pool) => {
 
 module.exports = {
   getSettings,
+  getAdminSettings,
   getActiveOffer,
   updateSettings,
   createOffer,

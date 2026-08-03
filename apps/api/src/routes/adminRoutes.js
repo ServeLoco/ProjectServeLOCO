@@ -2,7 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const { login, me, revokeSessions, getAdminCustomers, getAdminCustomerById, setBlockStatus, setTrustStatus, getDashboard, getSalesReport, getTopProductsReport, getCustomersReport, getShopsReport, getProfitSummary, getProfitOrders, getAdminOrders, getAdminOrderById, updateOrderStatus, updateOrderPayment, updateOrderRemark, extendAutoAccept, adminCalculateOrder, adminCreateOrder, getAdminNotifications, createAdminNotification, getAdminNotificationById, deleteAdminNotification, getInbox, getInboxUnreadCount, markInboxRead, markAllInboxRead, dismissInbox } = require('../controllers/adminController');
 const { createOrderSchema, expressValidatorChecks: orderExpressValidatorChecks, validateExpress: validateOrderExpress } = require('./orderRoutes');
-const { getSettings, updateSettings, getActiveOffer, createOffer, updateOffer, getAdminOffers, deleteOffer, getOfferProducts, addOfferProduct, removeOfferProduct, reorderOfferProducts } = require('../controllers/settingsController');
+const { getAdminSettings, updateSettings, getActiveOffer, createOffer, updateOffer, getAdminOffers, deleteOffer, getOfferProducts, addOfferProduct, removeOfferProduct, reorderOfferProducts } = require('../controllers/settingsController');
 const { listZones, createZone, updateZone, deleteZone } = require('../controllers/deliveryZonesController');
 const { createCategory, deleteCategory, getAdminCategories, updateCategory } = require('../controllers/categoryController');
 const { getAdminStoreModes, createStoreMode, updateStoreMode } = require('../controllers/storeModeController');
@@ -923,7 +923,11 @@ router.post('/orders/calculate', requireAdmin, asyncHandler(adminCalculateOrder)
 router.post('/orders', requireAdmin, ...orderExpressValidatorChecks, validateOrderExpress, validate(createOrderSchema), asyncHandler(adminCreateOrder));
 
 // Settings
-router.get('/settings', requireAdmin, asyncHandler(getSettings));
+// getAdminSettings, not the public getSettings — the public one deliberately
+// falls back to the default area for a pin that resolves nowhere (§2.4),
+// which on this route silently served Area 1's upi_id/support numbers to a
+// super_admin on "All areas". See its docblock in settingsController.js.
+router.get('/settings', requireAdmin, asyncHandler(getAdminSettings));
 router.patch('/settings', requireAdmin, asyncHandler(updateSettings));
 
 // Delivery zones — radius-pricing bands around the settings shop pin.

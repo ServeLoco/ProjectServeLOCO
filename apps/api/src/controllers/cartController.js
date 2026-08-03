@@ -1,10 +1,26 @@
 const { pool } = require('../db/mysql');
 const { isId, isPositiveInteger, validateCoordinates } = require('../validators');
 const { resolveDeliveryPricing, loadActiveZones, loadActiveExclusionZones, parseBoundary, polygonAreaKm2 } = require('../utils/deliveryPricing');
-const { resolveAreaIdForPricing } = require('../utils/areaScope');
+const { resolveAreaIdForPricing, getDefaultArea } = require('../utils/areaScope');
 const { roundMoney, toMoney } = require('../utils/money');
 const { calculateRainCharge } = require('../utils/rainCharge');
 const { validateCoupon, validateCouponById, pickBestAutoApply, findApplicableCoupons, getNextFreeDeliveryThreshold, getNearestUnlockableCoupon } = require('../utils/coupons');
+
+// Bug fix (multi-area audit finding #12): validateCouponHandler and
+// getAvailableCoupons used to leave deliveryAreaId as null for a
+// coordinate-less request, and coupons.js treats areaId === null as "run
+// unscoped" — a customer with no pin on hand could list or redeem another
+// area's coupon code. Mirrors resolveCustomerArea's own no-pin fallback
+// chain (§4.2): the customer's last resolved area, then the platform
+// default — never platform-wide.
+const resolveNoPinAreaId = async (userId) => {
+  if (userId) {
+    const [rows] = await pool.query('SELECT last_area_id FROM users WHERE id = ?', [userId]);
+    if (rows[0]?.last_area_id) return rows[0].last_area_id;
+  }
+  const defaultArea = await getDefaultArea();
+  return defaultArea ? defaultArea.id : null;
+};
 
 const calculateCart = async (req, res) => {
   const { items, delivery_type: rawDeliveryType } = req.body;
@@ -671,9 +687,11 @@ const validateCouponHandler = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Invalid GPS coordinates provided' });
   }
 
-  // Only resolved when there's a pin to resolve FROM — matches the existing
-  // "no coordinates -> zero DB queries" contract for a coordinate-less
-  // request (nothing to zone-match or area-scope against).
+  // A pin resolves BOTH the zone (for the zone-restricted coupon check
+  // below) and the area. No pin still needs an area — resolveNoPinAreaId's
+  // fallback chain (bug fix, multi-area audit finding #12) — but has no
+  // pin to zone-match against, so zoneId stays null in that case exactly
+  // as before.
   let deliveryAreaId = null;
   let zoneId = null;
   if (hasCoords) {
@@ -693,6 +711,8 @@ const validateCouponHandler = async (req, res) => {
       });
       zoneId = pricing.zone ? pricing.zone.id : null;
     }
+  } else {
+    deliveryAreaId = await resolveNoPinAreaId(userId);
   }
 
   // Determine store type from items (same logic as calculateCart).
@@ -789,9 +809,11 @@ const getAvailableCoupons = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Invalid GPS coordinates provided' });
   }
 
-  // Only resolved when there's a pin to resolve FROM — matches the existing
-  // "no coordinates -> zero DB queries" contract for a coordinate-less
-  // request (nothing to zone-match or area-scope against).
+  // A pin resolves BOTH the zone (for the zone-restricted coupon check
+  // below) and the area. No pin still needs an area — resolveNoPinAreaId's
+  // fallback chain (bug fix, multi-area audit finding #12) — but has no
+  // pin to zone-match against, so zoneId stays null in that case exactly
+  // as before.
   let deliveryAreaId = null;
   let zoneId = null;
   if (hasCoords) {
@@ -811,6 +833,8 @@ const getAvailableCoupons = async (req, res) => {
       });
       zoneId = pricing.zone ? pricing.zone.id : null;
     }
+  } else {
+    deliveryAreaId = await resolveNoPinAreaId(userId);
   }
 
   let cartStoreType = store_type || storeType || null;

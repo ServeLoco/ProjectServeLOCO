@@ -1562,6 +1562,13 @@ function HomeHeader({
         q: trimmed,
         limit: 6,
         include_closed_shops: 1,
+        // Without a pin, resolveCustomerArea (server) falls back to the
+        // default area for this route (no requireCustomer here to source
+        // last_area_id from) — every customer would search the SAME area's
+        // catalog regardless of where they actually are (multi-area audit
+        // finding #4).
+        latitude: deliveryCoordsRef.current?.lat,
+        longitude: deliveryCoordsRef.current?.lng,
       });
       const items = asArray(response, ['products']).map(normalizeProduct);
       setSearchResults(items);

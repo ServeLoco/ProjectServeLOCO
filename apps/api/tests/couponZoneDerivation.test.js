@@ -128,6 +128,14 @@ describe('POST /api/cart/validate-coupon — zone is derived server-side', () =>
   });
 
   it('skips the zone lookup entirely when no coordinates are sent', async () => {
+    // No pin still resolves an area now (bug fix, multi-area audit finding
+    // #12 — a coordinate-less request used to leave areaId null, and
+    // coupons.js treats that as "run unscoped" across every area). This
+    // customer has no last_area_id yet, so it falls to the platform default.
+    pool.query
+      .mockResolvedValueOnce([[{ last_area_id: null }]]) // resolveNoPinAreaId: user lookup
+      .mockResolvedValueOnce([[{ id: 1, code: 'A1', is_default: 1, active: 1 }]]); // getDefaultArea's areas lookup
+
     const res = await request(app)
       .post('/api/cart/validate-coupon')
       .set('Authorization', `Bearer ${token}`)
@@ -135,11 +143,10 @@ describe('POST /api/cart/validate-coupon — zone is derived server-side', () =>
 
     expect(res.statusCode).toEqual(200);
     expect(validateCoupon).toHaveBeenCalledWith(
-      expect.objectContaining({ zoneId: null })
+      expect.objectContaining({ zoneId: null, areaId: 1 })
     );
-    // No settings/zone queries at all — only the store-type lookup is skipped
-    // too because no items were sent.
-    expect(pool.query).not.toHaveBeenCalled();
+    // Still no settings/zone queries — only the fallback area resolution.
+    expect(pool.query).toHaveBeenCalledTimes(2);
   });
 
   it('rejects malformed coordinates instead of silently ignoring them', async () => {
@@ -204,6 +211,12 @@ describe('GET /api/cart/available-coupons — zone is derived server-side', () =
   });
 
   it('skips the zone lookup entirely when no coordinates are sent', async () => {
+    // No pin still resolves an area now (bug fix, multi-area audit finding
+    // #12 — see the identical case on validate-coupon above).
+    pool.query
+      .mockResolvedValueOnce([[{ last_area_id: null }]]) // resolveNoPinAreaId: user lookup
+      .mockResolvedValueOnce([[{ id: 1, code: 'A1', is_default: 1, active: 1 }]]); // getDefaultArea's areas lookup
+
     const res = await request(app)
       .get('/api/cart/available-coupons')
       .set('Authorization', `Bearer ${token}`)
@@ -211,9 +224,9 @@ describe('GET /api/cart/available-coupons — zone is derived server-side', () =
 
     expect(res.statusCode).toEqual(200);
     expect(findApplicableCoupons).toHaveBeenCalledWith(
-      expect.objectContaining({ zoneId: null })
+      expect.objectContaining({ zoneId: null, areaId: 1 })
     );
-    expect(pool.query).not.toHaveBeenCalled();
+    expect(pool.query).toHaveBeenCalledTimes(2);
   });
 
   it('rejects malformed coordinates instead of silently ignoring them', async () => {

@@ -13,11 +13,12 @@ jest.mock('../src/db/mysql', () => ({
 jest.mock('../src/utils/areaScope', () => ({
   getDefaultArea: jest.fn(),
   listAreas: jest.fn(),
+  getAreaById: jest.fn(),
 }));
 
 const { pool } = require('../src/db/mysql');
-const { getDefaultArea, listAreas } = require('../src/utils/areaScope');
-const { resolveAreaIdForSocketUser, joinAreaRoom } = require('../src/realtime/socket');
+const { getDefaultArea, listAreas, getAreaById } = require('../src/utils/areaScope');
+const { resolveAreaIdForSocketUser, joinAreaRoom, rejoinAreaRoom } = require('../src/realtime/socket');
 
 const fakeSocket = (auth) => ({ data: { auth }, join: jest.fn() });
 
@@ -130,6 +131,65 @@ describe('joinAreaRoom', () => {
   it('is a no-op when the socket has no auth', async () => {
     const socket = fakeSocket(undefined);
     await expect(joinAreaRoom(socket)).resolves.toBeUndefined();
+    expect(socket.join).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Bug fix (multi-area audit finding #13) — rejoinAreaRoom used to trust the
+ * client-supplied areaId outright, letting any connected customer join
+ * ANY area's `customers:<areaId>` room by just emitting a spoofed id,
+ * regardless of where they actually are. Now validates it against a real,
+ * active area first.
+ */
+describe('rejoinAreaRoom', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  const fakeSocketWithLeave = (auth, currentAreaId) => ({
+    data: { auth, areaId: currentAreaId },
+    join: jest.fn(),
+    leave: jest.fn(),
+  });
+
+  it('joins the new room when the areaId is real and active', async () => {
+    getAreaById.mockResolvedValueOnce({ id: 2, active: 1 });
+    const socket = fakeSocketWithLeave({ role: 'customer', id: 42 }, 1);
+
+    await rejoinAreaRoom(socket, 2);
+
+    expect(socket.leave).toHaveBeenCalledWith('customers:1');
+    expect(socket.join).toHaveBeenCalledWith('customers:2');
+    expect(socket.data.areaId).toBe(2);
+  });
+
+  it('rejects a spoofed/nonexistent areaId — no join, no leave', async () => {
+    getAreaById.mockResolvedValueOnce(null);
+    const socket = fakeSocketWithLeave({ role: 'customer', id: 42 }, 1);
+
+    await rejoinAreaRoom(socket, 999);
+
+    expect(socket.join).not.toHaveBeenCalled();
+    expect(socket.leave).not.toHaveBeenCalled();
+    expect(socket.data.areaId).toBe(1);
+  });
+
+  it('rejects a real but deactivated area', async () => {
+    getAreaById.mockResolvedValueOnce({ id: 2, active: 0 });
+    const socket = fakeSocketWithLeave({ role: 'customer', id: 42 }, 1);
+
+    await rejoinAreaRoom(socket, 2);
+
+    expect(socket.join).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op for an admin socket', async () => {
+    const socket = fakeSocketWithLeave({ role: 'admin', adminRole: 'area_admin', areaId: 1 }, undefined);
+
+    await rejoinAreaRoom(socket, 2);
+
+    expect(getAreaById).not.toHaveBeenCalled();
     expect(socket.join).not.toHaveBeenCalled();
   });
 });

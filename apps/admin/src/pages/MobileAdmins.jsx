@@ -2,9 +2,13 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { MobileAdminsApi } from '../api';
 import { readList } from '../utils/apiResponse';
 import { GENERIC_ERROR } from '../utils/constants';
+import PickAreaNotice from '../components/PickAreaNotice';
+import { useAreaStore } from '../stores/useAreaStore';
 import './Shops.css';
 
 export default function MobileAdmins() {
+  const { areaId } = useAreaStore() || {};
+  const isAllAreas = areaId === 'all';
   const [mobileAdmins, setMobileAdmins] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -29,9 +33,12 @@ export default function MobileAdmins() {
     }
   }, []);
 
+  // 25.4 — Mobile admins can't be managed for "all" areas at once (the API
+  // 400s); skip the doomed fetch and render the inline notice instead.
   useEffect(() => {
+    if (isAllAreas) return;
     fetchMobileAdmins();
-  }, [fetchMobileAdmins]);
+  }, [fetchMobileAdmins, isAllAreas]);
 
   // Snapshot what the form looked like when the drawer opened, so an
   // accidental overlay click can be told apart from a real "I'm done" close.
@@ -99,6 +106,10 @@ export default function MobileAdmins() {
       setError(err.message || GENERIC_ERROR);
     }
   };
+
+  if (isAllAreas) {
+    return <div className="shops-container"><PickAreaNotice label="Mobile Admins" /></div>;
+  }
 
   return (
     <div className="shops-container">

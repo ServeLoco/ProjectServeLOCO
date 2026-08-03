@@ -89,9 +89,17 @@ export default function CategoriesScreen() {
   }, [requestLocationAllow]);
 
   const fetchCategories = useCallback(async () => {
-    const response = await productsApi.getCategories({ type: storeType });
+    // Without a pin, resolveCustomerArea (server) falls back to the default
+    // area for this route (no requireCustomer here to source last_area_id
+    // from) — every customer would browse the SAME area's categories
+    // regardless of where they actually are (multi-area audit finding #4).
+    const response = await productsApi.getCategories({
+      type: storeType,
+      latitude: deliveryCoords?.lat,
+      longitude: deliveryCoords?.lng,
+    });
     return asArray(response, ['categories']).map(normalizeCategory);
-  }, [storeType]);
+  }, [storeType, deliveryCoords]);
 
   const {
     data: categoriesData,

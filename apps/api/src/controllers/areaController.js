@@ -57,10 +57,12 @@ const createArea = async (req, res) => {
   const sweepComplete = Boolean(flagRows[0]?.areas_sweep_complete);
   // §6.6 — the single most important rule in this spec. Only TASK 30 flips
   // this, after its cross-area isolation E2E passes. Never bypass it here.
+  // Flipping it is a deliberate, one-time manual DB action, not an endpoint
+  // — see plans/multi-area.md §6.6 for the exact command and when to run it.
   if (!sweepComplete) {
     return res.status(409).json({
       code: 'AREAS_SWEEP_INCOMPLETE',
-      message: 'Cannot create a new area until the multi-area isolation sweep is complete.',
+      message: 'Cannot create a new area until the multi-area isolation sweep is complete. See plans/multi-area.md §6.6.',
     });
   }
 
@@ -69,6 +71,17 @@ const createArea = async (req, res) => {
   const finalName = typeof name === 'string' ? name.trim() : '';
   if (!finalCode || !finalName) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'code and name are required' });
+  }
+  // areas.code is VARCHAR(16); it also lands verbatim in every order number
+  // this area ever generates (OD-<date>-<CODE>-<seq>, orderController.js).
+  // Validate both length and charset here — an overlong or non-alphanumeric
+  // code would otherwise either overflow the column (a 500 mid-transaction)
+  // or land unescaped inside a generated order number.
+  if (finalCode.length > 16 || !/^[A-Z0-9]+$/.test(finalCode)) {
+    return res.status(400).json({
+      code: 'VALIDATION_ERROR',
+      message: 'code must be 1-16 uppercase letters/digits only',
+    });
   }
 
   const connection = await pool.getConnection();
@@ -104,6 +117,12 @@ const createArea = async (req, res) => {
     await connection.commit();
     connection.release();
     invalidateAreasCache();
+    // Bug fix (multi-area audit finding #15): joinAreaRoom's super_admin
+    // branch only runs at connect time — an already-connected super_admin
+    // would otherwise never join this new area's admin:<areaId> room until
+    // their next reconnect, missing every admin broadcast from it.
+    const { joinNewAreaForConnectedSuperAdmins } = require('../realtime/socket');
+    joinNewAreaForConnectedSuperAdmins(areaId);
 
     const area = await getAreaById(areaId);
     res.status(201).json({ message: 'Area created', data: shapeArea(area) });
@@ -125,6 +144,24 @@ const updateArea = async (req, res) => {
   }
 
   const { name, active, timezone, brandColor, brand_color: brandColorSnake, logoImageId, logo_image_id: logoImageIdSnake, features } = req.body || {};
+
+  // Bug fix (multi-area audit finding #9): deactivating the default area
+  // leaves getDefaultArea() returning null (it filters activeOnly) —
+  // resolveCustomerArea's own no-pin/no-history fallback then resolves
+  // every pin-less customer request to req.areaId = null, which every
+  // catalog endpoint (§2.4) treats as "we don't deliver here" — a single
+  // PATCH would empty the customer app's catalog platform-wide. There is no
+  // "reassign default area" endpoint in this spec (§6.6/§6.8 don't call for
+  // one) — deactivate the default area only after making a different one
+  // the default directly in the database, deliberately outside this API,
+  // same operational posture as the areas_sweep_complete flag (§6.6).
+  if (active === false && existing.is_default) {
+    return res.status(400).json({
+      code: 'VALIDATION_ERROR',
+      message: 'Cannot deactivate the default area — make a different area the default first.',
+    });
+  }
+
   const sets = [];
   const values = [];
   if (name !== undefined) { sets.push('name = ?'); values.push(String(name).trim()); }
@@ -164,6 +201,17 @@ const deleteArea = async (_req, res) => {
 // source. Never orders, customers, riders, shops or coupons (24.6). Refuses
 // to run against a target that already has categories or products (24.7),
 // so a double click can't duplicate a catalog.
+//
+// Deliberately ONE transaction for the whole clone, not chunked commits
+// (multi-area audit finding #18, evaluated and accepted as-is): a clone that
+// fails halfway through is exactly the "silently duplicated/partial
+// catalog" this task's own 24.7 guard exists to prevent — the atomicity is
+// the safety property, not an oversight. This does mean the target's
+// products/categories/shops row lock window scales with the SOURCE area's
+// catalog size; today's baseline (TASK 0: products=9) makes that
+// negligible. Re-evaluate (batched commits with an explicit resumable
+// progress marker, not a smaller transaction) if a template area's catalog
+// ever grows into the thousands.
 const cloneArea = async (req, res) => {
   const targetAreaId = Number(req.params.id);
   const sourceAreaId = Number(req.params.sourceId);
@@ -452,6 +500,28 @@ const updateAdmin = async (req, res) => {
     const invariantError = await validateRoleAreaInvariant(finalRole, finalAreaId);
     if (invariantError) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: invariantError });
+    }
+  }
+
+  // Bug fix (multi-area audit finding #9): nothing stopped a super_admin
+  // from demoting or deactivating themselves — or the only OTHER
+  // super_admin — leaving zero accounts able to reach this endpoint (or
+  // /admin/areas) again. The legacy env-password fallback only ever fires
+  // while `admins` has zero rows total (adminController.js login), so it is
+  // not a recovery path once even one super_admin row still exists.
+  const finalActive = active !== undefined ? Boolean(active) : Boolean(existing.active);
+  const losingSuperAdminStatus = existing.role === 'super_admin' && Boolean(existing.active)
+    && (finalRole !== 'super_admin' || !finalActive);
+  if (losingSuperAdminStatus) {
+    const [[{ cnt }]] = await pool.query(
+      "SELECT COUNT(*) AS cnt FROM admins WHERE role = 'super_admin' AND active = 1 AND id != ?",
+      [adminId]
+    );
+    if (Number(cnt) === 0) {
+      return res.status(400).json({
+        code: 'VALIDATION_ERROR',
+        message: 'Cannot demote or deactivate the last active super_admin.',
+      });
     }
   }
 

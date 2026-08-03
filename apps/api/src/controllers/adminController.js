@@ -84,6 +84,10 @@ const LOCKOUT_THRESHOLD = 10;
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
 const skipLockoutCheck = () => process.env.NODE_ENV === 'test';
 
+// Fixed dummy bcrypt hash — never a real credential, just a constant-cost
+// target for the timing-side-channel fix below.
+const DUMMY_BCRYPT_HASH = '$2b$10$CwTycUXWue0Thq9StjUM0uJ8Q0mSvdvSVQBjOBUkeoZfmpQyG.jFa';
+
 const login = async (req, res) => {
   const { id: username, password } = req.validatedData;
 
@@ -107,9 +111,11 @@ const login = async (req, res) => {
   let isMatch = false;
   let matchedAdmin = null;
   let usedEnvFallback = false;
+  let ranRealCompare = false;
 
   if (adminRow) {
     isMatch = await bcrypt.compare(password, adminRow.password_hash);
+    ranRealCompare = true;
     if (isMatch) matchedAdmin = adminRow;
   } else {
     // Legacy env-password bootstrap — ONLY while `admins` has zero rows at
@@ -128,6 +134,7 @@ const login = async (req, res) => {
         // to a constant-time plaintext comparison against ADMIN_PASSWORD.
         if (ownerPasswordHash) {
           isMatch = await bcrypt.compare(password, ownerPasswordHash);
+          ranRealCompare = true;
         } else if (ownerPassword) {
           const a = Buffer.from(String(password));
           const b = Buffer.from(String(ownerPassword));
@@ -139,6 +146,15 @@ const login = async (req, res) => {
         }
       }
     }
+  }
+
+  // Minor timing side-channel fix: without this, an unknown/inactive
+  // username short-circuited to the final 401 without ever calling
+  // bcrypt.compare, while a known username with a wrong password took the
+  // full ~100ms bcrypt round trip — response time alone told an attacker
+  // whether a given admin username exists. Burn the same cost either way.
+  if (!ranRealCompare) {
+    await bcrypt.compare(password, DUMMY_BCRYPT_HASH);
   }
 
   if (isMatch && matchedAdmin) {

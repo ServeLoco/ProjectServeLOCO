@@ -33,11 +33,10 @@ readApp.use(express.json());
 readApp.use('/api/products', productRoutes);
 
 const DEFAULT_AREA = { id: 1, code: 'A1', name: 'Area 1', active: 1, is_default: 1 };
-// GET /api/products carries resolveCustomerArea (TASK 11) — unauthenticated,
+// Both GET /api/products and GET /api/products/:id carry resolveCustomerArea
+// (TASK 11 / bug fix multi-area audit finding #4) — an unauthenticated,
 // no-pin request resolves via its default-area fallback, one
-// `SELECT * FROM areas` before the real query. GET /api/products/:id is
-// deliberately unscoped (deep-link/order-history compatibility), so it
-// needs no such mock.
+// `SELECT * FROM areas` before the real query.
 const mockDefaultAreaLookup = () => pool.query.mockResolvedValueOnce([[DEFAULT_AREA]]);
 
 describe('Product Variants — read paths', () => {
@@ -82,6 +81,7 @@ describe('Product Variants — read paths', () => {
   });
 
   it('getProductById embeds variants and variantPrompt', async () => {
+    mockDefaultAreaLookup();
     pool.query.mockResolvedValueOnce([[
       { id: 1, name: 'Pizza', price: 349, is_combo: 0, available: 1, image_id: null, category_name: 'Food', category_type: 'fast_food', available_from_time: null, available_until_time: null, variant_prompt: 'Choose size' },
     ]]);

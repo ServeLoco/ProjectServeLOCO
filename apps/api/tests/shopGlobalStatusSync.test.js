@@ -40,12 +40,14 @@ describe('syncAreaShopOpenState (unit)', () => {
   it('forces shop_open closed when delivery_available is off, regardless of open shops', async () => {
     pool.query
       .mockResolvedValueOnce([[{ delivery_available: 0 }]]) // settings lookup
-      .mockResolvedValueOnce([{ affectedRows: 1 }]);         // UPDATE shop_open = 0
+      .mockResolvedValueOnce([{ affectedRows: 1 }])          // UPDATE shop_open = 0
+      .mockResolvedValueOnce([{ affectedRows: 1 }]);         // bumpCatalogVersion's UPDATE areas (bug fix #8)
 
     await syncAreaShopOpenState(1);
 
-    expect(pool.query).toHaveBeenCalledTimes(2);
+    expect(pool.query).toHaveBeenCalledTimes(3);
     expect(pool.query).toHaveBeenNthCalledWith(2, 'UPDATE settings SET shop_open = 0 WHERE shop_open = 1 AND area_id = ?', [1]);
+    expect(pool.query).toHaveBeenNthCalledWith(3, 'UPDATE areas SET catalog_version = catalog_version + 1 WHERE id = ?', [1]);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
       1,
       'settings.shop_open.updated',
@@ -57,11 +59,13 @@ describe('syncAreaShopOpenState (unit)', () => {
     pool.query
       .mockResolvedValueOnce([[{ delivery_available: 1 }]])              // settings lookup
       .mockResolvedValueOnce([[{ total_active: 3, total_open: 1 }]])     // shops SUM
-      .mockResolvedValueOnce([{ affectedRows: 1 }]);                     // UPDATE shop_open = 1
+      .mockResolvedValueOnce([{ affectedRows: 1 }])                      // UPDATE shop_open = 1
+      .mockResolvedValueOnce([{ affectedRows: 1 }]);                     // bumpCatalogVersion's UPDATE areas (bug fix #8)
 
     await syncAreaShopOpenState(1);
 
     expect(pool.query).toHaveBeenNthCalledWith(3, 'UPDATE settings SET shop_open = ? WHERE shop_open != ? AND area_id = ?', [1, 1, 1]);
+    expect(pool.query).toHaveBeenNthCalledWith(4, 'UPDATE areas SET catalog_version = catalog_version + 1 WHERE id = ?', [1]);
     expect(emitToAllCustomers).toHaveBeenCalledWith(
       1,
       'settings.shop_open.updated',

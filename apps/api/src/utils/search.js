@@ -30,7 +30,21 @@ const decideSearchMode = (rawTerm) => {
   }
   const sanitized = sanitizeFulltextTerm(trimmed);
   if (!sanitized) return { mode: 'none' };
-  return { mode: 'fulltext', term: `${sanitized}*` };
+
+  const tokens = sanitized.split(/\s+/).filter(Boolean);
+  if (tokens.length <= 1) {
+    return { mode: 'fulltext', term: `${sanitized}*` };
+  }
+  // Multi-word terms require EVERY word (bug fix, multi-area audit finding
+  // #14): MySQL boolean mode with no operators between words is an implicit
+  // OR ("any word matches, ranked higher when more do") — silently
+  // broadening a search like "fresh milk" to match anything containing just
+  // "fresh", a real regression from the old '%term%' substring LIKE this
+  // code replaced (§3.11). `+` requires each earlier word to appear; only
+  // the LAST word keeps the trailing `*` prefix-wildcard, for the term the
+  // user is still mid-typing.
+  const term = tokens.map((tok, i) => (i === tokens.length - 1 ? `+${tok}*` : `+${tok}`)).join(' ');
+  return { mode: 'fulltext', term };
 };
 
 module.exports = { decideSearchMode, FULLTEXT_MIN_TERM_LENGTH, sanitizeFulltextTerm };

@@ -580,6 +580,15 @@ const createOrder = async (req, res) => {
       );
     }
 
+    // The one real writer of users.last_area_id (bug fix, multi-area audit
+    // finding #3) — migrate.js only ever backfilled it once, from history
+    // that existed before area 2 could. Without this, every no-pin fallback
+    // that reads it (resolveCustomerArea, socket.js's room join, the admin
+    // broadcast-push targeting) keeps reading whatever area a user's LAST
+    // order was in before this deploy, forever, even after they've since
+    // ordered from a different area.
+    await connection.query('UPDATE users SET last_area_id = ? WHERE id = ?', [deliveryAreaId, userId]);
+
     await connection.commit();
     releaseConnection();
 

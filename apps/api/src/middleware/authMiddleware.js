@@ -93,13 +93,47 @@ const requireAdmin = async (req, res, next) => {
     if (revokedBefore && payload.iat && payload.iat * 1000 < new Date(revokedBefore).getTime()) {
       return res.status(401).json({ code: 'UNAUTHORIZED', message: 'Session is no longer valid. Please log in again.' });
     }
+
+    // Live re-check against `admins` for a real admins-table session (bug
+    // fix, multi-area audit finding #5). Without this, deactivating an
+    // admin or reassigning their role/area only takes effect once their
+    // JWT expires (up to ADMIN_JWT_EXPIRES_IN, 12h) — a deactivated admin
+    // keeps working, and a reassigned area_admin keeps writing to their OLD
+    // area for the rest of the token's life. The one shared
+    // admin_auth_state kill-switch above is deliberately platform-wide
+    // (§H10) and can't express "just this one admin", so this is separate.
+    // Excludes mobile-admin sessions (sub is "mobile:<id>", not numeric —
+    // they're mobile_admins rows, not admins rows) and the legacy env-
+    // password bootstrap super_admin (sub is ADMIN_OWNER_ID, a non-numeric
+    // string) — neither has an admins-table row to re-check.
+    const adminIdRaw = payload.sub || payload.id;
+    if (payload.adminRole !== undefined && /^\d+$/.test(String(adminIdRaw))) {
+      let adminRows;
+      try {
+        [adminRows] = await pool.query('SELECT role, area_id, active FROM admins WHERE id = ?', [Number(adminIdRaw)]);
+      } catch (error) {
+        return next(error);
+      }
+      const adminRow = adminRows[0];
+      if (!adminRow || !adminRow.active) {
+        return res.status(401).json({ code: 'UNAUTHORIZED', message: 'Session is no longer valid. Please log in again.' });
+      }
+      // The live row wins over the (up to 12h stale) JWT claim — a
+      // demoted/reassigned admin must not keep acting under their old
+      // role/area for the rest of the token's life.
+      payload.adminRole = adminRow.role;
+      payload.areaId = adminRow.area_id;
+    }
   }
 
   // adminRole/areaId are undefined on tokens minted before this deploy
   // (self-heals within ADMIN_JWT_EXPIRES_IN, 12h) and on mobile-admin
   // tokens (a separate, unrelated admin concept — see utils/auth.js).
   // resolveAdminArea below already no-ops when adminRole is unset, leaving
-  // req.areaId unset rather than guessing.
+  // req.areaId unset rather than guessing — an area-aware endpoint reading
+  // it via requestAreaId() gets a clean 401 there (areaScope.js), not an
+  // opaque 500 (multi-area audit finding #2). Routes that never touch area
+  // (e.g. /me) keep working exactly as this passthrough already intends.
   req.admin = {
     id: payload.sub || payload.id,
     role: payload.role,

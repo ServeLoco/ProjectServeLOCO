@@ -242,11 +242,9 @@ const notifyShopsRiderAssignmentFailed = async (order) => {
 // sole gate there, and settingsController already respects it directly on
 // manual shop_open writes.
 //
-// Emits currently go to every connected customer regardless of area
-// (emitToAllCustomers) — per-area socket rooms don't exist until TASK 23,
-// so a customer resolved into a different area briefly sees another area's
-// banner flip until their next settings poll corrects it. Documented, not
-// silently accepted: TASK 23 narrows this to the area's own room.
+// Emits go to this area's own `customers:<areaId>` room only
+// (emitToAllCustomers(areaId, ...) below, TASK 23) — never every connected
+// customer platform-wide.
 const syncAreaShopOpenState = async (areaId) => {
   try {
     let changed = false;
@@ -290,6 +288,13 @@ const syncAreaShopOpenState = async (areaId) => {
       const microCache = require('./microCache');
       microCache.bust('dashboard', areaId);
       microCache.bust('categories', areaId);
+      // bumpCatalogVersion too (bug fix, multi-area audit finding #8) —
+      // without it, a client holding the public /api/settings ETag
+      // (catalogETag, keyed on <areaId>-<catalog_version>) kept getting a
+      // bare 304 with the stale shop_open baked into its cached body, since
+      // nothing here ever changed catalog_version.
+      const { bumpCatalogVersion } = require('./areaScope');
+      await bumpCatalogVersion(areaId);
 
       // Let connected customer apps flip their "shop closed" banner
       // immediately instead of waiting for the next settings poll.

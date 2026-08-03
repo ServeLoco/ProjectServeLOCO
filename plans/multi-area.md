@@ -963,6 +963,20 @@ Hard gate: `POST /admin/areas` returns **409** with a clear message unless an
 `areas_sweep_complete` flag is set. Only TASK 30 sets it, and only after the isolation E2E passes.
 Ship the gate in TASK 24 with the endpoint itself — never as a follow-up.
 
+**Flipping it is a deliberate, one-time, manual DB action — not an admin-facing endpoint** (TASK
+30.18 already did this against the dev DB; the same command is what production needs run once,
+after TASK 30's isolation E2E has actually passed against production, or against a snapshot of it):
+
+```sql
+UPDATE platform_flags SET areas_sweep_complete = 1 WHERE id = 1;
+```
+
+Bug fix (multi-area audit finding #6): before this note existed, nothing in this repo — code,
+migration, or deploy doc — said this command had to be run at all. A fresh production deploy of
+this branch would ship with `POST /admin/areas` permanently 409ing, and no operator would know why
+without reading `migrate.js`'s source comment. Record here who ran it and when it is actually run,
+so a second area is never created against a production database that hasn't been verified.
+
 ### 6.7 Library propagation must never touch commerce columns
 
 Propagation writes an **explicit column list**, always:

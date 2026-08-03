@@ -182,7 +182,7 @@ const propagateLibraryEdit = async (conn, libraryProductId) => {
     unitText = unitRows[0]?.name || null;
   }
   await conn.query(
-    'UPDATE products SET name = ?, description = ?, image_id = ?, unit = ? WHERE library_product_id = ?',
+    'UPDATE products SET name = ?, description = ?, image_id = ?, unit = ? WHERE library_product_id = ? AND deleted = 0',
     [lib.name, lib.description, lib.image_id, unitText, libraryProductId]
   );
 
@@ -277,16 +277,39 @@ const propagateCategoryLibraryEdit = async (conn, libraryCategoryId) => {
   const lib = libRows[0];
   if (!lib) throw new LibraryError('NOT_FOUND', 'Library category not found');
 
-  await conn.query(
-    'UPDATE categories SET name = ?, slug = ?, type = ?, image_id = ? WHERE library_category_id = ?',
-    [lib.name, lib.slug, lib.type, lib.image_id, libraryCategoryId]
-  );
-
   const [areaRows] = await conn.query(
     'SELECT DISTINCT area_id FROM categories WHERE library_category_id = ? AND deleted = 0',
     [libraryCategoryId]
   );
-  return { areaIds: areaRows.map((r) => r.area_id) };
+  const areaIds = areaRows.map((r) => r.area_id);
+
+  // One UPDATE per area, not a single batched statement across every area at
+  // once (bug fix, multi-area audit finding #10). categories.slug is unique
+  // per (area_id, slug) — unlike store_modes.slug, category slugs stay
+  // editable per-area (categoryController.js's updateCategory rewrites its
+  // own), so nothing stops some OTHER, unrelated local-only category in ONE
+  // area from already holding the library's new slug. A single
+  // WHERE library_category_id = ? UPDATE would throw ER_DUP_ENTRY for the
+  // whole batch on that one collision, rolling back every other area's
+  // otherwise-successful identity update too. Skip (and report) only the
+  // colliding area instead.
+  const skippedAreaIds = [];
+  for (const areaId of areaIds) {
+    try {
+      await conn.query(
+        'UPDATE categories SET name = ?, slug = ?, type = ?, image_id = ? WHERE library_category_id = ? AND area_id = ?',
+        [lib.name, lib.slug, lib.type, lib.image_id, libraryCategoryId, areaId]
+      );
+    } catch (e) {
+      if (e && e.code === 'ER_DUP_ENTRY') {
+        skippedAreaIds.push(areaId);
+        continue;
+      }
+      throw e;
+    }
+  }
+
+  return { areaIds, skippedAreaIds };
 };
 
 /**
@@ -345,12 +368,26 @@ const materializeCategoryToArea = async (conn, {
     return { categoryId: existing[0].id, alreadyLinked: true };
   }
 
-  const [result] = await conn.query(
-    `INSERT INTO categories (area_id, name, slug, type, image_id, active, display_order, library_category_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [areaId, lib.name, lib.slug, lib.type, lib.image_id, active ? 1 : 0, displayOrder, libraryCategoryId]
-  );
-  return { categoryId: result.insertId, alreadyLinked: false };
+  try {
+    const [result] = await conn.query(
+      `INSERT INTO categories (area_id, name, slug, type, image_id, active, display_order, library_category_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [areaId, lib.name, lib.slug, lib.type, lib.image_id, active ? 1 : 0, displayOrder, libraryCategoryId]
+    );
+    return { categoryId: result.insertId, alreadyLinked: false };
+  } catch (e) {
+    // uniq_categories_area_slug (area_id, slug) has no `deleted` column, so
+    // a SOFT-deleted category in this area sharing the library's slug (bug
+    // fix, multi-area audit finding #11) still occupies the unique key even
+    // though the existence check above only looks at deleted = 0 rows.
+    // Surface a clear, actionable conflict instead of an opaque 500 — a
+    // soft-deleted row can't be silently reused (its history/relations may
+    // be stale), so this needs a human decision (rename or restore it).
+    if (e && e.code === 'ER_DUP_ENTRY') {
+      throw new LibraryError('CONFLICT', `A deleted category with slug "${lib.slug}" already exists in this area — rename or restore it before adding this library item`);
+    }
+    throw e;
+  }
 };
 
 /**

@@ -29,6 +29,11 @@ const productsCatalogETag = (req, res, next) => {
 };
 
 router.get('/', resolveCustomerArea, productsCatalogETag, asyncHandler(getProducts));
-router.get('/:id', asyncHandler(getProductById));
+// Bug fix (multi-area audit finding #4) — this had no area resolution at
+// all, so any product/combo id was fetchable regardless of which area it
+// belongs to: a public cross-area catalog leak. Same resolveCustomerArea
+// pin -> zone -> area chain as every other customer catalog route; the
+// controller itself now 404s a mismatched area_id.
+router.get('/:id', resolveCustomerArea, asyncHandler(getProductById));
 
 module.exports = router;

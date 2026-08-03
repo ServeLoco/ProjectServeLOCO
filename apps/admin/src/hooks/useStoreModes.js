@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { StoreModesApi } from '../api';
 import { readList } from '../utils/apiResponse';
+import { useAreaStore } from '../stores/useAreaStore';
 
 // Fallback keeps pages functional if the store-modes endpoint is briefly
 // unreachable — matches the two hardcoded modes that always exist as system rows.
@@ -13,7 +14,22 @@ export function useStoreModes() {
   const [modes, setModes] = useState(FALLBACK_MODES);
   const [loading, setLoading] = useState(true);
 
+  // Store modes are strictly per-area: the endpoint 400s for "all areas" and
+  // for a super_admin whose area hasn't resolved yet. This hook is called at
+  // the TOP of many pages — before their own `isAllAreas` early return — so
+  // without these guards every such page fired a doomed request (a burst of
+  // 400s + console noise on each render of Products/Categories/Combos/
+  // Coupons/Offers under "All areas"). FALLBACK_MODES already keeps callers
+  // functional meanwhile, which is exactly what those pages render behind
+  // their PickAreaNotice anyway.
+  const { areaId, isSuperAdmin, initialized } = useAreaStore() || {};
+  const skip = areaId === 'all' || (isSuperAdmin && !initialized);
+
   useEffect(() => {
+    if (skip) {
+      setLoading(false);
+      return undefined;
+    }
     let cancelled = false;
     StoreModesApi.list()
       .then(res => {
@@ -26,7 +42,7 @@ export function useStoreModes() {
       .catch(err => console.error('Failed to load store modes:', err))
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, []);
+  }, [skip, areaId]);
 
   return { modes, loading };
 }

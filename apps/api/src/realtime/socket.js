@@ -4,7 +4,7 @@ const { verifyToken } = require('../utils/auth');
 const { createPresenceTracker } = require('./presence');
 const sessionStore = require('../services/analytics/sessionStore');
 const { pool } = require('../db/mysql');
-const { getDefaultArea, listAreas } = require('../utils/areaScope');
+const { getDefaultArea, listAreas, getAreaById } = require('../utils/areaScope');
 
 let io = null;
 let presenceTracker = null;
@@ -123,9 +123,19 @@ const joinAreaRoom = async (socket) => {
 // (23.3) — leaves the old `customers:<areaId>` room (if any) and joins the
 // new one. No-op for admins (their room comes from the JWT's areaId claim,
 // not a client-chosen pin).
-const rejoinAreaRoom = (socket, newAreaId) => {
+//
+// newAreaId is client-supplied and unverifiable against the customer's real
+// pin at this layer (no pin exists here at all, H7) — but it must still name
+// a REAL, active area (bug fix, multi-area audit finding #13). Without this,
+// any connected customer could join any area's `customers:<areaId>` room by
+// guessing an id, regardless of where they actually are. Cheap: getAreaById
+// reads through areaScope's 60s TTL cache, not a DB round trip per event.
+const rejoinAreaRoom = async (socket, newAreaId) => {
   const auth = socket.data.auth;
   if (!auth || auth.role !== 'customer' || !newAreaId) return;
+
+  const area = await getAreaById(newAreaId);
+  if (!area || !area.active) return;
 
   if (socket.data.areaId && socket.data.areaId !== newAreaId) {
     socket.leave(`customers:${socket.data.areaId}`);
@@ -203,7 +213,7 @@ const initRealtime = (server) => {
     // a different area after the socket already connected.
     socket.on('area:changed', (data) => {
       const newAreaId = data && Number(data.areaId);
-      if (newAreaId) rejoinAreaRoom(socket, newAreaId);
+      if (newAreaId) rejoinAreaRoom(socket, newAreaId).catch(() => {});
     });
 
     socket.on('disconnect', () => {
@@ -230,6 +240,24 @@ const closeRealtime = async () => {
   });
   io = null;
   console.log('Realtime socket server closed');
+};
+
+// Bug fix (multi-area audit finding #15): joinAreaRoom's super_admin branch
+// only ever runs at connect time, against whichever areas existed then — a
+// super_admin already connected when a NEW area is created never joins its
+// admin:<areaId> room, and misses every one of that area's admin broadcasts
+// until they reconnect. Called by areaController.js's createArea right
+// after the area is committed, so every already-connected super_admin
+// socket (flagged by joinAreaRoom, socket.data.allAdminAreas) picks up the
+// new room immediately, with zero change to how a socket joins at connect
+// time.
+const joinNewAreaForConnectedSuperAdmins = (areaId) => {
+  if (!io) return;
+  for (const socket of io.sockets.sockets.values()) {
+    if (socket.data?.allAdminAreas) {
+      socket.join(`admin:${areaId}`);
+    }
+  }
 };
 
 const emitToRoom = (room, eventName, payload) => {
@@ -268,6 +296,7 @@ module.exports = {
   emitToCustomer,
   getRealtimeStatus,
   initRealtime,
+  joinNewAreaForConnectedSuperAdmins,
   // Exported for unit testing only — the NODE_ENV guard around its one real
   // call site (above) is what keeps the e2e socket tests DB-free.
   resolveAreaIdForSocketUser,
@@ -276,4 +305,7 @@ module.exports = {
   // same reason (realtime.test.js runs real socket.io connections with no
   // db/mysql mock).
   joinAreaRoom,
+  // Exported for unit testing only — validates the client-supplied areaId
+  // against a real DB-backed lookup (bug fix, multi-area audit finding #13).
+  rejoinAreaRoom,
 };

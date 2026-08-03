@@ -167,6 +167,24 @@ describe('requestAreaId', () => {
     expect(requestAreaId({ areaId: 'all' })).toBe('all');
     expect(requestAreaId({ areaId: 1 })).toBe(1);
   });
+
+  // Bug fix (multi-area audit finding #2): a legacy admin token (minted
+  // before adminRole existed) leaves req.admin set but req.admin.adminRole
+  // undefined — resolveAdminArea's no-op for that case never sets
+  // req.areaId. This must surface as a clean, catchable 401, not the
+  // generic "middleware never ran" 500-shaped error, which used to reach
+  // the client as an opaque 500 via the global error handler.
+  it('throws a 401-shaped error for a legacy admin token (req.admin set, adminRole missing)', () => {
+    let caught;
+    try {
+      requestAreaId({ admin: { id: 1, role: 'admin' } });
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeDefined();
+    expect(caught.statusCode).toBe(401);
+    expect(caught.code).toBe('UNAUTHORIZED');
+  });
 });
 
 describe('assertAreaAccess', () => {

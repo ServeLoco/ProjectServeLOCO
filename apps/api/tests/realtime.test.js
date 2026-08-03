@@ -8,6 +8,7 @@ const {
   emitToCustomer,
   getRealtimeStatus,
   initRealtime,
+  joinNewAreaForConnectedSuperAdmins,
 } = require('../src/realtime/socket');
 
 const createToken = (payload) => jwt.sign(payload, config.JWT_SECRET);
@@ -235,6 +236,37 @@ describe('Realtime socket server', () => {
   // way resolveAreaIdForSocketUser is (this file intentionally runs without a
   // db/mysql mock, exercising real socket.io connections) — that branch is
   // unit-tested directly instead, see tests/socketAreaResolution.test.js.
+
+  // Bug fix (multi-area audit finding #15): joinAreaRoom's super_admin
+  // branch only ran at connect time — an already-connected super_admin
+  // never picked up a NEW area's admin:<areaId> room until reconnecting.
+  // socket.data.allAdminAreas is set unconditionally in joinAreaRoom
+  // (independent of the NODE_ENV-guarded listAreas() call above), so this
+  // works under NODE_ENV=test without a db/mysql mock, same as every other
+  // test in this file.
+  it('joinNewAreaForConnectedSuperAdmins reaches an already-connected super_admin immediately, without reconnecting', async () => {
+    const superToken = createToken({ sub: 'super_1', role: 'admin', adminRole: 'super_admin' });
+    const superClient = await connectClient(url, superToken);
+    clients.push(superClient);
+
+    const received = waitForEvent(superClient, 'admin.notification.created');
+    joinNewAreaForConnectedSuperAdmins(7);
+    emitToAdmins(7, 'admin.notification.created', { title: 'New area 7 order' });
+
+    await expect(received).resolves.toEqual({ title: 'New area 7 order' });
+  });
+
+  it('does not join a plain area_admin into a newly created area', async () => {
+    const areaAdminToken = createToken({ sub: 'admin_area1', role: 'admin', adminRole: 'area_admin', areaId: 1 });
+    const areaAdminClient = await connectClient(url, areaAdminToken);
+    clients.push(areaAdminClient);
+
+    const notReceived = expectNoEvent(areaAdminClient, 'admin.notification.created');
+    joinNewAreaForConnectedSuperAdmins(7);
+    emitToAdmins(7, 'admin.notification.created', { title: 'New area 7 order' });
+
+    await expect(notReceived).resolves.toBeUndefined();
+  });
 
   it('returns false from emitToCustomer when customerId is falsy', async () => {
     expect(emitToCustomer(null, 'test', {})).toBe(false);
