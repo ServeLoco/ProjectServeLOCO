@@ -184,19 +184,12 @@ const listZones = async (req, res) => {
 const publicZonesCacheKey = (areaId) => `delivery-zones:${areaId}:public`;
 const PUBLIC_ZONES_CACHE_TTL_MS = 60 * 1000;
 
-const listActiveZonesPublic = async (req, res) => {
-  const areaId = requestAreaId(req);
-  // A pin outside every zone (null) shows no shapes at all — showing
-  // another area's polygons would be actively misleading, not helpful
-  // (§2.4). Only a cold app open with no pin yet resolves to a real area
-  // via resolveCustomerArea's own default-area fallback.
-  if (areaId === null || areaId === 'all') {
-    return res.status(200).json({ data: [] });
-  }
-
+// Shared by listActiveZonesPublic below and bootstrapController.js (27.3)'s
+// zoneGeometry field — the same 60s-cached shape either way.
+const getActiveZonesForArea = async (areaId) => {
   const cacheKey = publicZonesCacheKey(areaId);
   const cached = microCache.get(cacheKey);
-  if (cached) return res.status(200).json({ data: cached });
+  if (cached) return cached;
 
   const [rows] = await pool.query(
     'SELECT id, name, boundary, parent_zone_id FROM delivery_zones WHERE active = 1 AND area_id = ?',
@@ -210,6 +203,20 @@ const listActiveZonesPublic = async (req, res) => {
     parent_zone_id: row.parent_zone_id != null ? row.parent_zone_id : null,
   }));
   microCache.set(cacheKey, zones, PUBLIC_ZONES_CACHE_TTL_MS);
+  return zones;
+};
+
+const listActiveZonesPublic = async (req, res) => {
+  const areaId = requestAreaId(req);
+  // A pin outside every zone (null) shows no shapes at all — showing
+  // another area's polygons would be actively misleading, not helpful
+  // (§2.4). Only a cold app open with no pin yet resolves to a real area
+  // via resolveCustomerArea's own default-area fallback.
+  if (areaId === null || areaId === 'all') {
+    return res.status(200).json({ data: [] });
+  }
+
+  const zones = await getActiveZonesForArea(areaId);
   res.status(200).json({ data: zones });
 };
 
@@ -402,6 +409,7 @@ const deleteZone = async (req, res) => {
 module.exports = {
   listZones,
   listActiveZonesPublic,
+  getActiveZonesForArea,
   createZone,
   updateZone,
   deleteZone,

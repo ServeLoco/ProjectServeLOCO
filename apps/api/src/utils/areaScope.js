@@ -260,6 +260,38 @@ async function seedSystemStoreModes(areaId, connection = pool) {
 }
 
 // ---------------------------------------------------------------------
+// §3.10 / TASK 27.2 — conditional GETs on public catalog endpoints.
+// ---------------------------------------------------------------------
+
+/**
+ * Mount AFTER resolveCustomerArea on a public GET route. Sets
+ * `ETag: "<areaId>-<catalogVersion>"` and short-circuits with a bare 304
+ * when the client's If-None-Match already matches — an unchanged catalog
+ * becomes a ~200-byte response instead of a full JSON body (§3.10).
+ * A pin resolving to no area (req.areaId null) or 'all' (not a real
+ * customer-route value, defensive only) skips ETag entirely — there is no
+ * single catalog_version to key it on. Never blocks the real response:
+ * any failure to look up the area just falls through to next().
+ */
+const catalogETag = async (req, res, next) => {
+  try {
+    const areaId = req.areaId;
+    if (areaId == null || areaId === 'all') return next();
+    const area = await getAreaById(areaId);
+    if (!area) return next();
+
+    const etag = `"${areaId}-${area.catalog_version}"`;
+    res.set('ETag', etag);
+    if (req.headers['if-none-match'] === etag) {
+      return res.status(304).end();
+    }
+    next();
+  } catch (_) {
+    next();
+  }
+};
+
+// ---------------------------------------------------------------------
 // Test-only: reset every in-process cache this module owns, so tests
 // don't leak state into each other via the 60s/15s TTL caches.
 // ---------------------------------------------------------------------
@@ -272,6 +304,7 @@ module.exports = {
   getAreaById,
   listAreas,
   getDefaultArea,
+  catalogETag,
   resolveAreaForPoint,
   resolveAreaIdForPricing,
   recomputeAreaBbox,

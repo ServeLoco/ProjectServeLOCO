@@ -16,6 +16,7 @@ const {
   assertAreaAccess,
   bumpCatalogVersion,
   bustAreaCaches,
+  catalogETag,
   _resetCachesForTests,
 } = areaScope;
 
@@ -331,5 +332,94 @@ describe('areaMiddleware.resolveCustomerArea', () => {
     await resolveCustomerArea(req, {}, next);
     expect(req.areaId).toBe(1);
     expect(pool.query).toHaveBeenCalledTimes(1); // no users query for an anonymous request
+  });
+});
+
+describe('catalogETag (TASK 27.2, §3.10)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    _resetCachesForTests();
+  });
+
+  const fakeRes = () => ({
+    _headers: {},
+    statusCode: null,
+    set(key, value) { this._headers[key] = value; },
+    status(code) { this.statusCode = code; return this; },
+    end() { this.ended = true; },
+  });
+
+  it('sets ETag "<areaId>-<catalogVersion>" and calls next when If-None-Match is absent', async () => {
+    pool.query.mockResolvedValueOnce([[{ ...AREA_1, catalog_version: 7 }]]);
+    const req = { areaId: 1, headers: {} };
+    const res = fakeRes();
+    const next = jest.fn();
+
+    await catalogETag(req, res, next);
+
+    expect(res._headers.ETag).toBe('"1-7"');
+    expect(next).toHaveBeenCalled();
+    expect(res.statusCode).toBeNull();
+  });
+
+  it('returns a bare 304 when If-None-Match matches the current catalog_version', async () => {
+    pool.query.mockResolvedValueOnce([[{ ...AREA_1, catalog_version: 7 }]]);
+    const req = { areaId: 1, headers: { 'if-none-match': '"1-7"' } };
+    const res = fakeRes();
+    const next = jest.fn();
+
+    await catalogETag(req, res, next);
+
+    expect(res.statusCode).toBe(304);
+    expect(res.ended).toBe(true);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('sends the full response (next) when If-None-Match is stale (catalog_version bumped since)', async () => {
+    pool.query.mockResolvedValueOnce([[{ ...AREA_1, catalog_version: 8 }]]);
+    const req = { areaId: 1, headers: { 'if-none-match': '"1-7"' } };
+    const res = fakeRes();
+    const next = jest.fn();
+
+    await catalogETag(req, res, next);
+
+    expect(res._headers.ETag).toBe('"1-8"');
+    expect(next).toHaveBeenCalled();
+    expect(res.statusCode).toBeNull();
+  });
+
+  it('skips ETag entirely (no header, straight to next) when req.areaId is null — a pin outside every zone', async () => {
+    const req = { areaId: null, headers: {} };
+    const res = fakeRes();
+    const next = jest.fn();
+
+    await catalogETag(req, res, next);
+
+    expect(res._headers.ETag).toBeUndefined();
+    expect(next).toHaveBeenCalled();
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('skips ETag for areaId "all" (defensive — not a real customer-route value)', async () => {
+    const req = { areaId: 'all', headers: {} };
+    const res = fakeRes();
+    const next = jest.fn();
+
+    await catalogETag(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('never blocks the real response if the area lookup throws', async () => {
+    pool.query.mockRejectedValueOnce(new Error('db down'));
+    const req = { areaId: 1, headers: {} };
+    const res = fakeRes();
+    const next = jest.fn();
+
+    await catalogETag(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(res.statusCode).toBeNull();
   });
 });

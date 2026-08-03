@@ -1,6 +1,5 @@
 const { pool } = require('../db/mysql');
-const { invalidateStoreModeCache } = require('../utils/storeMode');
-const { requestAreaId } = require('../utils/areaScope');
+const { requestAreaId, bustAreaCaches } = require('../utils/areaScope');
 
 const RESERVED_SLUGS = new Set(['all']);
 const SLUG_PATTERN = /^[a-z][a-z0-9_]{1,30}$/;
@@ -43,6 +42,19 @@ const requireOneArea = (req, res) => {
 };
 
 // Public endpoint: GET /api/store-modes — active modes for the customer/web capsule.
+// Shared by getStoreModes below and bootstrapController.js (TASK 27.3).
+const getActiveStoreModesForArea = async (areaId) => {
+  const [rows] = await pool.query(
+    `SELECT sm.id, sm.slug, sm.label, sm.display_order, sm.is_default, i.url AS icon_image_url
+     FROM store_modes sm
+     LEFT JOIN images i ON i.id = sm.icon_image_id
+     WHERE sm.active = TRUE AND sm.area_id = ?
+     ORDER BY sm.display_order ASC, sm.id ASC`,
+    [areaId]
+  );
+  return rows.map(withIconUrl);
+};
+
 const getStoreModes = async (req, res) => {
   // Store modes gate which dashboard/products a customer can even reach,
   // so this is catalog data, not settings metadata (§2.4) — a pin outside
@@ -55,15 +67,7 @@ const getStoreModes = async (req, res) => {
     return res.status(200).json({ data: [], storeModes: [] });
   }
 
-  const [rows] = await pool.query(
-    `SELECT sm.id, sm.slug, sm.label, sm.display_order, sm.is_default, i.url AS icon_image_url
-     FROM store_modes sm
-     LEFT JOIN images i ON i.id = sm.icon_image_id
-     WHERE sm.active = TRUE AND sm.area_id = ?
-     ORDER BY sm.display_order ASC, sm.id ASC`,
-    [areaId]
-  );
-  const data = rows.map(withIconUrl);
+  const data = await getActiveStoreModesForArea(areaId);
   res.status(200).json({ data, storeModes: data });
 };
 
@@ -124,7 +128,10 @@ const createStoreMode = async (req, res) => {
     'INSERT INTO store_modes (area_id, slug, label, display_order, active, is_system, icon_image_id) VALUES (?, ?, ?, ?, TRUE, FALSE, ?)',
     [areaId, cleanSlug, cleanLabel, Number(maxOrder) + 1, iconImageId != null ? iconImageId : null]
   );
-  invalidateStoreModeCache(areaId);
+  // 27.1 — a store mode is catalog data (gates which dashboard/products a
+  // customer can reach), so this must bump catalog_version like every other
+  // catalog write, not just invalidate the store-mode-specific cache.
+  await bustAreaCaches(areaId);
   res.status(201).json({ message: 'Store mode created', id: result.insertId });
 };
 
@@ -224,12 +231,13 @@ const updateStoreMode = async (req, res) => {
 
   params.push(id, areaId);
   await pool.query(`UPDATE store_modes SET ${updates.join(', ')} WHERE id = ? AND area_id = ?`, params);
-  invalidateStoreModeCache(areaId);
+  await bustAreaCaches(areaId);
   res.status(200).json({ message: 'Store mode updated' });
 };
 
 module.exports = {
   getStoreModes,
+  getActiveStoreModesForArea,
   getAdminStoreModes,
   createStoreMode,
   updateStoreMode

@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const asyncHandler = require('../utils/asyncHandler');
-const { listActiveZonesPublic } = require('../controllers/deliveryZonesController');
+const { getBootstrap } = require('../controllers/bootstrapController');
 const { resolveCustomerArea } = require('../middleware/areaMiddleware');
 const { catalogETag } = require('../utils/areaScope');
 
@@ -14,6 +14,6 @@ const getLimiter = rateLimit({
 
 router.use(getLimiter);
 
-router.get('/', resolveCustomerArea, catalogETag, asyncHandler(listActiveZonesPublic));
+router.get('/', resolveCustomerArea, catalogETag, asyncHandler(getBootstrap));
 
 module.exports = router;

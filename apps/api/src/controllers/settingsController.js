@@ -131,22 +131,11 @@ const attachOfferProductImageUrls = async (products) => {
   return products;
 };
 
-const getSettings = async (req, res) => {
-  // resolveCustomerArea (mounted on this route) resolves req.areaId: a real
-  // area id when the pin matched a zone (or there was no pin, falling back
-  // to the customer's last area / the platform default), or null when a
-  // supplied pin fell outside every zone. Settings is lightweight, mostly
-  // non-delivery info (app version gate, support contact) — falling back to
-  // the default area here rather than erroring is deliberately more lenient
-  // than the catalog/dashboard endpoints, which must show "we don't deliver
-  // here" for that same null (§2.4). getSettings never does.
-  let areaId = requestAreaId(req);
-  if (typeof areaId !== 'number') {
-    const defaultArea = await getDefaultArea();
-    areaId = defaultArea ? defaultArea.id : 1;
-  }
-
-  const settings = await settingsCache.wrap(settingsKey(areaId), async () => {
+// Shared by getSettings below and bootstrapController.js (TASK 27.3) — the
+// same 15s-cached fetch-and-shape logic, so /bootstrap's settings block can
+// never drift from what GET /api/settings itself returns.
+const getSettingsForArea = async (areaId) => {
+  return settingsCache.wrap(settingsKey(areaId), async () => {
     const [rows] = await pool.query('SELECT * FROM settings WHERE area_id = ? LIMIT 1', [areaId]);
     const s = rows[0] || {
       shop_open: 1,
@@ -170,7 +159,24 @@ const getSettings = async (req, res) => {
     };
     return attachSettingsImageUrls(s);
   });
+};
 
+const getSettings = async (req, res) => {
+  // resolveCustomerArea (mounted on this route) resolves req.areaId: a real
+  // area id when the pin matched a zone (or there was no pin, falling back
+  // to the customer's last area / the platform default), or null when a
+  // supplied pin fell outside every zone. Settings is lightweight, mostly
+  // non-delivery info (app version gate, support contact) — falling back to
+  // the default area here rather than erroring is deliberately more lenient
+  // than the catalog/dashboard endpoints, which must show "we don't deliver
+  // here" for that same null (§2.4). getSettings never does.
+  let areaId = requestAreaId(req);
+  if (typeof areaId !== 'number') {
+    const defaultArea = await getDefaultArea();
+    areaId = defaultArea ? defaultArea.id : 1;
+  }
+
+  const settings = await getSettingsForArea(areaId);
   res.status(200).json({ data: settings });
 };
 
@@ -732,6 +738,7 @@ module.exports = {
   removeOfferProduct,
   reorderOfferProducts,
   createSettingsForArea,
+  getSettingsForArea,
   // For code that writes settings outside this controller (e.g.
   // syncAreaShopOpenState flipping shop_open) — without this, public
   // /api/settings keeps serving the stale cached value for up to 15s.
