@@ -1998,22 +1998,88 @@ original handlers already ran, just callable directly.
 
 **Commit:** `feat: AREA TASK 27 — catalog version, ETags, bootstrap endpoint`
 
-### [ ] TASK 28 — Pin-driven area resolution in the app
+### [x] TASK 28 — Pin-driven area resolution in the app
 **Spec:** §2.4 · **Files:** `[app] src/api/httpClient.js`, `src/api/index.js` (new bootstrap client),
 `src/stores/useDeliveryLocationStore.js`, `src/hooks/useDeliveryLocationSync.js`,
 `src/screens/customer/HomeScreen/HomeScreen.js`
 
-- [ ] 28.1 Call `/bootstrap` with the live pin on cold start and on every pin change.
-- [ ] 28.2 Store `areaId`, `zoneId`, `areaName`, `brandColor`, `catalogVersion` alongside the pin in
-      `useDeliveryLocationStore`.
-- [ ] 28.3 Catalog, dashboard, store modes and search all key off the stored `areaId`.
-- [ ] 28.4 **Respect the existing cold-start rule already on `main`:** live GPS wins over a saved
-      manual pin. The area follows the pin that actually wins, not the stored one.
-- [ ] 28.5 Send `If-None-Match` from the stored `catalogVersion` on subsequent catalog fetches.
-- [ ] 28.6 Render the area's `support_phone` / `whatsapp_number` and checkout UPI from bootstrap, not
-      from a hardcoded or globally-cached value.
-- [ ] 28.7 Replace the separate `getSettings()` + `getDashboard()` cold-start calls
-      (`HomeScreen.js:355,359`) with the single bootstrap where it is a clean swap.
+- [x] 28.1 `useDeliveryLocationSync.js`'s `syncAreaInfo(lat,lng)` calls `bootstrapApi.getBootstrap`
+      alongside the existing `checkInsideZone` call (`Promise.all`, both branches: manual-pin re-check
+      and live GPS fix) — covers cold start, foreground resume, and every pin change, the same trigger
+      set `syncDeliveryLocation` already runs on. Kept separate from `checkInsideZone` deliberately:
+      bootstrap's `zone` match doesn't know about exclusion zones, which `checkInsideZone`'s
+      `cart/calculate` call does — replacing it would have silently regressed that.
+      `HomeScreen.js`'s own `loadHomeData` also calls bootstrap (28.7) for the cold-start/refresh path.
+- [x] 28.2 `useDeliveryLocationStore.js` gained `areaId`, `areaName`, `brandColor`, `catalogVersion`
+      (zoneId already existed), persisted alongside the pin, cleared together with coords on
+      `clearGpsLocation`/`clearManualLocation`. New `setAreaInfo({deliverable, ...})` action — clears
+      all four on `deliverable: false` instead of leaving a stale area in place (§2.4).
+- [x] 28.3 `dashboardApi.getDashboard`, `settingsApi.getSettings`, `storeModesApi.list` all gained an
+      optional `{latitude, longitude}` param (all three routes already ran `resolveCustomerArea`,
+      server-side support pre-existed since TASK 11/12/9 — the gap was purely that the client never
+      sent the pin). Wired at every call site in `HomeScreen.js` (`loadHomeData`,
+      `refreshDashboardSilently`, the background store-mode prefetch) and `CheckoutScreen.js` via a
+      stable ref (`deliveryCoordsRef`), never a raw dependency — a live-GPS fix changes on nearly every
+      fix (sub-meter jitter) and depending on the coords object directly would refetch on every one of
+      those; only an actual zone change (`deliveryZoneId`, unaffected by this task) re-triggers.
+      `useStoreModes(coords)` takes the same ref-based approach internally. Search (TASK 22) was
+      already area-scoped server-side and untouched here.
+- [x] 28.4 No code change needed — already correct. `coldStartGpsApplied`'s `force` flag (fixed
+      separately this session, see the cold-start-GPS-default commit) decides which pin wins, and both
+      `syncAreaInfo`/dashboard reads go through `useDeliveryLocationStore`'s single `coords`, so the
+      area always follows whichever pin actually won. Covered by the existing
+      `cartZoneRevalidation.test.js` cold-start describe block.
+- [x] 28.5 `syncAreaInfo`/`loadHomeData` both send `If-None-Match: "<areaId>-<zoneId>-<catalogVersion>"`
+      (via a shared `buildAreaETag` helper, exported from `useDeliveryLocationSync.js`) built from the
+      *previously stored* area+zone+catalogVersion. Found and fixed a real bug in the process: TASK
+      27's `bootstrapRoutes.js` mounted the shared `catalogETag` (`<areaId>-<catalogVersion>` only) —
+      unlike products/categories/settings/zones, bootstrap's own `zone` field varies by `req.zoneId`
+      too (same area, pin moves to a sibling zone, catalog_version unchanged) — a stale 304 would have
+      silently kept the client on the old zone. Replaced with a route-local `bootstrapCatalogETag` that
+      also keys on `zoneId`. New test: `does NOT 304 a pin that resolved into a different zone in the
+      same area, even with the same catalogVersion` in `bootstrapController.test.js`. While fixing this
+      also found and fixed a real test-isolation bug in that same file:
+      `settingsController.js`'s own 15s `settingsCache` (a *different* module-level cache from the
+      ones `areaScope._resetCachesForTests()`/`microCache.clearAll()` already reset in `beforeEach`)
+      was carrying a warm cache entry from an earlier test in the file into a later one, silently
+      consuming one fewer mocked query and shifting every mock after it — added `bustSettingsCache(1)`
+      to `beforeEach`.
+- [x] 28.6 `applyBootstrapResult` (shared helper) pushes `result.settings` through the existing
+      `normalizeSettings`/`useSettingsStore.setSettings` pipeline — the exact same store
+      `ProfileScreen`/`OrderDetailScreen` (support_phone) and `CheckoutScreen` (UPI QR) already read
+      from, so no screen-level changes needed there. Also made `CheckoutScreen.js`'s own always-fresh
+      `settingsApi.getSettings()` call pin-aware (money-routing correctness, §9.4 item 4) —
+      `CheckoutScreen.js` wasn't in this task's named file list but the money-routing risk called out
+      in TASK 27's own notes made it worth closing here rather than leaving it as a follow-up gap.
+- [x] 28.7 `HomeScreen.js`'s cold-start `settingsPromise` (`settingsApi.getSettings()`) is a clean swap
+      for `bootstrapApi.getBootstrap(...)` (same `refresh || isSettingsStale()` gate, same
+      `applyBootstrapResult` handler used by 28.1) — it degrades to the exact same
+      `users.last_area_id`/default-area fallback as before when there's no pin yet (verified: `GET
+      /api/bootstrap` with no `latitude`/`longitude` still returns `deliverable: true` off that same
+      chain — `bootstrapController.test.js`'s "no pin at all" case). `dashboardApi.getDashboard()`
+      stays its own call (dashboard sections aren't in bootstrap's contract) but is now pin-aware too
+      (28.3).
+
+Bugs found and fixed while implementing this task (real bugs, not scope creep):
+- `bootstrapRoutes.js`'s ETag wasn't zone-aware — see 28.5.
+- `bootstrapController.test.js` had a latent settings-cache test-isolation gap — see 28.5. Was dormant
+  before (the affected test was always last in the file, so its leaked mock had nowhere to go);
+  surfaced by adding a new test in the middle of the file.
+- `httpClient.js`'s `request()` treated any non-2xx status as an error, including 304 — a real fetch
+  204 was already special-cased in `parseResponse`, but the `response.ok` gate happens before that and
+  would have thrown an `ApiError` on every 304 bootstrap response. Fixed: `response.ok || response.status
+  === 304` now both resolve.
+
+Verification: `apps/api` — `npx jest` (101 suites / 1100 tests, 1 pre-existing skip) and `npm run lint`
+both clean. `apps/customer-app` — `npx jest --runInBand` (42 suites / 318 tests) and `npx eslint`
+(touched files) both clean. Live-verified against the real dev API (port 3000, area 1's `gkp` zone,
+lat≈29.443 lng≈75.671): `GET /api/bootstrap` returns `ETag: "1-7-9"`; a repeat with a matching
+`If-None-Match` 304s; the same header with a different zoneId (`"1-999-9"`) correctly does NOT 304;
+`GET /api/settings?latitude=&longitude=` returns the identical `upi_id`/`support_phone` bootstrap's
+`settings` block carries for the same pin; `GET /api/store-modes?latitude=&longitude=` and `GET
+/api/dashboard?...&latitude=&longitude=` both resolve area 1 correctly with the pin attached (dashboard
+section counts matched the no-pin baseline exactly — 0 sections for `fast_food`, 3 for `packed` — so
+adding the params is confirmed non-regressive, not just non-erroring).
 
 **Commit:** `feat: AREA TASK 28 — pin-driven area resolution in the app`
 
