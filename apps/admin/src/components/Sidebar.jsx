@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { NavLink } from 'react-router-dom';
+import { useAreaStore } from '../stores/useAreaStore';
 import './Sidebar.css';
 
 const NAV_GROUPS = [
@@ -45,8 +46,21 @@ const NAV_GROUPS = [
   },
 ];
 
+// 26.8/25.5 — super_admin only, hidden entirely for an area_admin (no nav
+// link, and the routes themselves are also gated by SuperAdminRoute).
+const SUPER_ADMIN_GROUP = {
+  label: 'Multi-Area',
+  items: [
+    { path: '/areas', label: 'Areas', icon: '🌐' },
+    { path: '/admins', label: 'Admins', icon: '🛡️' },
+    { path: '/library', label: 'Library', icon: '📚' },
+  ],
+};
+
 export default function Sidebar() {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const { isSuperAdmin } = useAreaStore() || {};
+  const navGroups = isSuperAdmin ? [...NAV_GROUPS, SUPER_ADMIN_GROUP] : NAV_GROUPS;
 
   return (
     <>
@@ -71,7 +85,7 @@ export default function Sidebar() {
         </div>
 
         <nav className="sidebar-nav">
-          {NAV_GROUPS.map(group => (
+          {navGroups.map(group => (
             <div key={group.label} className="sidebar-group">
               <span className="sidebar-group-label">{group.label}</span>
               <ul className="sidebar-list">

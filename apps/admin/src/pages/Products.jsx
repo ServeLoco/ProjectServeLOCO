@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ProductsApi, CategoriesApi, ImagesApi, ShopsApi } from '../api';
+import { ProductsApi, CategoriesApi, ImagesApi, ShopsApi, LibraryApi } from '../api';
 import { readList } from '../utils/apiResponse';
 import { getUploadedImage, normalizeImageUrl, FALLBACK_IMAGE, handleImageError } from '../utils/imageUrl';
 import { useAdminRefresh } from '../hooks/useAdminRefresh';
@@ -43,6 +43,7 @@ export default function Products() {
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
+  const [libraryPickerOpen, setLibraryPickerOpen] = useState(false);
 
   useEffect(() => { fetchCategories(); fetchShops(); }, []);
 
@@ -300,6 +301,7 @@ export default function Products() {
         <h1 className="products-title">Products Management</h1>
         <div style={{ display: 'flex', gap: '0.75rem' }}>
           <button className="btn-secondary" onClick={() => navigate('/bulk-import')}>📦 Bulk Import</button>
+          <button className="btn-secondary" onClick={() => setLibraryPickerOpen(true)}>📚 Add from Library</button>
           <button className="btn-primary" onClick={openCreateDrawer}>+ New Product</button>
         </div>
       </header>
@@ -568,6 +570,131 @@ export default function Products() {
           onSave={() => { closeDrawer(); fetchProducts(pagination.page); }}
         />
       )}
+
+      {libraryPickerOpen && (
+        <LibraryPickerModal
+          categories={categories}
+          onClose={() => setLibraryPickerOpen(false)}
+          onAdded={() => { setLibraryPickerOpen(false); fetchProducts(pagination.page); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// 26.6 — "+ Add from Library": search the shared product library and
+// materialize one into the currently selected area (same X-Area-Id the rest
+// of this page already operates under — §4.4, no page ever picks its own area).
+function LibraryPickerModal({ categories, onClose, onAdded }) {
+  const [search, setSearch] = useState('');
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [pickedRow, setPickedRow] = useState(null);
+  const [categoryId, setCategoryId] = useState('');
+  const [price, setPrice] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    LibraryApi.list({ search, archived: 'false' })
+      .then((res) => { if (alive) setRows(readList(res)); })
+      .catch((err) => { if (alive) setError(err.message || GENERIC_ERROR); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, [search]);
+
+  const pick = (row) => {
+    setPickedRow(row);
+    setCategoryId('');
+    setPrice(row.suggestedPrice ?? row.suggested_price ?? '');
+    setError(null);
+  };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!Number.isInteger(Number(categoryId)) || Number(categoryId) <= 0) {
+      setError('Pick a category');
+      return;
+    }
+    try {
+      setSaving(true);
+      setError(null);
+      await LibraryApi.addToArea(pickedRow.id, { categoryId: Number(categoryId), price: price !== '' ? Number(price) : undefined });
+      onAdded();
+    } catch (err) {
+      console.error(err);
+      setError(err.message || GENERIC_ERROR);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="drawer-overlay" onClick={onClose}>
+      <div className="drawer-content" onClick={(e) => e.stopPropagation()}>
+        <div className="drawer-header">
+          <h3 className="drawer-title">Add from Library</h3>
+          <button type="button" className="drawer-close" onClick={onClose}>&times;</button>
+        </div>
+        <div className="drawer-body">
+          {error && <MessageBanner type="error" message={error} onDismiss={() => setError(null)} />}
+          {!pickedRow ? (
+            <>
+              <input
+                className="form-input"
+                placeholder="Search the library…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={{ marginBottom: '1rem' }}
+              />
+              {loading ? (
+                <p>Loading…</p>
+              ) : rows.length === 0 ? (
+                <p>No library products match.</p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                  {rows.map((row) => (
+                    <button
+                      key={row.id}
+                      type="button"
+                      className="btn-secondary"
+                      style={{ textAlign: 'left' }}
+                      onClick={() => pick(row)}
+                    >
+                      {row.name} {row.suggestedPrice != null ? `— ₹${row.suggestedPrice}` : ''}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <form onSubmit={submit}>
+              <p>Adding <strong>{pickedRow.name}</strong> to this area.</p>
+              <div className="form-group">
+                <label className="form-label">Category *</label>
+                <select className="form-select" value={categoryId} onChange={(e) => setCategoryId(e.target.value)} required>
+                  <option value="" disabled>Select a category</option>
+                  {categories.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Price (₹)</label>
+                <input type="number" className="form-input" value={price} onChange={(e) => setPrice(e.target.value)} />
+              </div>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button type="button" className="btn-secondary" onClick={() => setPickedRow(null)}>Back</button>
+                <button type="submit" className="btn-primary" disabled={saving}>
+                  {saving ? 'Adding…' : 'Add to area'}
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -597,6 +724,11 @@ const normalizeVariants = (raw) => {
 function ProductFormDrawer({ product, categories, shops, currentMode, onClose, onSave }) {
   const { modes } = useStoreModes();
   const isEdit = !!product;
+  // §2.5/26.7 — identity fields (name, image, description, unit, variant
+  // labels) are owned by the library once a product is linked; editing them
+  // here would be silently overwritten by the next propagateLibraryEdit, so
+  // they're read-only with a link to the one place they're actually editable.
+  const isLibraryManaged = Boolean(product?.libraryProductId || product?.library_product_id);
   const initialMode = product?.category_type || categories.find(c => String(c.id) === String(product?.category_id))?.type || currentMode || 'packed';
   const [productMode, setProductMode] = useState(initialMode);
   const [formData, setFormData] = useState(() => {
@@ -944,9 +1076,21 @@ function ProductFormDrawer({ product, categories, shops, currentMode, onClose, o
           </div>
           <div className="drawer-body">
             <MessageBanner type="error" message={formError} onDismiss={() => setFormError(null)} />
+            {isLibraryManaged && (
+              <div
+                style={{
+                  background: 'var(--warning-bg, #fef3c7)', color: 'var(--warning-text, #92400e)',
+                  padding: '0.6rem 0.9rem', borderRadius: '8px', marginBottom: '1rem', fontSize: '0.85rem',
+                }}
+              >
+                📚 Name, image, description, unit and variant labels are managed in the Library.{' '}
+                <a href="/library" style={{ fontWeight: 700, textDecoration: 'underline' }}>Edit there</a> —
+                price, availability, category and shop stay editable here.
+              </div>
+            )}
             <div className="form-group">
               <label className="form-label">Product Name</label>
-              <input required type="text" name="name" className="form-input" value={formData.name} onChange={handleChange} />
+              <input required type="text" name="name" className="form-input" value={formData.name} onChange={handleChange} readOnly={isLibraryManaged} />
             </div>
             <div className="form-row">
               <div className="form-group">
@@ -1026,6 +1170,7 @@ function ProductFormDrawer({ product, categories, shops, currentMode, onClose, o
                         required
                         onChange={(e) => handleVariantChange(i, 'label', e.target.value)}
                         aria-invalid={Boolean(fieldErrors[`variant_${i}_label`])}
+                        readOnly={isLibraryManaged}
                       />
                       <label className="variant-default-radio" title="Default variant">
                         <input
@@ -1156,20 +1301,20 @@ function ProductFormDrawer({ product, categories, shops, currentMode, onClose, o
             <div className="form-row">
               <div className="form-group">
                 <label className="form-label">Unit (e.g., 1 Plate)</label>
-                <input type="text" name="unit" className="form-input" value={formData.unit || ''} onChange={handleChange} />
+                <input type="text" name="unit" className="form-input" value={formData.unit || ''} onChange={handleChange} readOnly={isLibraryManaged} />
               </div>
             </div>
             <div className="form-group">
               <label className="form-label">Description</label>
-              <textarea name="description" className="form-textarea" value={formData.description || ''} onChange={handleChange} />
+              <textarea name="description" className="form-textarea" value={formData.description || ''} onChange={handleChange} readOnly={isLibraryManaged} />
             </div>
             <div className="form-group">
               <label className="form-label">Product Image</label>
               <p className="image-dimension-hint">{IMAGE_GUIDANCE.product.label}</p>
               {(formData.image_url || formData.imageUrl) && <img src={normalizeImageUrl(formData.image_url || formData.imageUrl)} alt="Preview" className="image-preview" />}
-              <div className="image-upload-zone" onClick={() => fileInputRef.current?.click()}>
-                <input type="file" hidden ref={fileInputRef} {...fileInputProps} accept="image/*" />
-                {uploadingImage ? 'Uploading...' : 'Click to Upload Image'}
+              <div className="image-upload-zone" onClick={() => { if (!isLibraryManaged) fileInputRef.current?.click(); }} style={isLibraryManaged ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}>
+                <input type="file" hidden ref={fileInputRef} {...fileInputProps} accept="image/*" disabled={isLibraryManaged} />
+                {isLibraryManaged ? 'Managed in Library' : uploadingImage ? 'Uploading...' : 'Click to Upload Image'}
               </div>
               {uploadMessage && <p className={`upload-message ${uploadMessage.type}`}>{uploadMessage.text}</p>}
             </div>

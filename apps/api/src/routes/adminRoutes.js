@@ -71,6 +71,20 @@ const {
   promoteProductToLibrary,
 } = require('../controllers/libraryController');
 const {
+  getCategoryLibrary,
+  createCategoryLibraryItem,
+  updateCategoryLibraryItem,
+  archiveCategoryLibraryItem,
+  addCategoryLibraryItemToArea,
+} = require('../controllers/categoryLibraryController');
+const {
+  getStoreModeLibrary,
+  createStoreModeLibraryItem,
+  updateStoreModeLibraryItem,
+  archiveStoreModeLibraryItem,
+  addStoreModeLibraryItemToArea,
+} = require('../controllers/storeModeLibraryController');
+const {
   getAdminAreas,
   createArea,
   updateArea,
@@ -830,6 +844,20 @@ router.patch('/library/:id', requireAdmin, requireSuperAdmin, asyncHandler(updat
 router.post('/library/:id/archive', requireAdmin, requireSuperAdmin, asyncHandler(archiveLibraryProduct));
 router.post('/library/:id/add-to-area', requireAdmin, asyncHandler(addLibraryProductToArea));
 router.post('/library/:id/add-to-areas', requireAdmin, requireSuperAdmin, asyncHandler(addLibraryProductToAreas));
+
+// Category + store-mode libraries (TASK 26) — same GET-is-any-admin,
+// write-is-super-admin, add-to-area-is-own-area shape as the product library.
+router.get('/category-library', requireAdmin, asyncHandler(getCategoryLibrary));
+router.post('/category-library', requireAdmin, requireSuperAdmin, asyncHandler(createCategoryLibraryItem));
+router.patch('/category-library/:id', requireAdmin, requireSuperAdmin, asyncHandler(updateCategoryLibraryItem));
+router.post('/category-library/:id/archive', requireAdmin, requireSuperAdmin, asyncHandler(archiveCategoryLibraryItem));
+router.post('/category-library/:id/add-to-area', requireAdmin, asyncHandler(addCategoryLibraryItemToArea));
+
+router.get('/store-mode-library', requireAdmin, asyncHandler(getStoreModeLibrary));
+router.post('/store-mode-library', requireAdmin, requireSuperAdmin, asyncHandler(createStoreModeLibraryItem));
+router.patch('/store-mode-library/:id', requireAdmin, requireSuperAdmin, asyncHandler(updateStoreModeLibraryItem));
+router.post('/store-mode-library/:id/archive', requireAdmin, requireSuperAdmin, asyncHandler(archiveStoreModeLibraryItem));
+router.post('/store-mode-library/:id/add-to-area', requireAdmin, asyncHandler(addStoreModeLibraryItemToArea));
 
 // Super-admin only (TASK 24, §2.9/§2.12): area + admin-account management,
 // and clone-area. requireSuperAdmin everywhere here — an area_admin has no

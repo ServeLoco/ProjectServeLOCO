@@ -313,8 +313,89 @@ const propagateStoreModeLibraryEdit = async (conn, libraryStoreModeId) => {
   return { areaIds: areaRows.map((r) => r.area_id) };
 };
 
+/**
+ * Materialize a library category into one area (TASK 26 — the "add to
+ * area" counterpart to propagateCategoryLibraryEdit, which only ever
+ * covered the edit-sync direction; TASK 21 never built a create path for
+ * categories/store modes). Idempotent by (area_id, slug), not just by
+ * library_category_id — a category can legitimately hold no library link,
+ * so linking-by-slug also picks up and back-links a pre-existing local-only
+ * category that happens to share the library item's slug, same as it would
+ * collide on `uniq_categories_area_slug` otherwise.
+ * @param {import('mysql2/promise').PoolConnection} conn
+ * @param {{ libraryCategoryId: number, areaId: number, active?: boolean, displayOrder?: number }} params
+ * @returns {Promise<{ categoryId: number, alreadyLinked: boolean }>}
+ */
+const materializeCategoryToArea = async (conn, {
+  libraryCategoryId, areaId, active = true, displayOrder = 0,
+}) => {
+  const [libRows] = await conn.query('SELECT * FROM category_library WHERE id = ?', [libraryCategoryId]);
+  const lib = libRows[0];
+  if (!lib) throw new LibraryError('NOT_FOUND', 'Library category not found');
+  if (lib.archived) throw new LibraryError('ARCHIVED', 'Library category is archived — reactivate it before adding to an area');
+
+  const [existing] = await conn.query(
+    'SELECT id, library_category_id FROM categories WHERE area_id = ? AND slug = ? AND deleted = 0 LIMIT 1',
+    [areaId, lib.slug]
+  );
+  if (existing.length > 0) {
+    if (existing[0].library_category_id == null) {
+      await conn.query('UPDATE categories SET library_category_id = ? WHERE id = ?', [libraryCategoryId, existing[0].id]);
+    }
+    return { categoryId: existing[0].id, alreadyLinked: true };
+  }
+
+  const [result] = await conn.query(
+    `INSERT INTO categories (area_id, name, slug, type, image_id, active, display_order, library_category_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [areaId, lib.name, lib.slug, lib.type, lib.image_id, active ? 1 : 0, displayOrder, libraryCategoryId]
+  );
+  return { categoryId: result.insertId, alreadyLinked: false };
+};
+
+/**
+ * Materialize a library store mode into one area — same shape as
+ * materializeCategoryToArea above. is_system rows (packed/fast_food) are
+ * already auto-seeded into every area at creation time
+ * (areaScope.seedSystemStoreModes) with no library link yet — "adding"
+ * one from the library links that existing row instead of inserting a
+ * second one, which would otherwise collide on
+ * `uniq_store_modes_area_slug (area_id, slug)`.
+ * @param {import('mysql2/promise').PoolConnection} conn
+ * @param {{ libraryStoreModeId: number, areaId: number, active?: boolean, displayOrder?: number }} params
+ * @returns {Promise<{ storeModeId: number, alreadyLinked: boolean }>}
+ */
+const materializeStoreModeToArea = async (conn, {
+  libraryStoreModeId, areaId, active = true, displayOrder = 0,
+}) => {
+  const [libRows] = await conn.query('SELECT * FROM store_mode_library WHERE id = ?', [libraryStoreModeId]);
+  const lib = libRows[0];
+  if (!lib) throw new LibraryError('NOT_FOUND', 'Library store mode not found');
+  if (lib.archived) throw new LibraryError('ARCHIVED', 'Library store mode is archived — reactivate it before adding to an area');
+
+  const [existing] = await conn.query(
+    'SELECT id, library_store_mode_id FROM store_modes WHERE area_id = ? AND slug = ? LIMIT 1',
+    [areaId, lib.slug]
+  );
+  if (existing.length > 0) {
+    if (existing[0].library_store_mode_id == null) {
+      await conn.query('UPDATE store_modes SET library_store_mode_id = ? WHERE id = ?', [libraryStoreModeId, existing[0].id]);
+    }
+    return { storeModeId: existing[0].id, alreadyLinked: true };
+  }
+
+  const [result] = await conn.query(
+    `INSERT INTO store_modes (area_id, slug, label, display_order, active, is_system, icon_image_id, library_store_mode_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [areaId, lib.slug, lib.label, displayOrder, active ? 1 : 0, lib.is_system, lib.icon_image_id, libraryStoreModeId]
+  );
+  return { storeModeId: result.insertId, alreadyLinked: false };
+};
+
 module.exports = {
   materializeToArea,
+  materializeCategoryToArea,
+  materializeStoreModeToArea,
   syncLibraryVariants,
   propagateLibraryEdit,
   propagateCategoryLibraryEdit,

@@ -274,6 +274,36 @@ export const AnalyticsApi = {
   activeUsers: (minutes, search) => apiClient(withQuery('/admin/analytics/active-users', { minutes, search }), { method: 'GET' }),
 };
 
+// Product library (TASK 19/26) — identity shared, GET is any admin, writes
+// are super_admin only, add-to-area is any admin for their own area.
+export const LibraryApi = {
+  list: (params) => apiClient(withQuery('/admin/library', params), { method: 'GET' }),
+  create: (data) => apiClient('/admin/library', { method: 'POST', body: data }),
+  update: (id, data) => apiClient(`/admin/library/${id}`, { method: 'PATCH', body: data }),
+  archive: (id) => apiClient(`/admin/library/${id}/archive`, { method: 'POST' }),
+  addToArea: (id, data) => apiClient(`/admin/library/${id}/add-to-area`, { method: 'POST', body: data }),
+  addToAreas: (id, data) => apiClient(`/admin/library/${id}/add-to-areas`, { method: 'POST', body: data }),
+  promote: (productId) => apiClient(`/admin/products/${productId}/promote-to-library`, { method: 'POST' }),
+};
+
+// Category library (TASK 26) — same shape as LibraryApi above.
+export const CategoryLibraryApi = {
+  list: (params) => apiClient(withQuery('/admin/category-library', params), { method: 'GET' }),
+  create: (data) => apiClient('/admin/category-library', { method: 'POST', body: data }),
+  update: (id, data) => apiClient(`/admin/category-library/${id}`, { method: 'PATCH', body: data }),
+  archive: (id) => apiClient(`/admin/category-library/${id}/archive`, { method: 'POST' }),
+  addToArea: (id, data) => apiClient(`/admin/category-library/${id}/add-to-area`, { method: 'POST', body: data }),
+};
+
+// Store-mode library (TASK 26) — same shape again.
+export const StoreModeLibraryApi = {
+  list: (params) => apiClient(withQuery('/admin/store-mode-library', params), { method: 'GET' }),
+  create: (data) => apiClient('/admin/store-mode-library', { method: 'POST', body: data }),
+  update: (id, data) => apiClient(`/admin/store-mode-library/${id}`, { method: 'PATCH', body: data }),
+  archive: (id) => apiClient(`/admin/store-mode-library/${id}/archive`, { method: 'POST' }),
+  addToArea: (id, data) => apiClient(`/admin/store-mode-library/${id}/add-to-area`, { method: 'POST', body: data }),
+};
+
 // Super-admin only (TASK 24's areaController.js) — area CRUD, clone-area.
 export const AreasApi = {
   list: () => apiClient('/admin/areas', { method: 'GET' }),

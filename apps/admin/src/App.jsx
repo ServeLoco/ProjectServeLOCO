@@ -4,6 +4,7 @@ import { ThemeProvider } from './components/ThemeProvider';
 import { AuthProvider } from './components/AuthProvider';
 import { AreaProvider } from './stores/useAreaStore';
 import ProtectedRoute from './routes/ProtectedRoute';
+import SuperAdminRoute from './routes/SuperAdminRoute';
 import AdminLayout from './layout/AdminLayout';
 
 import Login from './pages/Login';
@@ -29,6 +30,9 @@ import Health from './pages/Health';
 import BulkImport from './pages/BulkImport';
 import Analytics from './pages/Analytics';
 import AnalyticsUserDetail from './pages/AnalyticsUserDetail';
+import Areas from './pages/Areas';
+import Admins from './pages/Admins';
+import Library from './pages/Library';
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -97,6 +101,11 @@ function App() {
                     <Route path="/bulk-import" element={<BulkImport />} />
                     <Route path="/analytics" element={<Analytics />} />
                     <Route path="/analytics/user/:id" element={<AnalyticsUserDetail />} />
+                    <Route element={<SuperAdminRoute />}>
+                      <Route path="/areas" element={<Areas />} />
+                      <Route path="/admins" element={<Admins />} />
+                      <Route path="/library" element={<Library />} />
+                    </Route>
                   </Route>
                 </Route>
               </Routes>

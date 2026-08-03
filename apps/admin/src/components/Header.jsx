@@ -22,6 +22,9 @@ const PAGE_META = {
   '/health': { title: 'System Health', subtitle: 'Backend diagnostics' },
   '/analytics': { title: 'Analytics', subtitle: 'Live presence & behavior' },
   '/bulk-import': { title: 'Bulk Import', subtitle: 'CSV + ZIP product import' },
+  '/areas': { title: 'Areas', subtitle: 'Multi-area configuration' },
+  '/admins': { title: 'Admins', subtitle: 'Admin accounts and roles' },
+  '/library': { title: 'Library', subtitle: 'Shared products, categories and store modes' },
 };
 
 // Isolated component so its 1Hz tick doesn't re-render the whole Header tree.
