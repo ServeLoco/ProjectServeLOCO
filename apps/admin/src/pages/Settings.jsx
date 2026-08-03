@@ -8,6 +8,8 @@ import ImageCropper from '../components/ImageCropper/ImageCropper';
 import './Settings.css';
 import { GENERIC_ERROR } from '../utils/constants';
 import MessageBanner from '../components/MessageBanner';
+import PickAreaNotice from '../components/PickAreaNotice';
+import { useAreaStore } from '../stores/useAreaStore';
 
 const DEFAULT_SETTINGS = {
   shop_open: false,
@@ -33,6 +35,9 @@ const DEFAULT_SETTINGS = {
 };
 
 export default function Settings() {
+  const { areaId } = useAreaStore() || {};
+  const isAllAreas = areaId === 'all';
+
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [error, setError] = useState(null);
 
@@ -47,8 +52,15 @@ export default function Settings() {
   const savedImageIdRef = useRef('');
 
   useEffect(() => {
+    // 25.4 — Settings can't be shown/managed for "all" areas at once (§2.10);
+    // skip the doomed 400 fetch and render the inline notice instead.
+    if (isAllAreas) {
+      setLoading(false);
+      return;
+    }
     fetchSettings();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAllAreas]);
 
   const fetchSettings = async () => {
     try {
@@ -217,6 +229,10 @@ export default function Settings() {
       setSaving(false);
     }
   };
+
+  if (isAllAreas) {
+    return <div className="settings-container"><PickAreaNotice label="Settings" /></div>;
+  }
 
   if (loading) {
     return <div className="settings-container"><p style={{ textAlign: 'center', padding: '2rem' }}>Loading configuration...</p></div>;

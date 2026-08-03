@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { SettingsApi, DeliveryZonesApi } from '../api';
 import DeliveryZoneMap from '../components/DeliveryZoneMap';
 import MessageBanner from '../components/MessageBanner';
+import PickAreaNotice from '../components/PickAreaNotice';
+import { useAreaStore } from '../stores/useAreaStore';
 import { GENERIC_ERROR } from '../utils/constants';
 import './DeliveryZones.css';
 
@@ -90,6 +92,9 @@ const validateZoneFormClientSide = (form) => {
 };
 
 export default function DeliveryZones() {
+  const { areaId } = useAreaStore() || {};
+  const isAllAreas = areaId === 'all';
+
   const [loading, setLoading] = useState(true);
   const [zones, setZones] = useState([]);
   const [zoneForms, setZoneForms] = useState({});
@@ -129,9 +134,15 @@ export default function DeliveryZones() {
   };
 
   useEffect(() => {
+    // 25.4 — Delivery Zones can't be shown/managed for "all" areas at once
+    // (§2.10); skip the doomed 400 fetch and render the inline notice instead.
+    if (isAllAreas) {
+      setLoading(false);
+      return;
+    }
     fetchAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [isAllAreas]);
 
   // Descendants per zone, computed once per zone-list change instead of once
   // per rendered <option> (it was O(zones²) inside a filter, per row).
@@ -341,6 +352,10 @@ export default function DeliveryZones() {
       </td>
     </>
   );
+
+  if (isAllAreas) {
+    return <div className="delivery-zones-page"><PickAreaNotice label="Delivery Zones" /></div>;
+  }
 
   if (loading) {
     return <div className="delivery-zones-page"><p>Loading delivery zones…</p></div>;

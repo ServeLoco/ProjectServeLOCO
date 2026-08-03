@@ -1,0 +1,25 @@
+.pick-area-notice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 4rem 2rem;
+  color: var(--text-secondary);
+}
+
+.pick-area-notice-icon {
+  font-size: 2.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.pick-area-notice h2 {
+  color: var(--text-primary);
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+}
+
+.pick-area-notice p {
+  margin: 0;
+  max-width: 420px;
+}

@@ -25,6 +25,15 @@
   -webkit-overflow-scrolling: touch;
 }
 
+.admin-area-pending {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+}
+
 /* ── Tablet ───────────────────────────────────────────────── */
 @media (max-width: 1024px) {
   .admin-shell {

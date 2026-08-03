@@ -1,0 +1,21 @@
+.area-switcher {
+  height: 38px;
+  padding: 0 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--surface-color);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--transition-normal), background-color var(--transition-normal);
+}
+
+.area-switcher:hover:not(:disabled) {
+  border-color: var(--primary-color, var(--text-secondary));
+}
+
+.area-switcher:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

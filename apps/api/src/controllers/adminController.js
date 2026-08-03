@@ -205,10 +205,24 @@ const login = async (req, res) => {
   return res.status(401).json({ code: 'UNAUTHORIZED', message: 'Invalid admin credentials' });
 };
 
+// TASK 25 fix: this used to return only { id, role: 'admin' } — fine before
+// multi-area, but it left the admin client with no way to know adminRole/
+// areaId after a page reload (login's own response already includes them;
+// this is the only other place `user` gets populated, since AuthProvider
+// calls /me on boot instead of re-logging in). Mirrors login's user shape
+// from req.admin, which requireAdmin already decoded off the JWT — no extra
+// DB read needed.
 const me = (req, res) => {
-  const adminId = req.admin.id;
+  const { id, adminRole, areaId } = req.admin;
   res.status(200).json({
-    user: { id: adminId, role: 'admin' }
+    user: {
+      id,
+      role: 'admin',
+      adminRole,
+      admin_role: adminRole,
+      areaId,
+      area_id: areaId,
+    }
   });
 };
 

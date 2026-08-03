@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { AuthApi, connectAdminRealtime, disconnectAdminRealtime } from '../api';
 import { storage } from '../utils/storage';
+import { areaHeader } from '../stores/areaHeader';
 
 const AuthContext = createContext();
 
@@ -16,7 +17,12 @@ export const AuthProvider = ({ children }) => {
         try {
           const userData = await AuthApi.me();
           if (!alive) return;
-          setUser(userData.user || userData.data || userData);
+          const resolvedUser = userData.user || userData.data || userData;
+          // Gates whether client.js ever attaches X-Area-Id (§4.4) — must be
+          // set before any area-scoped request fires, including
+          // useAreaStore's own boot-time GET /admin/areas.
+          areaHeader.setAdminRole(resolvedUser?.adminRole);
+          setUser(resolvedUser);
           connectAdminRealtime();
         } catch (error) {
           if (!alive) return;
@@ -27,6 +33,7 @@ export const AuthProvider = ({ children }) => {
           const isAuthError = /Unauthorized/i.test(error?.message || '');
           if (isAuthError) {
             storage.clearToken();
+            areaHeader.reset();
             disconnectAdminRealtime();
             setUser(null);
           } else {
@@ -48,6 +55,7 @@ export const AuthProvider = ({ children }) => {
   useEffect(() => {
     const handleUnauthorized = () => {
       storage.clearToken();
+      areaHeader.reset();
       disconnectAdminRealtime();
       setUser(null);
     };
@@ -58,12 +66,18 @@ export const AuthProvider = ({ children }) => {
   const login = async (credentials) => {
     const data = await AuthApi.login(credentials);
     storage.setToken(data.token);
+    // A fresh login on a shared browser must never inherit a previous
+    // super_admin's picked area, or an area_admin's stale role gate —
+    // reset before setAdminRole so useAreaStore re-validates from scratch.
+    areaHeader.reset();
+    areaHeader.setAdminRole(data.user?.adminRole);
     setUser(data.user);
     connectAdminRealtime();
   };
 
   const logout = () => {
     storage.clearToken();
+    areaHeader.reset();
     disconnectAdminRealtime();
     setUser(null);
   };

@@ -3,6 +3,7 @@ import { useAuth } from './AuthProvider';
 import { useLocation } from 'react-router-dom';
 import ThemeToggle from './ThemeToggle';
 import AdminNotificationsBell from './AdminNotificationsBell';
+import AreaSwitcher from './AreaSwitcher';
 import './Header.css';
 
 const PAGE_META = {
@@ -69,6 +70,9 @@ export default function Header() {
       </div>
 
       <div className="header-actions">
+        {/* Area switcher — renders nothing for an area_admin (§2.10/25.5) */}
+        <AreaSwitcher />
+
         {/* Live clock (isolated to avoid re-rendering the whole Header) */}
         <LiveClock />
 

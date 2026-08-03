@@ -1,4 +1,5 @@
 import { storage } from '../utils/storage';
+import { areaHeader } from '../stores/areaHeader';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL;
 if (!API_BASE) {
@@ -28,6 +29,15 @@ export const apiClient = async (endpoint, options = {}) => {
   const token = storage.getToken();
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  // §4.4 — the ONLY place X-Area-Id is attached. No page component ever
+  // passes an area explicitly. areaHeader.get() already gates this to
+  // super_admin only (an area_admin sending this header at all gets a hard
+  // 403 server-side) and returns null/'all'/a numeric string.
+  const areaId = areaHeader.get();
+  if (areaId) {
+    headers['X-Area-Id'] = areaId;
   }
 
   const config = {

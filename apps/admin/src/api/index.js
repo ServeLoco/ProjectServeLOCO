@@ -273,3 +273,18 @@ export const AnalyticsApi = {
   hourly: (days) => apiClient(withQuery('/admin/analytics/hourly', { days }), { method: 'GET' }),
   activeUsers: (minutes, search) => apiClient(withQuery('/admin/analytics/active-users', { minutes, search }), { method: 'GET' }),
 };
+
+// Super-admin only (TASK 24's areaController.js) — area CRUD, clone-area.
+export const AreasApi = {
+  list: () => apiClient('/admin/areas', { method: 'GET' }),
+  create: (data) => apiClient('/admin/areas', { method: 'POST', body: data }),
+  update: (id, data) => apiClient(`/admin/areas/${id}`, { method: 'PATCH', body: data }),
+  cloneFrom: (id, sourceId, data) => apiClient(`/admin/areas/${id}/clone-from/${sourceId}`, { method: 'POST', body: data || {} }),
+};
+
+// Super-admin only — admin-account CRUD.
+export const AdminsApi = {
+  list: () => apiClient('/admin/admins', { method: 'GET' }),
+  create: (data) => apiClient('/admin/admins', { method: 'POST', body: data }),
+  update: (id, data) => apiClient(`/admin/admins/${id}`, { method: 'PATCH', body: data }),
+};

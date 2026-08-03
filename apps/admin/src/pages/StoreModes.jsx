@@ -7,6 +7,8 @@ import { IMAGE_GUIDANCE } from '../utils/imageGuidance';
 import { getImageUploadError } from '../utils/fileValidation';
 import { useImageCropper } from '../hooks/useImageCropper';
 import ImageCropper from '../components/ImageCropper/ImageCropper';
+import PickAreaNotice from '../components/PickAreaNotice';
+import { useAreaStore } from '../stores/useAreaStore';
 import './Categories.css';
 import './StoreModes.css';
 
@@ -22,14 +24,21 @@ function modeIcon(slug) {
 }
 
 export default function StoreModes() {
+  const { areaId } = useAreaStore() || {};
+  const isAllAreas = areaId === 'all';
+
   const [modes, setModes] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   useEffect(() => {
+    // 25.4 — Store Modes can't be shown/managed for "all" areas at once
+    // (§2.10); skip the doomed 400 fetch and render the inline notice instead.
+    if (isAllAreas) return;
     fetchModes();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAllAreas]);
 
   const fetchModes = async () => {
     try {
@@ -103,6 +112,10 @@ export default function StoreModes() {
   };
 
   const sortedModes = [...modes].sort((a, b) => a.display_order - b.display_order);
+
+  if (isAllAreas) {
+    return <div className="categories-container"><PickAreaNotice label="Store Modes" /></div>;
+  }
 
   return (
     <div className="categories-container">

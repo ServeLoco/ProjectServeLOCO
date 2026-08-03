@@ -59,6 +59,10 @@ describe('Admin area resolution (TASK 8 — requireAdmin -> resolveAdminArea)', 
       .get('/api/admin/me')
       .set('Authorization', `Bearer ${areaAdminToken}`);
     expect(res.statusCode).toEqual(200);
+    // TASK 25 fix: /me used to return only { id, role: 'admin' } — the admin
+    // client needs adminRole/areaId on every reload (not just right after
+    // login) to know whether to show the area switcher/Areas page.
+    expect(res.body.user).toMatchObject({ adminRole: 'area_admin', areaId: 4, area_id: 4 });
   });
 
   it('an area_admin sending X-Area-Id for another area gets 403, never a silent override', async () => {
@@ -85,6 +89,7 @@ describe('Admin area resolution (TASK 8 — requireAdmin -> resolveAdminArea)', 
       .get('/api/admin/me')
       .set('Authorization', `Bearer ${superAdminToken}`);
     expect(res.statusCode).toEqual(200);
+    expect(res.body.user).toMatchObject({ adminRole: 'super_admin', areaId: null });
   });
 
   it('a super_admin with a numeric X-Area-Id succeeds', async () => {
