@@ -565,7 +565,8 @@ row afterward.
       `product_groups` (shops isn't area-scoped until TASK 15, so group rows are stamped from the
       acting admin's session area in `shopAdminController.js`, or from `shops.area_id` — added to the
       `requireShopOwner` SELECT — in `shopOwnerController.js`'s self-service flow).
-- [x] 11.2 `areaScope.seedSystemStoreModes(areaId)` added (reused by future clone-area/TASK 25);
+- [x] 11.2 `areaScope.seedSystemStoreModes(areaId)` added (reused by TASK 24's `POST /admin/areas` and
+      clone-area — see that task's notes);
       `migrate.js` now loops every existing area and `INSERT IGNORE`s `packed`/`fast_food` per area.
       Verified live: the old global UNIQUE on `store_modes.slug` was already dropped and replaced with
       `uniq_store_modes_area_slug(area_id, slug)` back in TASK 3/8 — confirmed via `SHOW INDEX` against
@@ -1755,20 +1756,85 @@ still purely informational/never-failing.
 
 **Commit:** `feat: AREA TASK 24 — super admin endpoints, clone-area, creation gate`
 
-### [ ] TASK 25 — Admin client, area switcher, all-areas mode
+### [x] TASK 25 — Admin client, area switcher, all-areas mode
 **Spec:** §2.10, §4.4 · **Files:** `[adm] src/api/client.js:15`, `src/layout/AdminLayout.jsx`,
 `src/components/AuthProvider.jsx`, a new area store
 
-- [ ] 25.1 `client.js` attaches `X-Area-Id` from a single store — **the only place** it is set (§4.4).
-      No page component passes an area.
-- [ ] 25.2 Area dropdown in `AdminLayout`, visible only to `super_admin`, including an
-      **"All areas"** option sending `X-Area-Id: all`.
-- [ ] 25.3 Switching areas clears client-side cached data (each page fetches in `useEffect`; there is
-      no react-query layer, so a remount or a keyed effect dependency is the mechanism).
-- [ ] 25.4 Pages that reject `all` (Settings, Delivery Zones, Store Modes) render an inline
-      "pick an area" state, not an error toast.
-- [ ] 25.5 `area_admin` sees no switcher, no Areas page, no library editing.
-- [ ] 25.6 Persist the selected area across reloads; validate it against `GET /admin/areas` on boot.
+- [x] 25.1 New `src/stores/areaHeader.js` — a plain (non-React) singleton `client.js` reads from, since
+      `client.js` is a bare fetch wrapper with no access to React context. It's gated by role, not just
+      by value: `areaHeader.get()` returns the picked area only when `currentAdminRole ===
+      'super_admin'`; for anyone else it returns `null` regardless of what's cached, because
+      `areaMiddleware.js`'s `resolveAdminArea` (TASK 8) hard-403s an `area_admin` that sends
+      `X-Area-Id` **at all** — "rejected, not silently overridden." Without this gate, a stale
+      super_admin selection left in `localStorage` from a previous session on a shared browser would
+      403 every request the moment a different admin (or the same admin demoted to `area_admin`) logs
+      in. `AuthProvider.jsx` calls `areaHeader.setAdminRole(...)` from both `login()` and the boot-time
+      `/me` call (see the `me()` backend fix below — without it, a page reload had no way to know the
+      logged-in admin's role at all), and `areaHeader.reset()` on logout/401/before a fresh login.
+      `client.js` itself just adds one `if (areaId) headers['X-Area-Id'] = areaId` block — the only
+      place in the whole app this header is set.
+- [x] 25.2 New `AreaSwitcher.jsx` in `Header.jsx` — a `<select>` populated from `GET /admin/areas`
+      (TASK 24), with an `All areas` option (`value="all"`), rendering nothing (`return null`) unless
+      `useAreaStore().isSuperAdmin`.
+- [x] 25.3 New `src/stores/useAreaStore.jsx` (`AreaProvider`/`useAreaStore`, nested inside
+      `AuthProvider` in `App.jsx`) owns the area list + current selection. `AdminLayout.jsx` keys the
+      routed `<Outlet key={areaId ?? 'none'}>` on the current areaId — switching areas unmounts +
+      remounts whichever page is open, so its plain `useEffect(() => { fetch... }, [])` reruns from
+      scratch against the new area. Zero changes needed to any of the 23 existing pages for this part.
+- [x] 25.4 `Settings.jsx`, `DeliveryZones.jsx` and `StoreModes.jsx` each check `useAreaStore().areaId
+      === 'all'` before firing their fetch (skipping it entirely rather than sending a doomed request)
+      and render a new shared `<PickAreaNotice/>` component instead of their normal form.
+- [x] 25.5 `AreaSwitcher` returns `null` for an `area_admin` (confirmed live: an `area_admin` login
+      shows no `<select>` in the header at all). No Areas/Admins/Library pages exist yet (TASK 26) to
+      gate.
+- [x] 25.6 `AreaProvider`'s boot effect fetches `GET /admin/areas`, then validates
+      `areaHeader.getPersisted()` against the real list — `'all'` is always valid; a numeric id must
+      still exist in the list. Anything invalid (or nothing persisted yet) falls back to the area with
+      `is_default`, never left unset (most admin endpoints 400 a super_admin with no area picked) and
+      never silently defaulted to `'all'`. Live-verified: manually setting `localStorage.admin_area_id`
+      to a nonexistent id (`999`) and reloading correctly fell back to Area 1, not a 400 loop.
+
+**Bug caught and fixed along the way, not in the original task list:** `adminController.js`'s `me()`
+handler returned only `{ id, role: 'admin' }` since long before this multi-area work — `login()`'s own
+response already carried `adminRole`/`areaId` (TASK 7), but `/me` (the ONLY path a page reload takes,
+since `AuthProvider` calls it instead of re-logging in) never did. Without this fix, `useAreaStore`
+would have no way to know a reloaded session belongs to a `super_admin` at all — the switcher would
+silently vanish on every refresh. Fixed to mirror `login()`'s `user` shape, reading straight off
+`req.admin` (already decoded by `requireAdmin`, no extra DB read). Covered in
+`tests/roleProtection.test.js`'s existing area-resolution `/admin/me` cases.
+
+**Second bug caught live, not in the original task list:** the very first version of `AdminLayout.jsx`
+keyed the `<Outlet>` on `areaId` but rendered it unconditionally — on the very first render after
+login, `AreaProvider`'s own `GET /admin/areas` + boot-validation hadn't resolved yet (`areaId` still
+`null`), so the just-mounted page (e.g. `Dashboard.jsx`) fired its own fetch immediately with no
+`X-Area-Id` attached at all and got a real `400 X-Area-Id is required` from the server — reproduced live
+in the browser before being caught (not from a written test — this class of race only shows up against a
+real async boot sequence). Fixed by adding an `areaPending = isSuperAdmin && !initialized` gate in
+`AdminLayout.jsx` that renders a small "Loading your areas…" placeholder instead of the `<Outlet>` until
+`AreaProvider` has resolved a real area — so every page's very first fetch already carries the right
+one. Re-verified live after the fix: fresh login, and a hard reload with a valid token, both loaded the
+Dashboard correctly with no console errors.
+
+**Live verification (real browser, real backend, not a stub):** started both the `api-dev` and
+`admin-dev` dev servers via the preview tooling, created two throwaway admin accounts directly in the
+dev DB (`browsertest_super` / `browsertest_area`, both deleted afterward) since the real seeded
+super_admin's password is only known via env vars this session can't read. Walked through, in the
+actual rendered app: super_admin login shows the switcher defaulted to Area 1; Settings/Delivery
+Zones/Store Modes render normally under Area 1 and correctly show the "Pick an area" notice under "All
+areas"; Orders (a page that legitimately supports `all`, §2.10) renders fine under "All areas" with no
+error; an `area_admin` login shows no switcher at all and its Dashboard loads normally (no `X-Area-Id`
+ever sent — confirmed by the account never hitting `areaMiddleware.js`'s 403); an invalid persisted
+`admin_area_id` (`999`) correctly falls back to Area 1 on reload instead of looping on 400s. Both
+bugs above were caught by this live pass, not by the (separately green) Jest/lint/build checks. Test
+admin accounts and all `localStorage` state cleaned up afterward.
+
+**Test churn:** `npm run lint` (admin app): clean. `npm run build:dev` (production Vite build): clean,
+173 modules transformed, no errors — this app has no Jest suite (build + lint + live browser
+verification are its equivalent). Backend: `tests/roleProtection.test.js` gained response-shape
+assertions on the two existing `/admin/me` cases (area_admin and super_admin) to cover the `me()` fix;
+full API suite 98/98 suites, 1064/1065 tests, 1 pre-existing skip, unaffected otherwise.
+
+**Commit:** `feat: AREA TASK 25 — admin area switcher and all-areas mode`
 
 **Commit:** `feat: AREA TASK 25 — admin area switcher and all-areas mode`
 
