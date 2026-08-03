@@ -57,6 +57,14 @@ describe('httpClient', () => {
     expect(out).toEqual({ hello: 'world' });
   });
 
+  // TASK 28.5 — a conditional GET (ETag/If-None-Match, e.g. bootstrapApi)
+  // must resolve like a success, not throw like every other non-2xx status.
+  it('resolves (does not throw) on a 304, same as a 204 empty body', async () => {
+    mockFetchOnce(jsonResponse(304, null));
+    const out = await apiClient.get('/test', { headers: { 'If-None-Match': '"1-9-3"' } });
+    expect(out).toBeNull();
+  });
+
   it('throws an ApiError on a 4xx response', async () => {
     mockFetchOnce(jsonResponse(404, { code: 'NOT_FOUND', message: 'gone' }));
     await expect(apiClient.get('/missing')).rejects.toMatchObject({ status: 404 });

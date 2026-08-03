@@ -8,14 +8,16 @@
  */
 jest.mock('../src/api', () => ({
   cartApi: { calculate: jest.fn() },
+  bootstrapApi: { getBootstrap: jest.fn() },
 }));
 jest.mock('../src/components/Toast', () => ({ showToast: jest.fn() }));
 
 const Location = require('expo-location');
-const { cartApi } = require('../src/api');
+const { cartApi, bootstrapApi } = require('../src/api');
 const { showToast } = require('../src/components/Toast');
 const { useDeliveryLocationStore } = require('../src/stores/useDeliveryLocationStore');
 const { useCartStore } = require('../src/stores/useCartStore');
+const { useSettingsStore } = require('../src/stores/useSettingsStore');
 const {
   syncDeliveryLocation,
   __setColdStartGpsAppliedForTests,
@@ -48,11 +50,16 @@ describe('syncDeliveryLocation revalidates the cart on a zone change', () => {
     __setColdStartGpsAppliedForTests(true);
     useDeliveryLocationStore.setState({
       coords: null, source: null, insideZone: null, zoneName: null, zoneId: null,
+      areaId: null, areaName: null, brandColor: null, catalogVersion: null,
       recentLocations: [], isInitialSyncComplete: false,
     });
     useCartStore.setState({ items: [] });
     Location.getForegroundPermissionsAsync.mockResolvedValue({ granted: true, canAskAgain: true });
     Location.getCurrentPositionAsync.mockResolvedValue({ coords: { latitude: 12.9, longitude: 77.6 } });
+    // Default: no bootstrap response configured — the sync's own try/catch
+    // swallows this exactly like a real network failure, and tests that
+    // don't care about area/settings state never have to configure it.
+    bootstrapApi.getBootstrap.mockResolvedValue(null);
   });
 
   it('does nothing when the cart is empty', async () => {
@@ -229,5 +236,101 @@ describe('syncDeliveryLocation revalidates the cart on a zone change', () => {
     expect(cartApi.calculate).toHaveBeenCalledTimes(2);
     // GPS is never touched on the manual-pin path.
     expect(Location.getCurrentPositionAsync).not.toHaveBeenCalled();
+  });
+
+  // TASK 28.1/28.2/28.5/28.6 — bootstrap runs alongside the existing zone
+  // check (never replacing it — see syncAreaInfo's own comment on why
+  // checkInsideZone stays authoritative for insideZone) and feeds the new
+  // area fields plus useSettingsStore.
+  describe('bootstrap-driven area resolution (TASK 28)', () => {
+    function bootstrapResponse({ areaId = 1, areaName = 'Area 1', zoneId = 9, catalogVersion = 3 } = {}) {
+      return {
+        deliverable: true,
+        area: { id: areaId, code: 'A', name: areaName, brandColor: '#123456' },
+        zone: { id: zoneId, name: 'Zone A' },
+        settings: { support_phone: '9990001111', upi_id: 'area1@upi' },
+        storeModes: [],
+        zoneGeometry: [],
+        catalogVersion,
+      };
+    }
+
+    it('calls bootstrap with the live pin alongside the zone check and stores areaId/areaName/brandColor/catalogVersion', async () => {
+      cartApi.calculate.mockResolvedValueOnce(zoneCalculateResponse({ zoneId: 9, zoneName: 'Zone A' }));
+      bootstrapApi.getBootstrap.mockResolvedValueOnce(bootstrapResponse());
+
+      await syncDeliveryLocation();
+
+      expect(bootstrapApi.getBootstrap).toHaveBeenCalledWith(
+        expect.objectContaining({ latitude: 12.9, longitude: 77.6 }),
+      );
+      const state = useDeliveryLocationStore.getState();
+      expect(state.areaId).toBe(1);
+      expect(state.areaName).toBe('Area 1');
+      expect(state.brandColor).toBe('#123456');
+      expect(state.catalogVersion).toBe(3);
+    });
+
+    it('pushes support_phone/UPI from bootstrap settings into useSettingsStore, not a stale cached value (28.6)', async () => {
+      cartApi.calculate.mockResolvedValueOnce(zoneCalculateResponse({ zoneId: 9, zoneName: 'Zone A' }));
+      bootstrapApi.getBootstrap.mockResolvedValueOnce(bootstrapResponse());
+
+      await syncDeliveryLocation();
+
+      const settings = useSettingsStore.getState();
+      expect(settings.supportPhone).toBe('9990001111');
+      expect(settings.upiId).toBe('area1@upi');
+    });
+
+    it('sends If-None-Match built from the stored area+zone+catalogVersion on the next sync', async () => {
+      useDeliveryLocationStore.setState({ areaId: 1, zoneId: 9, catalogVersion: 3 });
+      cartApi.calculate.mockResolvedValue(zoneCalculateResponse({ zoneId: 9, zoneName: 'Zone A' }));
+      bootstrapApi.getBootstrap.mockResolvedValueOnce(bootstrapResponse());
+
+      await syncDeliveryLocation();
+
+      expect(bootstrapApi.getBootstrap).toHaveBeenCalledWith(
+        expect.objectContaining({ ifNoneMatch: '"1-9-3"' }),
+      );
+    });
+
+    it('a 304 (null) response leaves the previously stored area info untouched', async () => {
+      useDeliveryLocationStore.setState({ areaId: 1, areaName: 'Area 1', brandColor: '#123456', catalogVersion: 3 });
+      cartApi.calculate.mockResolvedValueOnce(zoneCalculateResponse({ zoneId: 9, zoneName: 'Zone A' }));
+      bootstrapApi.getBootstrap.mockResolvedValueOnce(null);
+
+      await syncDeliveryLocation();
+
+      const state = useDeliveryLocationStore.getState();
+      expect(state.areaId).toBe(1);
+      expect(state.catalogVersion).toBe(3);
+    });
+
+    it('clears the stored area when bootstrap reports the pin is not deliverable (pin left every zone)', async () => {
+      useDeliveryLocationStore.setState({ areaId: 1, areaName: 'Area 1', brandColor: '#123456', catalogVersion: 3 });
+      cartApi.calculate.mockResolvedValueOnce(zoneCalculateResponse({ zoneId: null, zoneName: null }));
+      bootstrapApi.getBootstrap.mockResolvedValueOnce({
+        deliverable: false, area: null, zone: null, settings: null, storeModes: [], zoneGeometry: [], catalogVersion: null,
+      });
+
+      await syncDeliveryLocation();
+
+      const state = useDeliveryLocationStore.getState();
+      expect(state.areaId).toBeNull();
+      expect(state.areaName).toBeNull();
+      expect(state.catalogVersion).toBeNull();
+    });
+
+    it('a bootstrap failure is best-effort — the zone check and cart revalidation still complete', async () => {
+      useCartStore.setState({ items: [CART_ITEM] });
+      cartApi.calculate.mockResolvedValueOnce(zoneCalculateResponse({ zoneId: 9, zoneName: 'Zone A' }));
+      bootstrapApi.getBootstrap.mockRejectedValueOnce(new Error('network down'));
+
+      await syncDeliveryLocation();
+
+      const state = useDeliveryLocationStore.getState();
+      expect(state.insideZone).toBe(true);
+      expect(state.zoneId).toBe(9);
+    });
   });
 });

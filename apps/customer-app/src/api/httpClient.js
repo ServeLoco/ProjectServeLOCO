@@ -197,7 +197,11 @@ async function request(path, options = {}) {
     }
     timeout.clear();
 
-    if (response.ok) {
+    // 304 (conditional GET, ETag/If-None-Match) isn't in fetch's 200-299
+    // "ok" range but isn't an error either — the caller asked for it and
+    // the empty body (parseResponse already returns null for it, same as
+    // 204) means "nothing changed since your last fetch".
+    if (response.ok || response.status === 304) {
       return payload;
     }
 

@@ -42,5 +42,6 @@ export { offersApi } from './offersApi';
 export { dashboardApi } from './dashboardApi';
 export { storeModesApi } from './storeModesApi';
 export { deliveryZonesApi } from './deliveryZonesApi';
+export { bootstrapApi } from './bootstrapApi';
 export * as notificationsApi from './notificationsApi';
 export { trackScreen, trackEvent, initAnalytics, stopAnalytics } from './analyticsClient';

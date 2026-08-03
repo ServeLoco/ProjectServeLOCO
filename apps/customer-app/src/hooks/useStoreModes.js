@@ -8,12 +8,23 @@ const FALLBACK_MODES = [
   { id: 'fast_food', slug: 'fast_food', label: 'Fast Food', display_order: 2 },
 ];
 
-export function useStoreModes() {
+// TASK 28.3 — store modes key off the live pin, same as the catalog and
+// dashboard, instead of the server's users.last_area_id/default fallback.
+// `coords` is optional so every existing caller keeps working unchanged.
+// Read via a ref rather than a `refetch` dependency: a raw GPS fix changes
+// on nearly every fix (sub-meter jitter), and re-fetching store modes on
+// every one of those would be a refetch storm. HomeScreen re-triggers
+// `refetchModes()` itself on an actual zone change (deliveryZoneId), the
+// same trigger it already uses for `refresh` — this hook only needs the
+// latest coordinate at the moment a fetch actually happens.
+export function useStoreModes(coords) {
   const [modes, setModes] = useState(FALLBACK_MODES);
   const mountedRef = useRef(true);
+  const coordsRef = useRef(coords);
+  coordsRef.current = coords;
 
   const refetch = useCallback(() => {
-    return storeModesApi.list()
+    return storeModesApi.list({ latitude: coordsRef.current?.lat, longitude: coordsRef.current?.lng })
       .then(res => {
         if (!mountedRef.current) return;
         const list = res?.data || res?.storeModes || [];

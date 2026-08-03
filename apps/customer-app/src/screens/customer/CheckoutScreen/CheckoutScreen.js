@@ -508,10 +508,13 @@ export default function CheckoutScreen() {
 
   // Always refresh payment settings on checkout — the home screen caches them
   // for up to 5 minutes, so a newly uploaded UPI QR would otherwise stay hidden.
+  // 28.6 — pin-aware too: the UPI target decides which bank account the
+  // payment reaches (§9.4 item 4), so this must resolve the delivery pin's
+  // own area, not fall back to users.last_area_id/default.
   useEffect(() => {
     let isActive = true;
 
-    settingsApi.getSettings()
+    settingsApi.getSettings({ latitude: savedDeliveryLocation?.lat, longitude: savedDeliveryLocation?.lng })
       .then((response) => {
         if (!isActive) return;
         setSettings(normalizeSettings(response));
@@ -521,7 +524,7 @@ export default function CheckoutScreen() {
     return () => {
       isActive = false;
     };
-  }, [setSettings]);
+  }, [setSettings, savedDeliveryLocation?.lat, savedDeliveryLocation?.lng]);
 
   useEffect(() => {
     if (upiQrImageUrl || !upiQrImageId) return undefined;

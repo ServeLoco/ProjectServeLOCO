@@ -41,12 +41,13 @@ import {
 import { showToast } from '../../../components/Toast';
 import { colors, typography, spacing, radius, layout } from '../../../theme';
 import { useCartStore, useSettingsStore, useDeliveryLocationStore, useDeliveryZonesStore } from '../../../stores';
-import { useAuthGate, useStoreModes, useHomeLocationPermission } from '../../../hooks';
+import { useAuthGate, useStoreModes, useHomeLocationPermission, buildAreaETag, applyBootstrapResult } from '../../../hooks';
 import { subscribeProductAvailabilityEvents } from '../../../api/realtimeClient';
 
 
 import {
   cartApi,
+  bootstrapApi,
   dashboardApi,
   notificationsApi,
   productsApi,
@@ -98,6 +99,22 @@ export default function HomeScreen() {
   // every admin-configured zone. insideDeliveryZone is null until the first
   // check resolves, so the banner only shows once we actually know.
   const deliveryCoords = useDeliveryLocationStore(state => state.coords);
+  // TASK 28.3 — dashboard/store-modes fetches key off the live pin (the same
+  // resolveCustomerArea chain the pin already drives everywhere else)
+  // instead of the server's users.last_area_id/default fallback. A ref, not
+  // a dependency, so a sub-meter GPS jitter that doesn't cross a zone
+  // boundary never re-triggers loadHomeData's fetch — only an actual zone
+  // change (deliveryZoneId, already a dependency below) does.
+  const deliveryCoordsRef = useRef(deliveryCoords);
+  deliveryCoordsRef.current = deliveryCoords;
+  // Read (not written) by loadHomeData to build bootstrap's If-None-Match.
+  // Refs, not dependencies — loadHomeData's own success path is what writes
+  // these (applyBootstrapResult), so depending on them directly would rebuild
+  // the callback on every success and re-fire the mount effect in a loop.
+  const deliveryAreaIdRef = useRef(null);
+  deliveryAreaIdRef.current = useDeliveryLocationStore(state => state.areaId);
+  const deliveryCatalogVersionRef = useRef(null);
+  deliveryCatalogVersionRef.current = useDeliveryLocationStore(state => state.catalogVersion);
   const insideDeliveryZone = useDeliveryLocationStore(state => state.insideZone);
   const deliveryZoneName = useDeliveryLocationStore(state => state.zoneName);
   const deliveryZoneId = useDeliveryLocationStore(state => state.zoneId);
@@ -245,7 +262,7 @@ export default function HomeScreen() {
     setFreeDeliveryUnlocked,
   ]);
 
-  const { modes, refetchModes } = useStoreModes();
+  const { modes, refetchModes } = useStoreModes(deliveryCoords);
   // 'fast_food' is only the pre-fetch fallback — swapped for the admin's
   // configured default mode (store_modes.is_default) once modes load, but
   // only if the user hasn't already switched tabs this session.
@@ -350,16 +367,33 @@ export default function HomeScreen() {
     }
     setHomeError('');
 
-    // Only fetch settings if stale (older than 5 min) or explicit refresh
-    const settingsPromise = (refresh || isSettingsStale())
-      ? settingsApi.getSettings()
+    // TASK 28.7 — the settings half of the old cold-start pair is a clean
+    // swap for bootstrap: same 5-min staleness gate, but one round trip also
+    // resolves the live pin's area/zone/catalogVersion instead of just
+    // settings, and degrades to the exact same users.last_area_id/default
+    // fallback settingsApi.getSettings() used when there's no pin yet
+    // (permission not granted, cold start still resolving) — see
+    // resolveCustomerArea's own chain. Dashboard sections aren't in
+    // bootstrap's contract, so getDashboard stays its own call, now also
+    // pin-aware (28.3) so it resolves the same area bootstrap just did.
+    const bootstrapPromise = (refresh || isSettingsStale())
+      ? bootstrapApi.getBootstrap({
+        latitude: deliveryCoordsRef.current?.lat,
+        longitude: deliveryCoordsRef.current?.lng,
+        ifNoneMatch: buildAreaETag({
+          areaId: deliveryAreaIdRef.current, zoneId: deliveryZoneId, catalogVersion: deliveryCatalogVersionRef.current,
+        }),
+      })
       : Promise.resolve(null);
 
     Promise.allSettled([
-      dashboardApi.getDashboard({ storeType: currentApiStoreType, include_closed_shops: 1 }),
-      settingsPromise,
+      dashboardApi.getDashboard({
+        storeType: currentApiStoreType, include_closed_shops: 1,
+        latitude: deliveryCoordsRef.current?.lat, longitude: deliveryCoordsRef.current?.lng,
+      }),
+      bootstrapPromise,
       notificationsApi.getUnreadCount().catch(() => 0),
-    ]).then(([dashboardResult, settingsResult, notificationsResult]) => {
+    ]).then(([dashboardResult, bootstrapResult, notificationsResult]) => {
       if (!isMounted) return;
 
       if (dashboardResult.status === 'fulfilled') {
@@ -374,9 +408,8 @@ export default function HomeScreen() {
         setHomeError('Unable to load home sections. Pull to retry.');
       }
 
-      if (settingsResult.status === 'fulfilled' && settingsResult.value !== null) {
-        const nextSettings = normalizeSettings(settingsResult.value);
-        setSettings(nextSettings);
+      if (bootstrapResult.status === 'fulfilled' && bootstrapResult.value !== null) {
+        applyBootstrapResult(bootstrapResult.value);
         markSettingsFetched();
       }
 
@@ -413,8 +446,13 @@ export default function HomeScreen() {
     // deliveryZoneId is not read in the body — it is here so a zone change
     // rebuilds this callback and re-fires the load effect below, refetching
     // the dashboard for the new zone (the effect above has already dropped
-    // the now-wrong cached sections).
-  }, [currentApiStoreType, deliveryZoneId, fadeAnim, setSettings, markSettingsFetched, isSettingsStale, slideAnim, staggerCatAnims, staggerComboAnims, refetchModes]);
+    // the now-wrong cached sections). deliveryCoords/areaId/catalogVersion
+    // are read through refs instead of as dependencies — this callback's
+    // own success handler (applyBootstrapResult) is what writes areaId/
+    // catalogVersion, so depending on them directly would rebuild this
+    // callback every time it succeeds, re-firing the mount effect below in
+    // an infinite loop.
+  }, [currentApiStoreType, deliveryZoneId, fadeAnim, markSettingsFetched, isSettingsStale, slideAnim, staggerCatAnims, staggerComboAnims, refetchModes]);
 
   useEffect(() => {
     let cleanupLoad;
@@ -434,7 +472,10 @@ export default function HomeScreen() {
   // (settings.shop_open) changing while Home stays mounted, without the
   // jarring full reload loadHomeData(false) would cause on every focus.
   const refreshDashboardSilently = React.useCallback(() => {
-    dashboardApi.getDashboard({ storeType: currentApiStoreType, include_closed_shops: 1 })
+    dashboardApi.getDashboard({
+      storeType: currentApiStoreType, include_closed_shops: 1,
+      latitude: deliveryCoordsRef.current?.lat, longitude: deliveryCoordsRef.current?.lng,
+    })
       .then(response => {
         const sectionsData = response?.data?.sections;
         if (sectionsData) {
@@ -443,7 +484,9 @@ export default function HomeScreen() {
         }
       })
       .catch(() => {});
-    settingsApi.getSettings()
+    // 28.6 — pin-aware too, same as loadHomeData's bootstrap call, so a
+    // focus/reconnect refresh can't paint a different area's support/UPI.
+    settingsApi.getSettings({ latitude: deliveryCoordsRef.current?.lat, longitude: deliveryCoordsRef.current?.lng })
       .then(response => {
         if (response !== null && response !== undefined) {
           setSettings(normalizeSettings(response));
@@ -663,7 +706,10 @@ export default function HomeScreen() {
         const slug = mode?.slug;
         if (!slug || slug === currentApiStoreType || prefetchedModesRef.current.has(slug)) continue;
         prefetchedModesRef.current.add(slug);
-        dashboardApi.getDashboard({ storeType: slug, include_closed_shops: 1 })
+        dashboardApi.getDashboard({
+          storeType: slug, include_closed_shops: 1,
+          latitude: deliveryCoordsRef.current?.lat, longitude: deliveryCoordsRef.current?.lng,
+        })
           .then(response => {
             const sectionsData = response?.data?.sections;
             if (sectionsData) {

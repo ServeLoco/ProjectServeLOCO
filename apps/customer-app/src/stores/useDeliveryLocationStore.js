@@ -24,6 +24,15 @@ export const useDeliveryLocationStore = create(
       // zone" (cache scoping, cart revalidation) must compare ids, since
       // names are editable in admin and two zones can share one.
       zoneId: null,
+      // TASK 28.2 — the pin's resolved area, from GET /bootstrap. null when
+      // never resolved yet, or when the pin fell outside every zone (§2.4 —
+      // "we don't deliver here", never a lingering stale area).
+      areaId: null,
+      areaName: null,
+      brandColor: null,
+      // area.catalog_version at the last successful (non-304) bootstrap
+      // fetch — sent back as the source for If-None-Match on the next one.
+      catalogVersion: null,
       recentLocations: [], // [{ lat, lng, label }] manually chosen locations
       // Runtime-only startup gate. It must not persist: every fresh launch
       // waits for the current location check before Home reveals products.
@@ -66,6 +75,16 @@ export const useDeliveryLocationStore = create(
 
       setInsideZone: (insideZone) => set({ insideZone }),
 
+      // TASK 28.2 — result of a bootstrap fetch for the pin currently in
+      // `coords`. deliverable: false (pin outside every zone) clears the
+      // area rather than leaving a stale one in place (§2.4). A 304 (no
+      // change) is never routed here — the caller just keeps what's set.
+      setAreaInfo: ({ deliverable, areaId, areaName, brandColor, catalogVersion }) => set(
+        deliverable
+          ? { areaId, areaName, brandColor, catalogVersion }
+          : { areaId: null, areaName: null, brandColor: null, catalogVersion: null },
+      ),
+
       // GPS permission revoked (device Settings) after a prior fix already
       // persisted coords/insideZone — a stale gps-sourced fix left in place
       // reads as "known out of zone" instead of "no coords", so restart shows
@@ -74,7 +93,10 @@ export const useDeliveryLocationStore = create(
       // survive this.
       clearGpsLocation: () => {
         if (get().source === 'manual') return;
-        set({ coords: null, source: null, insideZone: null, zoneName: null, zoneId: null });
+        set({
+          coords: null, source: null, insideZone: null, zoneName: null, zoneId: null,
+          areaId: null, areaName: null, brandColor: null, catalogVersion: null,
+        });
       },
 
       // Name and id are always resolved from the same match, so they are set
@@ -86,13 +108,18 @@ export const useDeliveryLocationStore = create(
 
       clearManualLocation: () => set({
         coords: null, source: null, insideZone: null, zoneName: null, zoneId: null,
+        areaId: null, areaName: null, brandColor: null, catalogVersion: null,
       }),
     }),
     {
       name: 'serveloco-delivery-location',
       storage: createJSONStorage(() => AsyncStorage),
-      partialize: ({ coords, source, insideZone, zoneName, zoneId, recentLocations }) => ({
+      partialize: ({
         coords, source, insideZone, zoneName, zoneId, recentLocations,
+        areaId, areaName, brandColor, catalogVersion,
+      }) => ({
+        coords, source, insideZone, zoneName, zoneId, recentLocations,
+        areaId, areaName, brandColor, catalogVersion,
       }),
       // Devices that persisted a longer history under the old
       // RECENT_LOCATION_LIMIT still have extra entries sitting in

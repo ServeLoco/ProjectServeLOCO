@@ -1,10 +1,11 @@
 import { useEffect } from 'react';
 import { AppState } from 'react-native';
 import * as Location from 'expo-location';
-import { cartApi } from '../api';
+import { cartApi, bootstrapApi } from '../api';
 import { useDeliveryLocationStore } from '../stores/useDeliveryLocationStore';
 import { useCartStore } from '../stores/useCartStore';
-import { normalizeCartCalculation } from '../utils/apiMappers';
+import { useSettingsStore } from '../stores/useSettingsStore';
+import { normalizeCartCalculation, normalizeSettings } from '../utils/apiMappers';
 import { showToast } from '../components/Toast';
 
 const GPS_TIMEOUT_MS = 8000;
@@ -35,6 +36,60 @@ async function checkInsideZone(lat, lng) {
     };
   } catch (_) {
     return null; // unknown — see the callers' handling below
+  }
+}
+
+// Mirrors bootstrapRoutes.js's bootstrapCatalogETag exactly — sending back
+// anything else just means the server never 304s and a full body comes back
+// (correct, just not the fast path). Shared with HomeScreen's own cold-start
+// bootstrap call so the format can't drift between the two call sites.
+function buildAreaETag({ areaId, zoneId, catalogVersion }) {
+  return areaId != null && catalogVersion != null
+    ? `"${areaId}-${zoneId ?? 'none'}-${catalogVersion}"`
+    : undefined;
+}
+
+// Fans a GET /bootstrap response out into the two stores it feeds. Shared
+// between this hook's own periodic sync and HomeScreen's cold-start call so
+// "what a bootstrap response means" is defined exactly once (§4.5-style
+// chokepoint). A 304 (null) is a deliberate no-op — the caller keeps
+// whatever it already had.
+function applyBootstrapResult(result) {
+  if (result === null) return;
+  useDeliveryLocationStore.getState().setAreaInfo({
+    deliverable: Boolean(result.deliverable),
+    areaId: result.area?.id ?? null,
+    areaName: result.area?.name ?? null,
+    brandColor: result.area?.brandColor ?? result.area?.brand_color ?? null,
+    catalogVersion: result.catalogVersion ?? null,
+  });
+  // 28.6 — support_phone/whatsapp_number/UPI must reflect the resolved
+  // area, not a stale globally-cached value. Same store, same normalizer
+  // CheckoutScreen/ProfileScreen/OrderDetailScreen already read from.
+  if (result.settings) {
+    useSettingsStore.getState().setSettings(normalizeSettings(result));
+  }
+}
+
+// TASK 28.1/28.2/28.5 — resolves the pin's area/zone/settings/storeModes/
+// catalogVersion in one round trip. Kept separate from checkInsideZone
+// (still the source of truth for insideZone) rather than replacing it:
+// bootstrap's `zone` comes from the same matchZone chain but knows nothing
+// about exclusion zones, which checkInsideZone's cart/calculate call
+// deliberately does — see its own comment. Sends the previously stored
+// area+zone+catalogVersion back as If-None-Match so an unchanged area/zone
+// comes back as a bare 304. Best-effort: any failure leaves the store's
+// existing area/settings exactly as they were, same as every other
+// best-effort call in this hook.
+async function syncAreaInfo(lat, lng) {
+  const { areaId, zoneId, catalogVersion } = useDeliveryLocationStore.getState();
+  try {
+    const result = await bootstrapApi.getBootstrap({
+      latitude: lat, longitude: lng, ifNoneMatch: buildAreaETag({ areaId, zoneId, catalogVersion }),
+    });
+    applyBootstrapResult(result);
+  } catch (_) {
+    // Best-effort — see comment above.
   }
 }
 
@@ -154,7 +209,10 @@ async function syncDeliveryLocation() {
     if (!forceGps && source === 'manual' && coords) {
       // Re-validate the saved pin (a zone may have since changed/been
       // removed) without moving it — only Home's Change Location does that.
-      const result = await checkInsideZone(coords.lat, coords.lng);
+      const [result] = await Promise.all([
+        checkInsideZone(coords.lat, coords.lng),
+        syncAreaInfo(coords.lat, coords.lng),
+      ]);
       if (result !== null) {
         setInsideZone(result.insideZone);
         setZone(result.zoneName, result.zoneId);
@@ -200,7 +258,10 @@ async function syncDeliveryLocation() {
       if (gpsTimeoutId) clearTimeout(gpsTimeoutId);
     }
     const { latitude, longitude } = position.coords;
-    const result = await checkInsideZone(latitude, longitude);
+    const [result] = await Promise.all([
+      checkInsideZone(latitude, longitude),
+      syncAreaInfo(latitude, longitude),
+    ]);
     setGpsLocation(
       latitude,
       longitude,
@@ -254,4 +315,7 @@ function useDeliveryLocationSync() {
   }, []);
 }
 
-export { useDeliveryLocationSync, syncDeliveryLocation, __setColdStartGpsAppliedForTests };
+export {
+  useDeliveryLocationSync, syncDeliveryLocation, __setColdStartGpsAppliedForTests,
+  buildAreaETag, applyBootstrapResult,
+};

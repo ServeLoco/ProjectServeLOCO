@@ -12,6 +12,7 @@ const bootstrapRoutes = require('../src/routes/bootstrapRoutes');
 const { pool } = require('../src/db/mysql');
 const areaScope = require('../src/utils/areaScope');
 const microCache = require('../src/utils/microCache');
+const { bustSettingsCache } = require('../src/controllers/settingsController');
 
 jest.mock('../src/db/mysql', () => ({
   pool: { query: jest.fn() },
@@ -32,6 +33,13 @@ describe('GET /bootstrap (TASK 27.3-27.6)', () => {
     jest.clearAllMocks();
     areaScope._resetCachesForTests();
     microCache.clearAll();
+    // settingsController's own 15s settingsCache is a separate module-level
+    // cache _resetCachesForTests()/microCache don't touch — without this, a
+    // later test's getSettingsForArea(1) call silently becomes a cache hit
+    // off whatever an earlier test in this file already cached for area 1,
+    // consuming one fewer mocked query than expected and shifting every
+    // mock after it into the wrong test.
+    bustSettingsCache(1);
   });
 
   it('a pin resolving into a real zone returns deliverable: true with area/zone/settings/storeModes/zoneGeometry/catalogVersion', async () => {
@@ -80,20 +88,46 @@ describe('GET /bootstrap (TASK 27.3-27.6)', () => {
     });
   });
 
-  it('sets an ETag and 304s a matching If-None-Match', async () => {
+  it('sets a zone-aware ETag and 304s a matching If-None-Match', async () => {
     pool.query
       .mockResolvedValueOnce([[AREA_1]])
       .mockResolvedValueOnce([[{ id: 900, area_id: 1, name: 'Zone A', boundary: JSON.stringify([
         { lat: 10, lng: 10 }, { lat: 10, lng: 11 }, { lat: 11, lng: 11 }, { lat: 11, lng: 10 },
       ]), parent_zone_id: null, active: 1 }]]);
-    // catalogETag's getAreaById reuses the areasCache the bbox lookup above
-    // already populated — no extra query needed.
+    // bootstrapCatalogETag's getAreaById reuses the areasCache the bbox
+    // lookup above already populated — no extra query needed.
 
     const res = await request(app)
       .get('/api/bootstrap?latitude=10.5&longitude=10.5')
-      .set('If-None-Match', '"1-5"');
+      .set('If-None-Match', '"1-900-5"');
 
     expect(res.statusCode).toEqual(304);
+  });
+
+  it('does NOT 304 a pin that resolved into a different zone in the same area, even with the same catalogVersion', async () => {
+    pool.query
+      .mockResolvedValueOnce([[AREA_1]]) // bbox candidates
+      .mockResolvedValueOnce([[{ // this time the pin matches a DIFFERENT zone, 901
+        id: 901, area_id: 1, name: 'Zone B', boundary: JSON.stringify([
+          { lat: 10, lng: 10 }, { lat: 10, lng: 11 }, { lat: 11, lng: 11 }, { lat: 11, lng: 10 },
+        ]), parent_zone_id: null, active: 1,
+      }]])
+      .mockResolvedValueOnce([[{ id: 901, name: 'Zone B', boundary: JSON.stringify([
+        { lat: 10, lng: 10 }, { lat: 10, lng: 11 }, { lat: 11, lng: 11 }, { lat: 11, lng: 10 },
+      ]), parent_zone_id: null }]]) // getActiveZonesForArea
+      .mockResolvedValueOnce([[{ area_id: 1, shop_open: 1 }]]) // settings
+      .mockResolvedValueOnce([[]]); // store modes
+
+    // Client still holds the ETag from a prior fix in zone 900 — same area,
+    // same catalog_version, but the pin now resolves to zone 901.
+    const res = await request(app)
+      .get('/api/bootstrap?latitude=10.5&longitude=10.5')
+      .set('If-None-Match', '"1-900-5"');
+
+    expect(res.statusCode).toEqual(200);
+    expect(res.body.deliverable).toBe(true);
+    expect(res.body.zone).toMatchObject({ id: 901, name: 'Zone B' });
+    expect(res.headers.etag).toEqual('"1-901-5"');
   });
 
   it('no pin at all falls back through users.last_area_id / the default area (resolveCustomerArea\'s own chain), not "we don\'t deliver here"', async () => {
