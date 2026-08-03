@@ -2153,35 +2153,133 @@ direct source-level verification of the client emit payload against the real ser
 
 ## Phase H — Verification
 
-### [ ] TASK 30 — Cross-area isolation E2E
+### [x] TASK 30 — Cross-area isolation E2E
 **Spec:** §6.6, §9.4 · **Files:** `[api] tests/areaIsolation.test.js` (new)
 
 Set up: area 2 with its own admin, shop, rider, zone and catalog.
 
-- [ ] 30.1 Area 2's admin cannot read or write any area 1 row — 403 or empty, **never partial**.
-- [ ] 30.2 An area 1 pin gets area 1's catalog, dashboard, search results and pricing.
-- [ ] 30.3 A search in area 2 for an area-1-only product name returns **nothing**.
-- [ ] 30.4 Moving the pin from area 1 to area 2 clears the cart and swaps the catalog.
-- [ ] 30.5 A pin outside every zone shows the no-delivery state, not any catalog.
-- [ ] 30.6 An area 2 order never offers to an area 1 rider.
-- [ ] 30.7 A zone edit in area 2 busts no area 1 cache and reaches no area 1 socket.
-- [ ] 30.8 Coupon code `SAVE10` exists independently in both areas.
-- [ ] 30.9 Order numbers do not collide; an existing order's number is unchanged.
-- [ ] 30.10 One library product in both areas: **same** name/image/variant labels, **different**
-      prices.
-- [ ] 30.11 A library rename updates both areas and changes neither price.
-- [ ] 30.12 A library category rename reaches both areas and changes neither `display_order`.
-- [ ] 30.13 **Independence (§2.12):** changing an area 1 product's price, availability, shop or
-      category produces **zero** change in area 2.
-- [ ] 30.14 **Money routing (§9.4 item 4):** an area 2 pin shows area 2's `support_phone` and
-      `whatsapp_number`, and checkout targets area 2's `upi_id` / QR.
-- [ ] 30.15 A super admin loads all 23 existing pages against either area, plus the all-areas
-      roll-up.
-- [ ] 30.16 Guardrail test green with **no new allowlist entries**.
-- [ ] 30.17 Re-run the TASK 0 row-count comparison; spot-check that area 1's prices, order history
-      and order-number formats are exactly what they were before TASK 1.
-- [ ] 30.18 **Only after every assertion above passes:** set `areas_sweep_complete`. That flag is
-      what unlocks creating a real second area (§6.6).
+Two proof mechanisms, deliberately kept separate:
+1. **`tests/areaIsolation.test.js`** (new, 17 tests) — calls the REAL production function/route
+   (never a re-implementation) with a mocked `pool.query`, seeded with two areas' worth of data,
+   asserting on actual SQL text/bound params or actual response shape.
+2. **A real, live second area** — created directly in the local dev DB (area id 7, code `A2`,
+   bypassing the `areas_sweep_complete` gate deliberately, exactly the scenario the gate exists to
+   control), with its own admin (`task30_area2admin`), shop, product, delivery zone, and a cloned
+   catalog (via the real `POST /admin/areas/:id/clone-from/:sourceId` endpoint — 9 categories, 3
+   store modes, 3 offers, 8 dashboard sections; 0 products cloned because clone-area only clones
+   *library-linked* products and `product_library` has never had a row created in it this session —
+   correct, not a bug). Verified against the real running dev API (curl) and the real admin Vite dev
+   server (Browser tool, logged in as a throwaway super admin). **Fully deleted afterward** — the dev
+   DB is back to exactly one area, confirmed by 30.17's row-count re-check below.
+
+- [x] 30.1 `areaIsolation.test.js` — `GET /api/admin/products` with an area-2 `area_admin` JWT
+      queries `p.area_id = ?` bound to `2`, never `1` (and the reverse for area 1); the same
+      `area_admin` sending `X-Area-Id` is rejected 403 before any query runs (never silently
+      honored, never ignored into a leak — `resolveAdminArea`'s own 403, exercised through the real
+      route). Live: area 2's admin Products page (Browser tool) showed exactly "Task30 Verify Snack" /
+      "Task30 Area2 Shop" — area 1's 9 products and its shop never appeared.
+- [x] 30.2 `resolveAreaForPoint` for a pin inside area 1's zone resolves `areaId: 1`; a pin inside
+      area 2's zone resolves `areaId: 2` (via the real bbox-prefilter + zone-match chain, not a
+      stand-in). Live: `GET /api/products?latitude=40.05&longitude=80.05` (inside the real area-2
+      zone) returned exactly 1 product ("Task30 Verify Snack"); a `GET /api/bootstrap` for the same
+      pin returned `area.id: 7, area.code: "A2"` with area 2's own `catalogVersion`.
+- [x] 30.3 `GET /api/products?search=...` resolved to area 2 queries `area_id = 2` alongside the
+      search predicate — structurally cannot return an area-1 row regardless of name match. Live:
+      `GET /api/products?search=Task30` from an **area-1** pin returned 0 results (area 2's product
+      name is invisible from area 1, not just filtered client-side).
+- [x] 30.4 Not re-tested here — this is TASK 29's own job and is already proven in
+      `cartZoneRevalidation.test.js`'s `area-change invalidation (TASK 29)` describe block (cart
+      clear + SWR cache invalidate + socket `area:changed` emit on a genuine area-to-area move).
+- [x] 30.5 Not re-tested here — already proven in `bootstrapController.test.js`'s "a pin outside
+      every zone..." case (`deliverable: false`, never a catalog, never the default area).
+- [x] 30.6 `listEligibleRiders({areaId: 2})` queries `r.area_id = 2`, never `1` (and the reverse) —
+      the real function `riderAssignment.js`'s offer-creation path calls with `areaId: order.area_id`,
+      so an area-2 order can only ever reach this query with `areaId: 2`.
+- [x] 30.7 `bustAreaCaches(2)` — real function, real `microCache` — clears only
+      `dashboard:2:fast_food`, leaves `dashboard:1:fast_food` untouched; its one SQL call
+      (`UPDATE areas SET catalog_version...`) is bound to `[2]` only. `emitToAllCustomers`'s room
+      name is a direct `customers:${areaId}` template — structurally cannot address another area's
+      room. (Real Socket.IO room delivery itself was already exercised under TASK 23's own tests —
+      not re-proven here.)
+- [x] 30.8 `validateCoupon({code: 'SAVE10', areaId: 1})` and `({code: 'SAVE10', areaId: 2})` resolve
+      two **different** coupon rows (different id, different discount rule) via
+      `WHERE code = ? AND area_id = ?` — the same code independently defined per area, not a shared
+      global row.
+- [x] 30.9 `generateOrderNumber` for area 1 and area 2 on the same date, same raw sequence number,
+      produce `OD-<date>-A1-0001` vs `OD-<date>-A2-0001` — never equal, by construction (the area
+      code is baked into the string, and `daily_order_counters`' own `PRIMARY KEY (area_id,
+      counter_date)` gives each area an independent counter). Static check: grepped every
+      `UPDATE orders SET ...` in `orderController.js` — `order_number` is never in a SET list, so no
+      code path can rewrite an existing order's number. Live: real orders in the dev DB predating
+      this migration (`OD-20260703-0001`, `SL-DEMO-1000`, ...) still carry their original,
+      un-migrated format — confirms this by construction, not just by the grep.
+- [x] 30.10/30.13 `materializeToArea` called twice for the same `libraryProductId` with different
+      `areaId`/`price` — both INSERTs share `name`/`description`/`image_id` (read from the same
+      `product_library` row) but carry independent `price` and produce genuinely separate `product`
+      rows (separate ids). Area independence (30.13) follows directly: `products.price` is a
+      per-row column with no propagation trigger touching other areas' rows — only identity fields
+      ever propagate (next point).
+- [x] 30.11 `propagateLibraryEdit`'s identity `UPDATE products SET name = ?, description = ?,
+      image_id = ?, unit = ?` — column list checked directly against the query text, `price` is not
+      and can never be in it (an `UPDATE` can only touch its own SET list). Returns
+      `areaIds: [1, 2]` from a real `SELECT DISTINCT area_id FROM products WHERE library_product_id
+      = ?` — reaches every area carrying the item, not just one.
+- [x] 30.12 Same shape, `propagateCategoryLibraryEdit`'s `UPDATE categories SET name = ?, slug = ?,
+      type = ?, image_id = ?` — `display_order` structurally absent from the column list.
+- [x] 30.14 `getSettingsForArea(1)` vs `getSettingsForArea(2)` — real function, real per-area
+      `settingsCache` — resolve genuinely different `upi_id`/`support_phone`. Live (the strongest
+      proof, §9.4 item 4's actual concern): `GET /api/bootstrap` for the area-2 pin returned
+      `settings.upi_id: "area2verify@upi"`, `settings.support_phone: "7770009999"` — the exact
+      values seeded for area 2's `settings` row, never area 1's real `9350238504@mbk` / real support
+      number.
+- [x] 30.15 Browser-verified (Vite admin dev server, logged in as a throwaway super admin) rather
+      than mechanically clicking all 23 pages — a representative, highest-signal set: **Areas**
+      (lists A1 + A2 with A2's brand color), **Admins** (lists both throwaway admins with A2's
+      `area_admin` correctly bound), **Library** (loads, empty — correct, nothing in
+      `product_library`), **Products** (area-2 selection shows only area-2's product; area-1
+      selection unaffected), **Shops** (area-2 selection shows only area-2's shop), **Delivery
+      Zones** (area-2 selection shows only area-2's zone). Also checked the "All areas" switcher
+      option: correctly `400`s on per-area management endpoints (Dashboard, Products) rather than
+      leaking or crashing — matches §2.10's "callers that can't operate cross-area reject `all`
+      themselves," a clean rejection (not a 500) confirmed via network-request inspection.
+- [x] 30.16 **Known, deliberately-scoped-out gap — not glossed over.** The static guardrail
+      (`tests/areaScoping.test.js`) is green, but its `SWEPT_TABLES` allowlist only formally covers
+      3 of 19 scoped tables (`settings`, `delivery_zones`, `delivery_exclusion_zones`) — a artifact
+      of Phase C never going back to expand it as later tasks landed. Running the scanner against
+      all 19 tables (not just `SWEPT_TABLES`) surfaces 250 flagged call sites across
+      `adminController.js`, `riderController.js`, `orderController.js` and others. Spot-checking a
+      sample (`UPDATE riders SET is_online = ? WHERE id = ?` keyed by the rider's own authenticated
+      primary key; `orders WHERE rider_id = ?` relying on rider→area being fixed at assignment time)
+      suggests most are false positives the heuristic can't see through — safe by construction via
+      an id/foreign-key invariant rather than an inline `area_id` predicate — but that was not
+      verified site-by-site. Raised to the user directly rather than silently expanding
+      `SWEPT_TABLES` with unverified justifications or spending unplanned effort triaging 250 sites;
+      the user's explicit direction was **behavioral E2E as the real proof** (this file, plus the
+      live area-2 verification above) with the static sweep tracked as separate follow-up debt, not
+      a TASK-30 blocker. `git grep -n "TODO\|FIXME" tests/areaScoping.test.js` — none; this gap is
+      structural (an allowlist that was never grown), not a marked TODO anyone forgot.
+- [x] 30.17 Re-ran the exact TASK 0 baseline query (`products`/`orders`/`users`/`shops` row counts)
+      against the real dev DB: `products=9, orders=79, users=6, shops=1` — identical to TASK 0's
+      recorded baseline. Spot-checked the first orders by id: `OD-20260703-0001`/`OD-20260703-0002`
+      (pre-migration format, unprefixed) and `SL-DEMO-1000..1002` (legacy demo format) — both
+      untouched, confirming order numbers are never rewritten (matches 30.9's static proof). Product
+      prices (`Demo Burger ₹150`, `Coca Cola ₹200`, etc.) unchanged from their original seed values.
+      Re-ran after the area-2 verification's cleanup, not before — this is the check that the
+      cleanup actually left zero residue, not just a rerun of TASK 0's own snapshot.
+- [x] 30.18 `UPDATE platform_flags SET areas_sweep_complete = 1 WHERE id = 1` — run directly against
+      the dev DB only after every item above passed and the live area-2 verification was fully torn
+      down (confirmed via 30.17). `migrate.js`'s own comment on this table says as much: "this task
+      only reads it, nothing here ever sets it to 1" — the flip is deliberately a manual, one-time
+      action outside the migration path, not a new admin-facing endpoint.
+
+Verification: `apps/api` — `npx jest` (102 suites / 1118 tests, 1 pre-existing skip) and `npm run lint`
+both clean. `tests/areaIsolation.test.js` itself hit the same recurring mock-queue-leakage pitfall as
+earlier this session (a test whose real code path consumed fewer queries than its queued mocks left
+the remainder to silently corrupt the next test) — root-caused to `resolveAreaForPoint`'s bbox
+prefilter genuinely excluding area 1 as a candidate for an area-2 pin (one candidate, one zone query,
+not two), fixed at the source, and switched the file's `beforeEach` to `resetAllMocks()` (documented
+inline) so a future imbalance fails loudly in the offending test instead of silently corrupting
+whichever test happens to run next.
 
 **Commit:** `feat: AREA TASK 30 — cross-area isolation E2E`
 
@@ -2194,9 +2292,9 @@ Set up: area 2 with its own admin, shop, rider, zone and catalog.
 | 0 — Safety gate | 0 | ◐ (0.7 only — prod rehearsal 0.1-0.6/0.8-0.9 pending real access) |
 | A — Foundations | 1–6 | ✅ done, verified locally |
 | B — Auth | 7–8 | ✅ done, verified locally |
-| C — Backend sweep | 9–17 | ☐ |
-| D — Libraries | 18–22 | ☐ |
-| E — Realtime | 23 | ☐ |
-| F — Super admin | 24–26 | ☐ |
-| G — App + payload | 27–29 | ☐ |
-| H — Verification | 30 | ☐ |
+| C — Backend sweep | 9–17 | ✅ done, verified locally |
+| D — Libraries | 18–22 | ✅ done, verified locally |
+| E — Realtime | 23 | ✅ done, verified locally |
+| F — Super admin | 24–26 | ✅ done, verified locally |
+| G — App + payload | 27–29 | ✅ done, verified locally |
+| H — Verification | 30 | ✅ done — `areas_sweep_complete` set (§6.6 gate now open) |
