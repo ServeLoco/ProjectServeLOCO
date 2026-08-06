@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { LibraryApi, CategoryLibraryApi, StoreModeLibraryApi, CategoriesApi, ImagesApi } from '../api';
 import { readList } from '../utils/apiResponse';
 import { getUploadedImage, normalizeImageUrl, handleImageError } from '../utils/imageUrl';
@@ -7,6 +7,7 @@ import { useImageCropper } from '../hooks/useImageCropper';
 import ImageCropper from '../components/ImageCropper/ImageCropper';
 import PickAreaNotice from '../components/PickAreaNotice';
 import { useAreaStore } from '../stores/useAreaStore';
+import { useStoreModes } from '../hooks/useStoreModes';
 import { GENERIC_ERROR } from '../utils/constants';
 import './Library.css';
 
@@ -23,12 +24,14 @@ const TABS = [
 // all funnel through the same three-button pattern.
 export default function Library() {
   const { areaId, areas, isSuperAdmin } = useAreaStore() || {};
+  const { modes } = useStoreModes();
   const isAllAreas = areaId === 'all';
   const [tab, setTab] = useState('products');
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [search, setSearch] = useState('');
+  const requestIdRef = useRef(0);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingRow, setEditingRow] = useState(null);
@@ -39,11 +42,13 @@ export default function Library() {
   const [uploadMessage, setUploadMessage] = useState(null);
 
   const [addToAreaRow, setAddToAreaRow] = useState(null);
+  const [addToAreaMode, setAddToAreaMode] = useState('');
   const [addToAreaCategoryId, setAddToAreaCategoryId] = useState('');
   const [addToAreaPrice, setAddToAreaPrice] = useState('');
   const [addToAreaSaving, setAddToAreaSaving] = useState(false);
   const [addToAreaError, setAddToAreaError] = useState(null);
   const [localCategories, setLocalCategories] = useState([]);
+  const addToAreaCategoriesForMode = localCategories.filter((c) => c.type === addToAreaMode);
 
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -53,21 +58,33 @@ export default function Library() {
 
   const activeTab = TABS.find((t) => t.key === tab);
 
-  const fetchRows = useCallback(async () => {
+  const fetchRows = useCallback(async (requestId = ++requestIdRef.current) => {
     try {
       setLoading(true);
       setError(null);
-      const res = await activeTab.api.list(tab === 'products' ? { search } : { search });
-      setRows(readList(res));
+      const res = await activeTab.api.list({ search });
+      if (requestId !== requestIdRef.current) return;
+      const nextRows = readList(res);
+      setRows(nextRows);
+      setSelectedIds((previous) => new Set(
+        [...previous].filter((id) => nextRows.some((row) => row.id === id))
+      ));
     } catch (err) {
+      if (requestId !== requestIdRef.current) return;
       console.error(err);
       setError(err.message || GENERIC_ERROR);
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) setLoading(false);
     }
   }, [activeTab, search, tab]);
 
-  useEffect(() => { fetchRows(); }, [fetchRows]);
+  useEffect(() => {
+    // Invalidate a previous in-flight response immediately, not after the
+    // debounce delay, so it cannot repaint rows for an older query.
+    const requestId = ++requestIdRef.current;
+    const timer = setTimeout(() => fetchRows(requestId), 250);
+    return () => clearTimeout(timer);
+  }, [fetchRows]);
   useEffect(() => { setSelectedIds(new Set()); }, [tab]);
 
   // Categories in the CURRENTLY selected area — needed so "Add to area" for
@@ -184,6 +201,7 @@ export default function Library() {
 
   const openAddToArea = (row) => {
     setAddToAreaRow(row);
+    setAddToAreaMode(modes[0]?.slug || '');
     setAddToAreaCategoryId('');
     setAddToAreaPrice(row.suggestedPrice ?? row.suggested_price ?? '');
     setAddToAreaError(null);
@@ -244,8 +262,24 @@ export default function Library() {
       const areasPayload = Object.fromEntries(
         areaEntries.map(([areaIdKey, v]) => [areaIdKey, { categoryId: Number(v.categoryId), price: v.price !== '' && v.price != null ? Number(v.price) : undefined }])
       );
-      for (const id of selectedIds) {
-        await LibraryApi.addToAreas(id, { areas: areasPayload });
+      const selectedRows = [...selectedIds].map((id) => ({
+        id,
+        label: rowLabel(rows.find((row) => row.id === id) || { name: `Product ${id}` }),
+      }));
+      const results = await Promise.allSettled(
+        selectedRows.map(({ id }) => LibraryApi.addToAreas(id, { areas: areasPayload }))
+      );
+      const failures = results.filter((result) => result.status === 'rejected');
+      const succeededIds = selectedRows.filter((_, index) => results[index].status === 'fulfilled');
+      const failedSummary = selectedRows
+        .filter((_, index) => results[index].status === 'rejected')
+        .map(({ label }, index) => `${label}: ${results.filter((result) => result.status === 'rejected')[index].reason?.message || GENERIC_ERROR}`)
+        .join('; ');
+      setSelectedIds(new Set());
+      if (failures.length > 0) {
+        setBulkError(`${succeededIds.length} added; ${failures.length} failed. ${failedSummary}`);
+        fetchRows();
+        return;
       }
       setBulkOpen(false);
       setSelectedIds(new Set());
@@ -470,13 +504,32 @@ export default function Library() {
               {tab === 'products' && (
                 <>
                   <label className="form-label">
+                    Shop mode *
+                    <select
+                      className="form-input"
+                      value={addToAreaMode}
+                      onChange={(e) => { setAddToAreaMode(e.target.value); setAddToAreaCategoryId(''); }}
+                      required
+                    >
+                      <option value="" disabled>Select a shop mode</option>
+                      {modes.map((m) => (
+                        <option key={m.slug} value={m.slug}>{m.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="form-label">
                     Category in this area *
-                    <select className="form-input" value={addToAreaCategoryId} onChange={(e) => setAddToAreaCategoryId(e.target.value)} required>
-                      <option value="" disabled>Select a category</option>
-                      {localCategories.map((c) => (
+                    <select className="form-input" value={addToAreaCategoryId} onChange={(e) => setAddToAreaCategoryId(e.target.value)} required disabled={!addToAreaMode}>
+                      <option value="" disabled>{addToAreaMode ? 'Select a category' : 'Pick a shop mode first'}</option>
+                      {addToAreaCategoriesForMode.map((c) => (
                         <option key={c.id} value={c.id}>{c.name}</option>
                       ))}
                     </select>
+                    {addToAreaMode && addToAreaCategoriesForMode.length === 0 && (
+                      <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                        No categories in this area for {modes.find((m) => m.slug === addToAreaMode)?.label || addToAreaMode} yet.
+                      </span>
+                    )}
                   </label>
                   <label className="form-label">
                     Price

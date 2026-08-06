@@ -590,6 +590,7 @@ export default function Products() {
       {libraryPickerOpen && (
         <LibraryPickerModal
           categories={categories}
+          currentMode={filters.type}
           onClose={() => setLibraryPickerOpen(false)}
           onAdded={() => { setLibraryPickerOpen(false); fetchProducts(pagination.page); }}
         />
@@ -601,28 +602,38 @@ export default function Products() {
 // 26.6 — "+ Add from Library": search the shared product library and
 // materialize one into the currently selected area (same X-Area-Id the rest
 // of this page already operates under — §4.4, no page ever picks its own area).
-function LibraryPickerModal({ categories, onClose, onAdded }) {
+function LibraryPickerModal({ categories, currentMode, onClose, onAdded }) {
+  const { modes } = useStoreModes();
   const [search, setSearch] = useState('');
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [pickedRow, setPickedRow] = useState(null);
+  const [mode, setMode] = useState('');
   const [categoryId, setCategoryId] = useState('');
   const [price, setPrice] = useState('');
   const [saving, setSaving] = useState(false);
+  const requestIdRef = useRef(0);
+  const categoriesForMode = categories.filter((c) => c.type === mode);
 
   useEffect(() => {
     let alive = true;
-    setLoading(true);
-    LibraryApi.list({ search, archived: 'false' })
-      .then((res) => { if (alive) setRows(readList(res)); })
-      .catch((err) => { if (alive) setError(err.message || GENERIC_ERROR); })
-      .finally(() => { if (alive) setLoading(false); });
-    return () => { alive = false; };
+    // Advance the generation as soon as the query changes. Otherwise an old
+    // request can finish during the debounce window and overwrite new input.
+    const requestId = ++requestIdRef.current;
+    const timer = setTimeout(() => {
+      setLoading(true);
+      LibraryApi.list({ search, archived: 'false' })
+        .then((res) => { if (alive && requestId === requestIdRef.current) setRows(readList(res)); })
+        .catch((err) => { if (alive && requestId === requestIdRef.current) setError(err.message || GENERIC_ERROR); })
+        .finally(() => { if (alive && requestId === requestIdRef.current) setLoading(false); });
+    }, 250);
+    return () => { alive = false; clearTimeout(timer); };
   }, [search]);
 
   const pick = (row) => {
     setPickedRow(row);
+    setMode((modes.some((m) => m.slug === currentMode) ? currentMode : modes[0]?.slug) || '');
     setCategoryId('');
     setPrice(row.suggestedPrice ?? row.suggested_price ?? '');
     setError(null);
@@ -689,13 +700,32 @@ function LibraryPickerModal({ categories, onClose, onAdded }) {
             <form onSubmit={submit}>
               <p>Adding <strong>{pickedRow.name}</strong> to this area.</p>
               <div className="form-group">
+                <label className="form-label">Shop mode *</label>
+                <select
+                  className="form-select"
+                  value={mode}
+                  onChange={(e) => { setMode(e.target.value); setCategoryId(''); }}
+                  required
+                >
+                  <option value="" disabled>Select a shop mode</option>
+                  {modes.map((m) => (
+                    <option key={m.slug} value={m.slug}>{m.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-group">
                 <label className="form-label">Category *</label>
-                <select className="form-select" value={categoryId} onChange={(e) => setCategoryId(e.target.value)} required>
-                  <option value="" disabled>Select a category</option>
-                  {categories.map((c) => (
+                <select className="form-select" value={categoryId} onChange={(e) => setCategoryId(e.target.value)} required disabled={!mode}>
+                  <option value="" disabled>{mode ? 'Select a category' : 'Pick a shop mode first'}</option>
+                  {categoriesForMode.map((c) => (
                     <option key={c.id} value={c.id}>{c.name}</option>
                   ))}
                 </select>
+                {mode && categoriesForMode.length === 0 && (
+                  <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+                    No categories in this area for {modes.find((m) => m.slug === mode)?.label || mode} yet — create one on the Categories page first.
+                  </span>
+                )}
               </div>
               <div className="form-group">
                 <label className="form-label">Price (₹)</label>
