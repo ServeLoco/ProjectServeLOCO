@@ -55,7 +55,14 @@ describe('Product and Category Tests', () => {
     // shares the same transaction), not directly on pool.query.
     const mockConn = {
       beginTransaction: jest.fn(),
-      query: jest.fn().mockResolvedValueOnce([{ insertId: 1 }]), // insert product
+      query: jest.fn()
+        .mockResolvedValueOnce([{ insertId: 1 }]) // insert product
+        // auto-promote-to-library (createProduct now links every new
+        // product into the library so other areas can reuse it):
+        .mockResolvedValueOnce([[{ id: 1, name: 'Chips', description: 'Crispy chips', image_id: null, variant_prompt: null, price: 20, library_product_id: null }]]) // SELECT product FOR UPDATE
+        .mockResolvedValueOnce([{ insertId: 900 }]) // INSERT product_library
+        .mockResolvedValueOnce([[]]) // SELECT product_variants (none)
+        .mockResolvedValueOnce([{ affectedRows: 1 }]), // UPDATE products SET library_product_id
       commit: jest.fn(),
       rollback: jest.fn(),
       release: jest.fn(),
@@ -75,7 +82,7 @@ describe('Product and Category Tests', () => {
       });
 
     expect(res.statusCode).toEqual(201);
-    expect(mockConn.query).toHaveBeenCalledTimes(1);
+    expect(mockConn.query).toHaveBeenCalledTimes(5);
     expect(mockConn.commit).toHaveBeenCalledTimes(1);
     // bustAreaCaches' bumpCatalogVersion runs a pool.query (not on the
     // transaction connection) after commit.

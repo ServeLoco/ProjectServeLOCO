@@ -583,6 +583,12 @@ const createProduct = async (req, res) => {
     );
     insertId = result.insertId;
     await syncProductVariants(connection, insertId, variants, variant_prompt);
+    // Every area-created product joins the library automatically, so any
+    // other area can pull it in later at its own price (§2.10) — lazy
+    // require avoids a load-time cycle (productLibrary.js requires this
+    // module for syncProductVariants).
+    const { promoteToLibrary } = require('../utils/productLibrary');
+    await promoteToLibrary(connection, insertId);
     await connection.commit();
   } catch (err) {
     await connection.rollback();

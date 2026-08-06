@@ -692,8 +692,16 @@ shapes byte-identical for a single-area install, run `npm test`.
   `imageController.js`'s `getUsedImageIds` (`:15-43`) with their new table in the **same commit**
   that creates it (`product_library.image_id` here; `category_library.image_id` and
   `store_mode_library.icon_image_id` in TASK 21) — see §6.5.
-  **Do not auto-promote existing products into the library** — they stay local-only until an admin
-  promotes them (TASK 19). Auto-promotion would guess at which of 3 near-identical rows is canonical.
+  **Decision reversed 2026-08-06:** every new product now auto-promotes into the library the moment
+  it's created (`createProduct` calls `promoteToLibrary` inside its own insert transaction), and
+  `migrate.js` runs the batched backfill on every boot so pre-existing products (and any fresh
+  environment) never need `scripts/backfillProductLibrary.js` run by hand — the point is a single
+  admin standing up Area 4+ can reuse Area 1/2/3's catalog (images included) at a different price
+  instead of recreating everything from scratch. Known tradeoff, accepted: if two areas each
+  independently created their own near-identical product (e.g. two separate "Amul Milk" rows) before
+  this landed, or still do so after, each gets its OWN library entry — auto-promotion never merges or
+  guesses which of several similar rows is canonical. That stays a manual cleanup via the library
+  admin UI, not something this backfill/auto-promote attempts.
 
 - [ ] **TASK 19 — Library CRUD, "Add from Library", and promote**
   `apps/api/src/utils/productLibrary.js` per §4.5. Endpoints (all `requireSuperAdmin` except the

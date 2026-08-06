@@ -429,6 +429,54 @@ const materializeStoreModeToArea = async (conn, {
   return { storeModeId: result.insertId, alreadyLinked: false };
 };
 
+/**
+ * Lift ONE existing area product's identity (name, description, image,
+ * variant labels) into a brand new library item, then link that same
+ * product back to it. Shared by the manual promote-to-library endpoint and
+ * by createProduct's auto-promote-on-create (every area product should end
+ * up in the library so other areas can reuse it at their own price). Caller
+ * owns the transaction — this never begins/commits/rolls back one, so
+ * createProduct can call it inside its own product-insert transaction and
+ * roll back both together on failure.
+ * @param {import('mysql2/promise').PoolConnection} conn
+ * @param {number} productId
+ * @returns {Promise<{ libraryProductId: number }>}
+ */
+const promoteToLibrary = async (conn, productId) => {
+  const [productRows] = await conn.query(
+    'SELECT * FROM products WHERE id = ? AND deleted = 0 FOR UPDATE',
+    [productId]
+  );
+  const product = productRows[0];
+  if (!product) throw new LibraryError('NOT_FOUND', 'Product not found');
+  if (product.library_product_id) {
+    throw new LibraryError('ALREADY_LINKED', 'This product is already linked to a library item');
+  }
+
+  const [libResult] = await conn.query(
+    `INSERT INTO product_library (name, description, image_id, variant_prompt, suggested_price, status)
+     VALUES (?, ?, ?, ?, ?, 'published')`,
+    [product.name, product.description, product.image_id, product.variant_prompt, product.price]
+  );
+  const libraryProductId = libResult.insertId;
+
+  const [variantRows] = await conn.query(
+    'SELECT id, label, display_order, is_default FROM product_variants WHERE product_id = ? AND deleted = 0 ORDER BY display_order ASC, id ASC',
+    [productId]
+  );
+  for (const v of variantRows) {
+    const [lvResult] = await conn.query(
+      'INSERT INTO library_variants (library_product_id, label, display_order, is_default) VALUES (?, ?, ?, ?)',
+      [libraryProductId, v.label, v.display_order, v.is_default ? 1 : 0]
+    );
+    await conn.query('UPDATE product_variants SET library_variant_id = ? WHERE id = ?', [lvResult.insertId, v.id]);
+  }
+
+  await conn.query('UPDATE products SET library_product_id = ? WHERE id = ?', [libraryProductId, productId]);
+
+  return { libraryProductId };
+};
+
 module.exports = {
   materializeToArea,
   materializeCategoryToArea,
@@ -437,5 +485,6 @@ module.exports = {
   propagateLibraryEdit,
   propagateCategoryLibraryEdit,
   propagateStoreModeLibraryEdit,
+  promoteToLibrary,
   LibraryError,
 };

@@ -172,7 +172,13 @@ describe('Product Variants — admin validation', () => {
         .mockResolvedValueOnce([{ affectedRows: 0 }]) // soft-delete missing
         .mockResolvedValueOnce([{ affectedRows: 1 }]) // price sync
         .mockResolvedValueOnce([[{ price: 149, shop_price: null }]]) // re-read default variant
-        .mockResolvedValueOnce([{ affectedRows: 1 }]), // shop_price mirror sync
+        .mockResolvedValueOnce([{ affectedRows: 1 }]) // shop_price mirror sync
+        // auto-promote-to-library (createProduct now links every new
+        // product into the library so other areas can reuse it):
+        .mockResolvedValueOnce([[{ id: 500, name: 'Pizza', description: null, image_id: null, variant_prompt: null, price: 149, library_product_id: null }]]) // SELECT product FOR UPDATE
+        .mockResolvedValueOnce([{ insertId: 900 }]) // INSERT product_library
+        .mockResolvedValueOnce([[]]) // SELECT product_variants (mocked empty — promote's own variant fan-out is covered by tests/productLibrary.test.js)
+        .mockResolvedValueOnce([{ affectedRows: 1 }]), // UPDATE products SET library_product_id
       commit: jest.fn(),
       rollback: jest.fn(),
       release: jest.fn(),
@@ -219,7 +225,13 @@ describe('Product Variants — admin upsert', () => {
         .mockResolvedValueOnce([{ affectedRows: 0 }]) // soft-delete not-in-payload
         .mockResolvedValueOnce([{ affectedRows: 1 }]) // price sync
         .mockResolvedValueOnce([[{ price: 149, shop_price: null }]]) // re-read default variant
-        .mockResolvedValueOnce([{ affectedRows: 1 }]), // shop_price mirror sync
+        .mockResolvedValueOnce([{ affectedRows: 1 }]) // shop_price mirror sync
+        // auto-promote-to-library (createProduct now links every new
+        // product into the library so other areas can reuse it):
+        .mockResolvedValueOnce([[{ id: 500, name: 'Pizza', description: null, image_id: null, variant_prompt: 'Choose size', price: 149, library_product_id: null }]]) // SELECT product FOR UPDATE
+        .mockResolvedValueOnce([{ insertId: 900 }]) // INSERT product_library
+        .mockResolvedValueOnce([[]]) // SELECT product_variants (mocked empty — promote's own variant fan-out is covered by tests/productLibrary.test.js)
+        .mockResolvedValueOnce([{ affectedRows: 1 }]), // UPDATE products SET library_product_id
       commit: jest.fn(),
       rollback: jest.fn(),
       release: jest.fn(),

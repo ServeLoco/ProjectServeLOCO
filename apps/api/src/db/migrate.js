@@ -751,6 +751,51 @@ const migrate = async () => {
     `);
     console.log('Units table ready.');
 
+    // Auto-sync existing products into the library — runs on every boot so a
+    // fresh deploy/environment never needs scripts/backfillProductLibrary.js
+    // run by hand; that script stays for one-off manual runs, this is the
+    // automatic counterpart. Combos excluded (bundles, not library items).
+    // Idempotent and safe to re-run: only ever touches
+    // products.library_product_id IS NULL, and promoteToLibrary itself
+    // rejects an already-linked product. Same batched-cursor shape as
+    // backfillImageHashes above — a product that fails to promote (bad data)
+    // is skipped via the id > ? cursor rather than looping on it forever.
+    const backfillProductLibrary = async () => {
+      const { promoteToLibrary } = require('../utils/productLibrary');
+      const BATCH_SIZE = 25;
+      let done = 0;
+      let failed = 0;
+      let afterId = 0;
+      for (;;) {
+        const [rows] = await connection.query(
+          `SELECT id FROM products
+           WHERE deleted = 0 AND is_combo = 0 AND library_product_id IS NULL AND id > ?
+           ORDER BY id ASC
+           LIMIT ${BATCH_SIZE}`,
+          [afterId]
+        );
+        if (rows.length === 0) break;
+
+        for (const row of rows) {
+          try {
+            await connection.beginTransaction();
+            await promoteToLibrary(connection, row.id);
+            await connection.commit();
+            done += 1;
+          } catch (e) {
+            await connection.rollback();
+            failed += 1;
+            console.error(`[migrate] could not promote product id=${row.id} to library:`, e.message);
+          }
+          afterId = row.id;
+        }
+      }
+      if (done > 0 || failed > 0) {
+        console.log(`[migrate] product library backfill: ${done} promoted, ${failed} failed`);
+      }
+    };
+    await backfillProductLibrary();
+
     // ---- TASK 24 — platform_flags singleton + areas_sweep_complete gate --
     // Same singleton-row-by-convention shape as admin_auth_state (id=1).
     // areas_sweep_complete blocks POST /admin/areas with 409 until TASK 30's
