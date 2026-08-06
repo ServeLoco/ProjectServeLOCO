@@ -1,6 +1,6 @@
 const express = require('express');
 const multer = require('multer');
-const { login, me, revokeSessions, getAdminCustomers, getAdminCustomerById, setBlockStatus, setTrustStatus, getDashboard, getSalesReport, getTopProductsReport, getCustomersReport, getShopsReport, getProfitSummary, getProfitOrders, getAdminOrders, getAdminOrderById, updateOrderStatus, updateOrderPayment, updateOrderRemark, extendAutoAccept, adminCalculateOrder, adminCreateOrder, getAdminNotifications, createAdminNotification, getAdminNotificationById, deleteAdminNotification, getInbox, getInboxUnreadCount, markInboxRead, markAllInboxRead, dismissInbox } = require('../controllers/adminController');
+const { login, me, revokeSessions, getAdminCustomers, getAdminCustomerById, setBlockStatus, setTrustStatus, getDashboard, getSalesReport, getTopProductsReport, getCustomersReport, getShopsReport, getProfitSummary, getProfitOrders, getAdminOrders, getAdminOrderById, updateOrderStatus, updateOrderPayment, updateOrderRemark, replaceOrderItem, extendAutoAccept, adminCalculateOrder, adminCreateOrder, getAdminNotifications, createAdminNotification, getAdminNotificationById, deleteAdminNotification, getInbox, getInboxUnreadCount, markInboxRead, markAllInboxRead, dismissInbox } = require('../controllers/adminController');
 const { createOrderSchema, expressValidatorChecks: orderExpressValidatorChecks, validateExpress: validateOrderExpress } = require('./orderRoutes');
 const { getAdminSettings, updateSettings, getActiveOffer, createOffer, updateOffer, getAdminOffers, deleteOffer, getOfferProducts, addOfferProduct, removeOfferProduct, reorderOfferProducts } = require('../controllers/settingsController');
 const { listZones, createZone, updateZone, deleteZone } = require('../controllers/deliveryZonesController');
@@ -18,6 +18,7 @@ const {
   adminConfirmShopOrder,
   adminRejectShopOrder,
   adminReadyShopOrder,
+  adminResendShopOrder,
   listShopGroups,
   createShopGroup,
   updateShopGroup,
@@ -35,6 +36,7 @@ const {
   adminRejectOffer,
   adminMarkPickedUp,
   adminUpdateAssignmentStatus,
+  adminReassignRider,
 } = require('../controllers/adminRiderController');
 const { listMobileAdmins, createMobileAdmin, updateMobileAdmin, mintMobileSession } = require('../controllers/mobileAdminController');
 const { getNotificationTemplates, updateNotificationTemplate, resetNotificationTemplate } = require('../controllers/notificationTemplateController');
@@ -785,6 +787,7 @@ router.get('/shops/:id/orders', requireAdmin, asyncHandler(listShopOrders));
 router.patch('/shops/:id/orders/:orderId/confirm', requireAdmin, asyncHandler(adminConfirmShopOrder));
 router.patch('/shops/:id/orders/:orderId/reject', requireAdmin, asyncHandler(adminRejectShopOrder));
 router.patch('/shops/:id/orders/:orderId/ready', requireAdmin, asyncHandler(adminReadyShopOrder));
+router.patch('/shops/:id/orders/:orderId/resend', requireAdmin, asyncHandler(adminResendShopOrder));
 // Per-shop product groups (same as shop-owner's own group management).
 router.get('/shops/:id/groups', requireAdmin, asyncHandler(listShopGroups));
 router.post('/shops/:id/groups', requireAdmin, asyncHandler(createShopGroup));
@@ -803,6 +806,7 @@ router.post('/riders/:id/offers/:offerId/accept', requireAdmin, asyncHandler(adm
 router.post('/riders/:id/offers/:offerId/reject', requireAdmin, asyncHandler(adminRejectOffer));
 router.post('/riders/:id/assignments/:orderId/picked-up', requireAdmin, asyncHandler(adminMarkPickedUp));
 router.patch('/riders/:id/assignments/:orderId/status', requireAdmin, asyncHandler(adminUpdateAssignmentStatus));
+router.post('/riders/:id/assignments/:orderId/reassign', requireAdmin, asyncHandler(adminReassignRider));
 
 // Mobile Admins — phones granted Admin Mode in the phone app (ADMIN TASK 2).
 router.get('/mobile-admins', requireAdmin, asyncHandler(listMobileAdmins));
@@ -914,6 +918,7 @@ router.get('/orders/:id', requireAdmin, asyncHandler(getAdminOrderById));
 router.patch('/orders/:id/status', requireAdmin, asyncHandler(updateOrderStatus));
 router.patch('/orders/:id/payment', requireAdmin, asyncHandler(updateOrderPayment));
 router.patch('/orders/:id/remark', requireAdmin, asyncHandler(updateOrderRemark));
+router.patch('/orders/:id/items/:itemId/replace', requireAdmin, asyncHandler(replaceOrderItem));
 router.post('/orders/:id/extend-auto-accept', requireAdmin, asyncHandler(extendAutoAccept));
 
 // Admin places an order on behalf of an existing customer (e.g. phone order)

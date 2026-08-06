@@ -43,6 +43,10 @@ export const OrdersApi = {
     method: 'PATCH',
     body: { remark, admin_remark: remark },
   }),
+  replaceItem: (orderId, itemId, data) => apiClient(`/admin/orders/${orderId}/items/${itemId}/replace`, {
+    method: 'PATCH',
+    body: data,
+  }),
   extendAutoAccept: (id) => apiClient(`/admin/orders/${id}/extend-auto-accept`, { method: 'POST' }),
   calculateForCustomer: (data) => apiClient('/admin/orders/calculate', { method: 'POST', body: data }),
   createForCustomer: (data) => apiClient('/admin/orders', { method: 'POST', body: data }),
@@ -118,6 +122,10 @@ export const ShopsApi = {
     `/admin/shops/${shopId}/orders/${orderId}/ready`,
     { method: 'PATCH' }
   ),
+  resendOrder: (shopId, orderId) => apiClient(
+    `/admin/shops/${shopId}/orders/${orderId}/resend`,
+    { method: 'PATCH' }
+  ),
   // Auto open/close schedule — mirrors shop-owner's own PATCH /shop/me/schedule.
   updateSchedule: (id, openTime, closeTime) => apiClient(`/admin/shops/${id}/schedule`, {
     method: 'PATCH',
@@ -163,6 +171,10 @@ export const RidersApi = {
   updateAssignmentStatus: (riderId, orderId, status) => apiClient(
     `/admin/riders/${riderId}/assignments/${orderId}/status`,
     { method: 'PATCH', body: { status } }
+  ),
+  reassign: (riderId, orderId) => apiClient(
+    `/admin/riders/${riderId}/assignments/${orderId}/reassign`,
+    { method: 'POST' }
   ),
 };
 

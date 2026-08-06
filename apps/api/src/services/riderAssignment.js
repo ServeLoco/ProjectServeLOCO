@@ -993,6 +993,114 @@ const revokeOffersForOrder = async (orderId) => {
   }
 };
 
+/**
+ * Admin emergency reassign: force a specific rider onto an order, before it's
+ * "Out for Delivery" (goods not yet with a rider). Works whether the order
+ * currently has an accepted rider, an unanswered pending offer, or gave up
+ * with rider_assignment_status='failed' — the last case doubles as a manual
+ * first-assign, since this calls createOffer() directly rather than
+ * startAssignment(), so the "no restart after failed" guard never applies.
+ * Old rider (if any) is cleared and told via the existing rider.assignment.updated
+ * contract (their app already unconditionally refetches on that event).
+ */
+const reassignRider = async (orderId, targetRider, areaId) => {
+  const connection = await pool.getConnection();
+  let previousRiderUserId = null;
+  let previousRiderId = null;
+  try {
+    await connection.beginTransaction();
+
+    const [orderRows] = await connection.query(
+      'SELECT * FROM orders WHERE id = ? AND area_id = ? FOR UPDATE',
+      [orderId, areaId]
+    );
+    const order = orderRows[0];
+    if (!order) {
+      await connection.rollback();
+      return { ok: false, code: 'NOT_FOUND', message: 'Order not found', status: 404 };
+    }
+    if (['Out for Delivery', 'Delivered', 'Cancelled'].includes(order.status)) {
+      await connection.rollback();
+      return {
+        ok: false,
+        code: 'CONFLICT',
+        message: `Cannot reassign — order is already ${order.status}`,
+        status: 409,
+      };
+    }
+    if (Number(order.rider_id) === Number(targetRider.id) && order.rider_assignment_status === 'assigned') {
+      await connection.rollback();
+      return { ok: false, code: 'VALIDATION_ERROR', message: 'Order is already assigned to this rider', status: 400 };
+    }
+
+    if (order.rider_id) {
+      previousRiderId = order.rider_id;
+      const [prevRows] = await connection.query('SELECT user_id FROM riders WHERE id = ?', [previousRiderId]);
+      previousRiderUserId = prevRows[0]?.user_id || null;
+    }
+
+    await connection.query(
+      `UPDATE orders
+       SET rider_id = NULL, rider_assigned_at = NULL, rider_assignment_status = 'searching'
+       WHERE id = ?`,
+      [orderId]
+    );
+
+    // uq_offer_order_rider is a hard UNIQUE on (order_id, rider_id) — it's
+    // what stops the *auto* engine from re-offering a rider who already
+    // rejected/expired on this order. An admin picking a rider by hand is an
+    // explicit override of that history, so clear any old row for this exact
+    // pair first or the createOffer() insert below hits ER_DUP_ENTRY and
+    // silently no-ops even though nothing is actually wrong.
+    await connection.query(
+      `DELETE FROM rider_order_offers WHERE order_id = ? AND rider_id = ?`,
+      [orderId, targetRider.id]
+    );
+
+    await connection.commit();
+  } catch (e) {
+    await connection.rollback();
+    console.error('[rider-assign] reassignRider failed:', e.message);
+    return { ok: false, code: 'ERROR', message: 'Reassign failed', status: 500 };
+  } finally {
+    connection.release();
+  }
+
+  // Kill any unanswered offer to whoever had one — revokeOffersForOrder runs
+  // its own queries/emits, kept outside the transaction above like every
+  // other caller of it in this file.
+  await revokeOffersForOrder(orderId);
+
+  if (previousRiderId && previousRiderUserId) {
+    try {
+      const { emitToCustomer } = require('../realtime/socket');
+      emitToCustomer(previousRiderUserId, 'rider.assignment.updated', {
+        orderId, riderId: previousRiderId, status: 'reassigned',
+      });
+    } catch (_) { /* best-effort */ }
+  }
+
+  try {
+    const { emitToAdmins } = require('../realtime/socket');
+    emitToAdmins(areaId, 'admin.order.rider_updated', {
+      orderId, status: 'reassigning', riderId: targetRider.id,
+    });
+  } catch (_) { /* best-effort */ }
+
+  const offer = await createOffer(orderId, targetRider);
+  if (!offer) {
+    return {
+      ok: false,
+      code: 'CONFLICT',
+      message: 'Could not create an offer for the selected rider — try again',
+      status: 409,
+    };
+  }
+
+  const updated = await loadOrder(orderId);
+  return { ok: true, order: updated, offer, previousRiderId };
+};
+
 module.exports = {
   RIDER_OFFER_TIMEOUT_SEC,
   RIDER_SEARCH_WINDOW_SEC,
@@ -1013,6 +1121,7 @@ module.exports = {
   getExcludedRiderIdsForOrder,
   getOrderPickupPoints,
   revokeOffersForOrder,
+  reassignRider,
   remindPendingOffers,
   isWithinSearchWindow,
   markSearching,

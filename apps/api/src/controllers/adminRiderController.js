@@ -801,6 +801,37 @@ const adminUpdateAssignmentStatus = async (req, res) => {
   });
 };
 
+// POST /api/admin/riders/:id/assignments/:orderId/reassign — emergency swap
+// (or manual first-assign after a failed search). :id is the NEW rider.
+const adminReassignRider = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+  const riderId = Number(req.params.id);
+  const orderId = Number(req.params.orderId);
+  if (!Number.isFinite(riderId) || !Number.isFinite(orderId)) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Invalid id' });
+  }
+
+  const riderRow = await loadRiderOr404(riderId, areaId);
+  if (!riderRow) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Rider not found' });
+  }
+  if (!riderRow.active) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Rider is inactive' });
+  }
+
+  const result = await assignment.reassignRider(orderId, riderRow, areaId);
+  if (!result.ok) {
+    const status = result.status || (result.code === 'NOT_FOUND' ? 404 : 400);
+    return res.status(status).json({ code: result.code || 'ERROR', message: result.message || 'Reassign failed' });
+  }
+
+  res.status(200).json({
+    message: 'Rider reassigned — offer sent',
+    order: shapeOrderSummary(result.order),
+  });
+};
+
 module.exports = {
   listRiders,
   createRider,
@@ -812,4 +843,5 @@ module.exports = {
   adminRejectOffer,
   adminMarkPickedUp,
   adminUpdateAssignmentStatus,
+  adminReassignRider,
 };
