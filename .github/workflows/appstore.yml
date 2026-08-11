@@ -1,0 +1,198 @@
+name: App Store (VillKro customer app)
+
+# Mirrors playstore.yml, with one structural difference: iOS cannot be built
+# on the self-hosted Linux runner (Xcode requires macOS), so the build runs on
+# EAS cloud infrastructure. The runner only orchestrates and waits.
+#
+# OTA updates are deliberately NOT published here. `eas update` is
+# platform-agnostic — playstore.yml already publishes to the `production`
+# branch on every push to main, and that update serves iOS and Android alike.
+# Publishing from both workflows would create duplicate updates for the same
+# commit. This workflow therefore only acts on a MAJOR bump (native rebuild).
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "apps/customer-app/**"
+      - ".github/workflows/appstore.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: appstore-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  APP_DIR: apps/customer-app
+  EAS_PROJECT_ID: 1df5a9bf-de34-48ea-96f4-68f598d7d318
+  EAS_BUILD_NO_EXPO_GO_WARNING: "true"
+
+jobs:
+  # ── 1. CI gate: lint + tests must pass before we build or submit. ──────────
+  ci:
+    name: Lint & Test
+    runs-on: [self-hosted, linux, x64, villkro-android]
+    defaults:
+      run:
+        working-directory: ${{ env.APP_DIR }}
+    steps:
+      - uses: actions/checkout@v5
+      # No remote npm cache on self-hosted — see playstore.yml for rationale.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test -- --ci
+
+  # ── 2. Decide whether this merge needs a native rebuild. ──────────────────
+  # Same rules as playstore.yml so both stores stay in lockstep, with a
+  # separate first-deploy marker (iOS has its own "never shipped" state).
+  detect-bump:
+    name: Detect bump (major vs minor)
+    runs-on: [self-hosted, linux, x64, villkro-android]
+    needs: ci
+    env:
+      FORCE_MAJOR: ${{ vars.FORCE_MAJOR }}
+    outputs:
+      bump: ${{ steps.decide.outputs.bump }}
+      message: ${{ steps.decide.outputs.message }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 50
+
+      - name: Determine baseline range (HEAD~1..HEAD)
+        id: baseline
+        run: |
+          set -euo pipefail
+          RANGE="HEAD~1..HEAD"
+          echo "Comparing $RANGE"
+          echo "range=$RANGE" >> "$GITHUB_OUTPUT"
+
+      - name: Read commit messages in range
+        id: msgs
+        run: |
+          set -euo pipefail
+          MSGS="$(git log --pretty=format:'%s' ${{ steps.baseline.outputs.range }} | head -20 || true)"
+          {
+            echo "msgs<<EOF"
+            echo "$MSGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Check if customer-app package.json changed
+        id: pkg
+        run: |
+          set -euo pipefail
+          CHANGED="$(git diff --name-only ${{ steps.baseline.outputs.range }} -- ${{ env.APP_DIR }}/package.json || true)"
+          echo "package.json changed files: $CHANGED"
+          if [ -n "$CHANGED" ]; then
+            echo "pkg_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pkg_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide bump type
+        id: decide
+        run: |
+          set -euo pipefail
+          MSGS='${{ steps.msgs.outputs.msgs }}'
+          PKG_CHANGED='${{ steps.pkg.outputs.pkg_changed }}'
+
+          BUMP="minor"
+          REASON="no native dep change detected"
+
+          if [ "${FORCE_MAJOR:-false}" = "true" ]; then
+            BUMP="major"
+            REASON="FORCE_MAJOR=true set on the repo"
+          fi
+
+          # iOS-specific first-deploy marker. Kept separate from the Android
+          # one so bootstrapping either store does not consume the other's.
+          FIRST_DEPLOY_MARKER="/home/linux-server/Documents/builds/.first-deploy-ios"
+          mkdir -p /home/linux-server/Documents/builds
+          if [ ! -f "$FIRST_DEPLOY_MARKER" ]; then
+            BUMP="major"
+            REASON="first iOS deploy bootstrap (.first-deploy-ios missing)"
+            touch "$FIRST_DEPLOY_MARKER"
+            echo "✓ Created first-deploy marker at $FIRST_DEPLOY_MARKER"
+          fi
+
+          if [ "$PKG_CHANGED" = "true" ]; then
+            BUMP="major"
+            REASON="package.json changed in apps/customer-app"
+          fi
+          if echo "$MSGS" | grep -Eqi '^(feat|breaking)(\(.+\))?!?:'; then
+            BUMP="major"
+            REASON="commit prefix is feat: or BREAKING"
+          fi
+
+          echo "Decision: $BUMP ($REASON)"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+          {
+            echo "message<<EOF"
+            echo "$MSGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+  # ── 3. Cloud build + App Store submit (major bumps only). ─────────────────
+  build-submit:
+    name: Build / Submit (EAS cloud)
+    runs-on: [self-hosted, linux, x64, villkro-android]
+    needs: detect-bump
+    if: needs.detect-bump.outputs.bump == 'major'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: Install app deps
+        working-directory: ${{ env.APP_DIR }}
+        run: npm ci
+
+      - name: Install EAS CLI
+        run: npm install -g eas-cli@latest
+
+      - name: Verify EAS authentication
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          eas whoami
+
+      # The build itself runs on EAS macOS infrastructure. Credentials
+      # (distribution cert, provisioning profile) are managed remotely, so no
+      # Apple secrets are needed for this step — only for the submit below.
+      - name: Build iOS .ipa on EAS cloud
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          eas build --platform ios --profile production --non-interactive --wait
+
+      - name: Submit to App Store Connect
+        working-directory: ${{ env.APP_DIR }}
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          ASC_APP_ID: ${{ secrets.ASC_APP_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # App-specific password for App Store Connect uploads.
+          EXPO_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.EXPO_APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ASC_APP_ID:-}" ]; then
+            echo "ASC_APP_ID secret is empty — create the App Store Connect app record first" >&2
+            exit 1
+          fi
+          # Submits the build produced above. This uploads to App Store
+          # Connect only; it does NOT release to users. Submitting for review
+          # and releasing stay manual in App Store Connect.
+          eas submit --platform ios --latest --non-interactive

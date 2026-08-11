@@ -11,9 +11,9 @@ build
 coverage
 firebase-service-account.json
 *-firebase-adminsdk-*.json
-# google-services.json is committed — it contains only public config
-# (API key, project ID) and is required by the CI/CD build pipeline.
-GoogleService-Info.plist
+# google-services.json and GoogleService-Info.plist are committed — they hold
+# only public client config (API key, project ID) that ships inside every
+# released APK/IPA anyway, and both are required by the CI/CD build pipeline.
 .antigravitycli/
 
 # AI tool configs/state
