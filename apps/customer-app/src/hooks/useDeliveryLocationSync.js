@@ -9,6 +9,14 @@ import { showToast } from '../components/Toast';
 
 const GPS_TIMEOUT_MS = 8000;
 const INITIAL_SYNC_TIMEOUT_MS = 10_000;
+// Widest fix (metres) we will accept as evidence of which zone the customer
+// is standing in. Delivery zones here span roughly 2 km, so anything coarser
+// than this cannot place someone reliably. iOS returns a fix fuzzed by
+// kilometres whenever "Precise Location" is off for the app, and — unlike
+// Android's approximate-permission case, which requestPreciseLocationPermission
+// already filters — expo-location exposes no precise/reduced flag on iOS, so
+// coords.accuracy is the only signal available.
+const MAX_TRUSTED_FIX_ACCURACY_M = 1000;
 // Throttles the AppState-active re-check so returning from a quick
 // backgrounding (e.g. a notification) doesn't re-fire GPS + a network call.
 const MIN_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
@@ -156,7 +164,15 @@ async function syncDeliveryLocation({ coldStart = false } = {}) {
     } finally {
       if (gpsTimeoutId) clearTimeout(gpsTimeoutId);
     }
-    const { latitude, longitude } = position.coords;
+    const { latitude, longitude, accuracy } = position.coords;
+    // A fix too coarse to place the customer must not produce a zone verdict:
+    // it would report a customer standing inside a zone as out of range, and
+    // on a cold start the `force` below would overwrite the manual pin they
+    // set precisely to avoid that. Leaving state untouched keeps the last
+    // known pin and lets Home offer the location picker instead.
+    if (typeof accuracy === 'number' && accuracy > MAX_TRUSTED_FIX_ACCURACY_M) {
+      return;
+    }
     const result = await checkInsideZone(latitude, longitude);
     setGpsLocation(
       latitude,
