@@ -16,6 +16,17 @@ import { colors, spacing } from '../../theme';
 
 const PLAY_STORE_URL =
   'https://play.google.com/store/apps/details?id=com.yashsiwach.villkro';
+// App Store Connect Apple ID for com.yashsiwach.villkro. itms-apps opens the
+// App Store app directly; the https form is the browser fallback.
+const APP_STORE_URL = 'itms-apps://apps.apple.com/app/id6800449391';
+const APP_STORE_WEB_URL = 'https://apps.apple.com/app/id6800449391';
+
+// Guideline 2.3.10 rejects user-visible references to other mobile platforms,
+// and a Play Store link is useless on an iPhone regardless of that rule.
+const IS_IOS = Platform.OS === 'ios';
+const STORE_URL = IS_IOS ? APP_STORE_URL : PLAY_STORE_URL;
+const STORE_FALLBACK_URL = IS_IOS ? APP_STORE_WEB_URL : PLAY_STORE_URL;
+const STORE_LABEL = IS_IOS ? 'App Store' : 'Play Store';
 
 /**
  * ForceUpdateModal
@@ -64,11 +75,9 @@ function ForceUpdateModal({ visible }) {
   }, [visible]);
 
   const handleUpdate = async () => {
-    await Linking.openURL(PLAY_STORE_URL).catch(() => {
-      // If the Play Store app is not present, fall back to browser
-      return Linking.openURL(
-        'https://play.google.com/store/apps/details?id=com.yashsiwach.villkro'
-      );
+    await Linking.openURL(STORE_URL).catch(() => {
+      // If the store app is not present, fall back to the browser.
+      return Linking.openURL(STORE_FALLBACK_URL);
     }).catch(() => {
       // Neither the Play Store app nor a browser is available — still
       // proceed to clear/exit below rather than leaving the user stuck.
@@ -130,7 +139,7 @@ function ForceUpdateModal({ visible }) {
             onPress={handleUpdate}
             style={({ pressed }) => [styles.btn, styles.btnUpdate, pressed && styles.btnPressed]}
             accessibilityRole="button"
-            accessibilityLabel="Update VillKro on Play Store"
+            accessibilityLabel={`Update VillKro on the ${STORE_LABEL}`}
           >
             <Text style={styles.btnUpdateLabel}>Update Now</Text>
           </Pressable>

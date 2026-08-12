@@ -60,7 +60,6 @@
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "VillKro uses your location to pin your delivery address and show your position on the rider delivery map.",
-        "NSPhotoLibraryUsageDescription": "VillKro lets admins choose product photos from the library.",
         "UIBackgroundModes": [
           "remote-notification"
         ],
