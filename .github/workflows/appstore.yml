@@ -181,15 +181,16 @@ jobs:
         working-directory: ${{ env.APP_DIR }}
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          ASC_APP_ID: ${{ secrets.ASC_APP_ID }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          # App-specific password for App Store Connect uploads.
+          # ascAppId and appleTeamId live in eas.json (neither is secret).
+          # Only the Apple account identity and its app-specific password are
+          # injected here. EAS reads both from these exact variable names —
+          # renaming them silently breaks the upload.
+          EXPO_APPLE_ID: ${{ secrets.EXPO_APPLE_ID }}
           EXPO_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.EXPO_APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           set -euo pipefail
-          if [ -z "${ASC_APP_ID:-}" ]; then
-            echo "ASC_APP_ID secret is empty — create the App Store Connect app record first" >&2
+          if [ -z "${EXPO_APPLE_ID:-}" ] || [ -z "${EXPO_APPLE_APP_SPECIFIC_PASSWORD:-}" ]; then
+            echo "EXPO_APPLE_ID / EXPO_APPLE_APP_SPECIFIC_PASSWORD secrets are not set" >&2
             exit 1
           fi
           # Submits the build produced above. This uploads to App Store
