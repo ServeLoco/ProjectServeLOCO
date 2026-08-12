@@ -857,18 +857,24 @@ export default function HomeScreen() {
         <View style={styles.topBarRibbonBar} />
       </View>
 
-      {insideDeliveryZone !== false && deliveryCoords && (
+      {/* Second clause (isInitialLocationSyncComplete, no deliveryCoords) is the
+          only escape hatch when the first GPS fix silently fails or times out
+          (see syncDeliveryLocation) — without it, "Change"/"Set" never
+          appears, since it normally lives inside this deliveryCoords-gated
+          bar, and nothing else on Home ever retries automatically. */}
+      {(deliveryCoords ? insideDeliveryZone !== false : isInitialLocationSyncComplete) && (
         <View style={styles.locationBar}>
           <AppIcon name="location" size={16} color={colors.saffron} />
           <Text style={styles.locationBarText} numberOfLines={1}>
             {/* zoneName is only ever set in zone-pricing mode. On a flat-pricing
                 install it stays null forever, so the "finding" placeholder must
                 not outlive the initial sync. */}
-            {deliveryZoneName
-              || (isInitialLocationSyncComplete ? 'Delivery location' : 'Finding your area…')}
+            {deliveryCoords
+              ? (deliveryZoneName || 'Delivery location')
+              : "Couldn't get your location"}
           </Text>
-          <PressableScale onPress={() => setShowLocationPicker(true)} accessibilityRole="button" accessibilityLabel="Change delivery location">
-            <Text style={styles.locationBarChange}>Change</Text>
+          <PressableScale onPress={() => setShowLocationPicker(true)} accessibilityRole="button" accessibilityLabel={deliveryCoords ? 'Change delivery location' : 'Set delivery location'}>
+            <Text style={styles.locationBarChange}>{deliveryCoords ? 'Change' : 'Set'}</Text>
           </PressableScale>
         </View>
       )}
