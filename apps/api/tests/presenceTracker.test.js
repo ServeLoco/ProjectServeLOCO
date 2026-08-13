@@ -154,6 +154,59 @@ describe('createPresenceTracker', () => {
     expect(snap.users[0].connectedMin).toBe(7);
   });
 
+  // Regression: a socket that disconnected while openSession was still in
+  // flight used to be re-inserted into the Map after the fact, producing an
+  // "online" user that no code path could ever remove.
+  it('a disconnect during openSession leaves no phantom entry', async () => {
+    const deps = makeDeps();
+    let releaseOpenSession;
+    deps.sessionStore.openSession = jest.fn(
+      () => new Promise((resolve) => { releaseOpenSession = () => resolve('sess-late'); })
+    );
+    const t = createPresenceTracker(deps);
+
+    const adding = t.addPresence('sock1', { userId: 7, role: 'customer', platform: 'android', appVersion: '1' });
+    // Entry is visible immediately, before the Mongo write resolves.
+    expect(t.getLiveSnapshot().online).toBe(1);
+
+    await t.removePresence('sock1');
+    expect(t.getLiveSnapshot().online).toBe(0);
+
+    releaseOpenSession();
+    await adding;
+
+    expect(t.getLiveSnapshot().online).toBe(0);
+    // The doc openSession created still has to be closed, or it stays open forever.
+    expect(deps.sessionStore.closeSession).toHaveBeenCalledWith('sess-late', {}, expect.any(Date));
+  });
+
+  it('reapDeadSockets drops entries whose socket is no longer connected', async () => {
+    const deps = makeDeps();
+    const liveSockets = new Set(['s1', 's2']);
+    const t = createPresenceTracker({ ...deps, isSocketAlive: (id) => liveSockets.has(id) });
+    await t.addPresence('s1', { userId: 1, role: 'customer', platform: 'android', appVersion: '1' });
+    await t.addPresence('s2', { userId: 2, role: 'customer', platform: 'ios', appVersion: '1' });
+    expect(t.getLiveSnapshot().online).toBe(2);
+
+    // Socket vanished without ever emitting 'disconnect'.
+    liveSockets.delete('s2');
+    t.emitLiveSnapshot();
+    await wait(0);
+
+    expect(t.getLiveSnapshot().online).toBe(1);
+    expect(deps.sessionStore.closeSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('the reaper stays inert when no isSocketAlive probe is injected', async () => {
+    const deps = makeDeps();
+    const t = createPresenceTracker(deps);
+    await t.addPresence('s1', { userId: 1, role: 'customer', platform: 'android', appVersion: '1' });
+    t.emitLiveSnapshot();
+    await wait(0);
+    expect(t.getLiveSnapshot().online).toBe(1);
+    expect(deps.sessionStore.closeSession).not.toHaveBeenCalled();
+  });
+
   it('stop clears the interval timer', async () => {
     const deps = makeDeps();
     const t = createPresenceTracker(deps, { intervalMs: 10 });

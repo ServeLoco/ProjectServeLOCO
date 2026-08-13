@@ -102,7 +102,13 @@ const initRealtime = (server) => {
   // Live analytics presence tracker — in-memory Map of online customers,
   // emits `analytics.live` to the admin room every 5s. Fire-and-forget: a Mongo
   // outage never affects socket connection handling (sessionStore swallows).
-  presenceTracker = createPresenceTracker({ sessionStore, emitToAdmins });
+  presenceTracker = createPresenceTracker({
+    sessionStore,
+    emitToAdmins,
+    // Liveness probe for the tracker's reaper — the Map is keyed by socket.id,
+    // so io.sockets.sockets is the authoritative "is this still connected".
+    isSocketAlive: (socketId) => io.sockets.sockets.has(socketId),
+  });
 
   io.on('connection', (socket) => {
     joinRoleRoom(socket);
