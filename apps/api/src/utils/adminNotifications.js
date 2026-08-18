@@ -7,10 +7,22 @@ const TYPES = {
   NEW_ORDER: 'new_order',
   NEW_CUSTOMER: 'new_customer',
   SHOP_REJECTED: 'shop_rejected',
+  // Fired when a shop's items were auto-rejected after SHOP_RESPONSE_TIMEOUT_MS
+  // of silence AND the order is still alive afterward (another shop on the
+  // same order already confirmed, or is still pending) — i.e. the case
+  // maybeAutoCancelOrderWhenAllShopsRejected does NOT resolve on its own,
+  // so an admin has to step in (resend to shop / cancel manually).
+  SHOP_TIMEOUT_PARTIAL: 'shop_timeout_partial',
   ORDER_AUTO_CANCELLED: 'order_auto_cancelled',
   RIDER_ASSIGNMENT_FAILED: 'rider_assignment_failed',
   RIDER_ZERO_AVAILABLE: 'rider_zero_available',
   ORDER_CANCELLED_NO_RIDER: 'order_cancelled_no_rider',
+  // Fired when replaceOrderItem's swap drops the order's subtotal below an
+  // already-applied coupon's min_order_amount — the discount stays frozen
+  // (no auto-refund/reconciliation automation in this codebase, same
+  // reasoning as replaceOrderItem's own no-discount-recompute rule), so an
+  // admin has to decide: cancel, manually adjust, or contact the customer.
+  COUPON_TERMS_VIOLATED: 'coupon_terms_violated',
 };
 
 /**

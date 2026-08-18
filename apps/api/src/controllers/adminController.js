@@ -1542,6 +1542,235 @@ const updateOrderRemark = async (req, res) => {
   res.status(200).json({ message: 'Order remark updated successfully', order: updatedOrder });
 };
 
+const ITEM_REPLACE_ALLOWED_STATUSES = ['Pending', 'Accepted', 'Preparing'];
+
+// Admin swaps one order_items row for a different product when the
+// original is out of stock — recomputes orders.subtotal/total (formula
+// mirrors orderController.js's createOrder) but never touches
+// discount_amount, which is a frozen checkout-time snapshot everywhere
+// else in this codebase. See plans note in PR: no refund automation, a
+// Paid order whose total shifts is reconciled by ops outside the app.
+const replaceOrderItem = async (req, res) => {
+  const orderId = Number(req.params.id);
+  const itemId = Number(req.params.itemId);
+  if (!Number.isFinite(orderId) || orderId <= 0 || !Number.isFinite(itemId) || itemId <= 0) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Invalid order or item id' });
+  }
+
+  const { expectedProductId, expectedVariantId, expectedUnitPrice, newProductId, newVariantId } = req.body || {};
+  if (!Number.isFinite(Number(expectedProductId)) || !Number.isFinite(Number(expectedUnitPrice)) || !Number.isFinite(Number(newProductId))) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'expectedProductId, expectedUnitPrice and newProductId are required' });
+  }
+  const normalizedExpectedVariantId = expectedVariantId === undefined || expectedVariantId === null ? null : Number(expectedVariantId);
+  const normalizedNewVariantId = newVariantId === undefined || newVariantId === null ? null : Number(newVariantId);
+
+  const areaId = requireOrderArea(req, res);
+  if (areaId === null) return;
+  const scope = orderAreaScope(areaId, '');
+
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const [orderRows] = await connection.query(`SELECT * FROM orders WHERE id = ?${scope.clause} FOR UPDATE`, [orderId, ...scope.params]);
+    if (orderRows.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Order not found' });
+    }
+    const order = orderRows[0];
+
+    if (!ITEM_REPLACE_ALLOWED_STATUSES.includes(order.status)) {
+      await connection.rollback();
+      return res.status(400).json({
+        code: 'VALIDATION_ERROR',
+        message: `Items can only be changed while the order is ${ITEM_REPLACE_ALLOWED_STATUSES.join(', ')}.`,
+      });
+    }
+
+    const [itemRows] = await connection.query(
+      'SELECT * FROM order_items WHERE id = ? AND order_id = ? AND area_id = ? FOR UPDATE',
+      [itemId, orderId, order.area_id]
+    );
+    if (itemRows.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Order item not found' });
+    }
+    const item = itemRows[0];
+
+    const casMismatch = item.product_id !== Number(expectedProductId)
+      || Number(item.unit_price) !== Number(expectedUnitPrice)
+      || (item.variant_id ?? null) !== normalizedExpectedVariantId;
+    if (casMismatch) {
+      await connection.rollback();
+      const [freshItems] = await pool.query('SELECT * FROM order_items WHERE order_id = ? AND area_id = ?', [orderId, order.area_id]);
+      return res.status(409).json({
+        code: 'CONCURRENCY_CONFLICT',
+        message: 'This item was already changed by someone else.',
+        order,
+        items: freshItems,
+      });
+    }
+
+    if (item.item_type !== 'product') {
+      await connection.rollback();
+      return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Only product line items can be changed' });
+    }
+
+    const [productRows] = await connection.query(
+      'SELECT id, name, price, shop_price, shop_id, area_id, available, deleted FROM products WHERE id = ?',
+      [Number(newProductId)]
+    );
+    const newProduct = productRows[0];
+    if (!newProduct || newProduct.deleted) {
+      await connection.rollback();
+      return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Replacement product not found' });
+    }
+    if (newProduct.area_id !== order.area_id) {
+      await connection.rollback();
+      return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Replacement product must belong to the same area' });
+    }
+    const shopMismatch = item.shop_id !== null
+      ? newProduct.shop_id !== item.shop_id
+      : newProduct.shop_id !== null;
+    if (shopMismatch) {
+      await connection.rollback();
+      return res.status(400).json({
+        code: 'VALIDATION_ERROR',
+        message: item.shop_id !== null
+          ? 'Replacement must be another product from the same shop'
+          : 'Replacement must be a house product (no shop)',
+      });
+    }
+
+    let newUnitPrice;
+    let newShopUnitPrice;
+    let newVariantLabel = null;
+    if (normalizedNewVariantId !== null) {
+      const [variantRows] = await connection.query(
+        'SELECT id, label, price, shop_price FROM product_variants WHERE id = ? AND product_id = ? AND deleted = 0 AND available = 1',
+        [normalizedNewVariantId, newProduct.id]
+      );
+      const variant = variantRows[0];
+      if (!variant) {
+        await connection.rollback();
+        return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Replacement variant not found or unavailable' });
+      }
+      newUnitPrice = Number(variant.price);
+      newShopUnitPrice = variant.shop_price != null ? Number(variant.shop_price) : null;
+      newVariantLabel = variant.label;
+    } else {
+      if (!newProduct.available) {
+        await connection.rollback();
+        return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Replacement product is unavailable' });
+      }
+      newUnitPrice = Number(newProduct.price);
+      newShopUnitPrice = newProduct.shop_price != null ? Number(newProduct.shop_price) : null;
+    }
+
+    const newProductName = newVariantLabel ? `${newProduct.name} (${newVariantLabel})` : newProduct.name;
+    const newLineTotal = roundMoney(newUnitPrice * item.quantity);
+    const newShopLineTotal = newShopUnitPrice != null ? roundMoney(newShopUnitPrice * item.quantity) : null;
+
+    const [updateItemResult] = await connection.query(
+      `UPDATE order_items
+         SET product_id = ?, variant_id = ?, variant_label = ?, product_name = ?,
+             unit_price = ?, line_total = ?, shop_unit_price = ?, shop_line_total = ?
+       WHERE id = ? AND order_id = ? AND product_id = ? AND unit_price = ?`,
+      [
+        newProduct.id, normalizedNewVariantId, newVariantLabel, newProductName,
+        newUnitPrice, newLineTotal, newShopUnitPrice, newShopLineTotal,
+        itemId, orderId, item.product_id, item.unit_price,
+      ]
+    );
+    if (updateItemResult.affectedRows === 0) {
+      await connection.rollback();
+      const [freshItems] = await pool.query('SELECT * FROM order_items WHERE order_id = ? AND area_id = ?', [orderId, order.area_id]);
+      return res.status(409).json({ code: 'CONCURRENCY_CONFLICT', message: 'This item was already changed by someone else.', order, items: freshItems });
+    }
+
+    const [[{ subtotal: recomputedSubtotal }]] = await connection.query(
+      'SELECT SUM(line_total) AS subtotal FROM order_items WHERE order_id = ?',
+      [orderId]
+    );
+    const subtotal = roundMoney(Number(recomputedSubtotal) || 0);
+    const total = roundMoney(Math.max(0, subtotal
+      + Number(order.delivery_charge)
+      + Number(order.fast_delivery_charge)
+      + Number(order.night_charge)
+      + Number(order.rain_charge)
+      - Number(order.discount_amount)));
+
+    // discount_amount stays frozen (see this function's own header comment —
+    // no refund/reconciliation automation), but a swap down to a cheaper
+    // product can drop the new subtotal below the applied coupon's own
+    // min_order_amount, silently shipping an order that violates the terms
+    // it was granted under. Surface it rather than auto-adjusting money on
+    // a payment-sensitive path — same "flag it, ops reconciles" pattern
+    // this function already uses for the total shift itself.
+    let couponWarning = null;
+    if (order.coupon_id && Number(order.discount_amount) > 0) {
+      const [couponRows] = await connection.query(
+        'SELECT min_order_amount FROM coupons WHERE id = ?',
+        [order.coupon_id]
+      );
+      const minOrderAmount = couponRows[0] ? Number(couponRows[0].min_order_amount) : null;
+      if (minOrderAmount !== null && subtotal < minOrderAmount) {
+        couponWarning = `Applied coupon "${order.coupon_code || order.coupon_title || order.coupon_id}" requires a minimum order of ₹${minOrderAmount}; the new subtotal is ₹${subtotal}. The ₹${order.discount_amount} discount was NOT auto-removed — review and adjust manually if needed.`;
+      }
+    }
+
+    const [updateOrderResult] = await connection.query(
+      `UPDATE orders SET subtotal = ?, total = ? WHERE id = ?${scope.clause} AND status = ?`,
+      [subtotal, total, orderId, ...scope.params, order.status]
+    );
+    if (updateOrderResult.affectedRows === 0) {
+      await connection.rollback();
+      const [freshOrderRows] = await pool.query(`SELECT * FROM orders WHERE id = ?${scope.clause}`, [orderId, ...scope.params]);
+      const [freshItems] = await pool.query('SELECT * FROM order_items WHERE order_id = ? AND area_id = ?', [orderId, order.area_id]);
+      return res.status(409).json({ code: 'CONCURRENCY_CONFLICT', message: 'Order was updated by someone else.', order: freshOrderRows[0], items: freshItems });
+    }
+
+    await connection.commit();
+
+    const [updatedOrderRows] = await pool.query(`SELECT * FROM orders WHERE id = ?${scope.clause}`, [orderId, ...scope.params]);
+    const [updatedItemRows] = await pool.query('SELECT * FROM order_items WHERE id = ?', [itemId]);
+    const updatedOrder = updatedOrderRows[0];
+    const updatedItem = updatedItemRows[0];
+
+    try {
+      realtimeEvents.emitOrderItemReplaced(
+        updatedOrder,
+        itemId,
+        { productId: item.product_id, productName: item.product_name, unitPrice: item.unit_price, lineTotal: item.line_total },
+        { productId: updatedItem.product_id, productName: updatedItem.product_name, unitPrice: updatedItem.unit_price, lineTotal: updatedItem.line_total }
+      );
+      if (item.shop_id !== null) {
+        notifyShopsOrderItemReplaced(updatedOrder, item.shop_id); // fire-and-forget
+      }
+    } catch (_) {
+      // Realtime is best-effort — the swap is already persisted.
+    }
+
+    if (couponWarning) {
+      adminInbox.createAdminNotification({
+        type: adminInbox.TYPES.COUPON_TERMS_VIOLATED,
+        title: `Order #${orderId} no longer meets its coupon's terms`,
+        body: couponWarning,
+        relatedUrl: `/orders?id=${orderId}`,
+        relatedId: String(orderId),
+        areaId: order.area_id,
+      }).catch(() => {}); // best-effort — the swap is already persisted regardless
+    }
+
+    res.status(200).json({ message: 'Item replaced', order: updatedOrder, item: updatedItem, couponWarning });
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+};
+
 // admin_notifications / notification_batches use the same resolveAreaOrAll
 // helper defined near the top of this file (§2.10 also covers the
 // operational inbox and broadcast history as legitimate cross-area H6
