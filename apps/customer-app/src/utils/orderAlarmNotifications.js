@@ -122,8 +122,13 @@ async function readPersistedAuthState() {
 /**
  * Ensure a customer JWT is available for API calls from a background
  * notifee action (app may be killed — token providers not yet wired).
+ * Exported for reuse by other background-only entry points (e.g.
+ * riderBackgroundLocationTask.js's TaskManager callback) that hit the same
+ * "JS relaunched headless, App.js's setCustomerTokenProvider(() =>
+ * useAuthStore.getState().token) never ran, zustand-persist hasn't
+ * rehydrated yet" gap.
  */
-async function ensureBackgroundCustomerToken() {
+export async function ensureBackgroundCustomerToken() {
   let token = useAuthStore.getState()?.token || null;
   if (!token) {
     const persisted = await readPersistedAuthState();
