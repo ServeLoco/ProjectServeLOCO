@@ -207,14 +207,17 @@ describe('coupons.isWithinActiveTime', () => {
   });
 
   it('allows times inside a normal (non-overnight) window', () => {
-    // Use a fixed Asia/Kolkata time: noon should be inside 09:00–18:00.
-    // Build a Date that yields ~12:00 in IST regardless of the test host TZ.
-    const now = new Date();
-    // 12:00 IST = 06:30 UTC. We can't easily construct that portably
-    // without date-fns-tz, so we test both ends with generous bounds.
+    // Fixed instant, not real wall-clock time — getNowMinutesInZone converts
+    // via the IANA timezone from the Date's absolute instant, so this is
+    // 12:00 IST regardless of host TZ, deterministic regardless of when the
+    // suite runs (a `new Date()` + '00:00'-'23:59' window here previously
+    // flaked once a day: isWithinActiveTime's end bound is exclusive, so the
+    // 23:59:00-23:59:59 IST minute genuinely falls outside a '23:59' end).
+    // 12:00 IST = 06:30 UTC.
+    const now = new Date('2024-01-01T06:30:00Z');
     expect(coupons.isWithinActiveTime({
-      active_time_start: '00:00',
-      active_time_end: '23:59',
+      active_time_start: '09:00',
+      active_time_end: '18:00',
     }, now)).toBe(true);
   });
 
