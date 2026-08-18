@@ -1902,7 +1902,42 @@ const resolveOrderTargetCustomer = async (req, res) => {
   return customer;
 };
 
+// Multi-area audit finding (C1): admin-placed orders resolve their area from
+// the customer PIN inside createOrder/calculateCart, NOT from the admin —
+// so an area_admin could place an order into any area by pointing the pin
+// there. Gate: the order's resolved area must equal the admin's scoped area
+// (an area_admin is pinned to their own; a super_admin must pass an explicit
+// X-Area-Id for the area they're placing into — 'all' and header-absent both
+// reject a specific write).
+const assertOrderAreaMatchesPin = async (req, res) => {
+  const adminAreaId = requireOrderArea(req, res);
+  if (adminAreaId === null) return false;
+  const { latitude, longitude } = req.body || {};
+  // No pin at all (CreateOrderModal's map picker is optional — a phone order
+  // taken without ever opening it) has nothing to cross-check: without
+  // coordinates, resolveAreaIdForPricing can only fall back to the platform
+  // DEFAULT area, which is neither "the area this order belongs to" nor
+  // necessarily the admin's own scoped area, and would either misroute a
+  // pinless order into the wrong area or 403 a legitimate one. Set the
+  // override so calculateCart/createOrder resolve into the admin's own area
+  // instead of independently re-deriving (and landing on the default).
+  if (!latitude && !longitude) {
+    req.adminAreaOverride = Number(adminAreaId);
+    return true;
+  }
+  const orderAreaId = await resolveAreaIdForPricing(latitude, longitude);
+  if (orderAreaId !== Number(adminAreaId)) {
+    res.status(403).json({
+      code: 'FORBIDDEN',
+      message: `Order resolves to area ${orderAreaId}; you are scoped to area ${adminAreaId}. Set the pin (and X-Area-Id) for that area.`,
+    });
+    return false;
+  }
+  return true;
+};
+
 const adminCalculateOrder = async (req, res) => {
+  if (!(await assertOrderAreaMatchesPin(req, res))) return;
   const customer = await resolveOrderTargetCustomer(req, res);
   if (!customer) return;
   req.user = { id: customer.id };

@@ -215,7 +215,13 @@ const createOrder = async (req, res) => {
     // (area membership is a coarse, rarely-changing routing fact, unlike the
     // zone PRICING data below, which still reads through `connection`
     // uncached for transactional consistency).
-    const deliveryAreaId = await resolveAreaIdForPricing(latitude, longitude);
+    //
+    // req.adminAreaOverride — see cartController.js's calculateCart for the
+    // full rationale; same admin-no-pin gap, same fix, mirrored here since
+    // adminCreateOrder proxies into this function too.
+    const deliveryAreaId = (!latitude && !longitude && req.adminAreaOverride)
+      ? req.adminAreaOverride
+      : await resolveAreaIdForPricing(latitude, longitude);
     const deliveryArea = await getAreaById(deliveryAreaId);
 
     const [settingRows] = await connection.query(

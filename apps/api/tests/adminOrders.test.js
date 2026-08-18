@@ -23,7 +23,12 @@ const app = express();
 app.use(express.json());
 app.use('/api/admin', adminRoutes);
 
-const adminToken = jwt.sign({ id: 'admin', role: 'admin' }, process.env.JWT_SECRET || 'secret');
+const adminToken = jwt.sign({ id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 }, process.env.JWT_SECRET || 'secret');
+// Non-default area — distinguishes "the admin's own scoped area" from "the
+// platform default area" for the pinless-order regression test below (area 1
+// in this fixture happens to also be the default area, so a test using
+// adminToken alone could pass even if a bug silently routed to the default).
+const area2AdminToken = jwt.sign({ id: 'admin2', role: 'admin', adminRole: 'area_admin', areaId: 2 }, process.env.JWT_SECRET || 'secret');
 const areaScope = require('../src/utils/areaScope');
 
 describe('Admin-placed orders (order on behalf of a customer)', () => {
@@ -55,6 +60,9 @@ describe('Admin-placed orders (order on behalf of a customer)', () => {
     });
 
     it('rejects a blocked customer', async () => {
+      // No pin sent: assertOrderAreaMatchesPin short-circuits to the admin's
+      // own scoped area (req.adminAreaOverride) rather than resolving via
+      // the pin, so no area-lookup query happens before the customer lookup.
       pool.query.mockResolvedValueOnce([[{ id: 42, blocked: 1 }]]);
 
       const res = await request(app)
@@ -67,9 +75,9 @@ describe('Admin-placed orders (order on behalf of a customer)', () => {
 
     it('returns the same cart calculation the customer app would get', async () => {
       pool.query.mockResolvedValueOnce([[{ id: 42, blocked: 0 }]]); // customer lookup
-      // No pin sent: calculateCart's area resolution (TASK 13) goes
-      // straight to getDefaultArea() — one extra query before settings.
-      pool.query.mockResolvedValueOnce([[{ id: 1, code: 'A1', name: 'Area 1', active: 1, is_default: 1 }]]);
+      // No pin sent: both assertOrderAreaMatchesPin and calculateCart use
+      // req.adminAreaOverride (the admin's own scoped area) instead of
+      // resolving via the pin, so no area-lookup query happens at all.
       pool.query.mockResolvedValueOnce([[{ shop_open: 1, delivery_charge: 10, night_charge: 0 }]]); // settings
       pool.query.mockResolvedValueOnce([[{ id: 1, name: 'Pizza', price: 100, available: 1 }]]); // products
 
@@ -96,6 +104,9 @@ describe('Admin-placed orders (order on behalf of a customer)', () => {
     });
 
     it('creates the order for the target customer, not the admin', async () => {
+      // No pin sent: assertOrderAreaMatchesPin short-circuits to the admin's
+      // own scoped area (req.adminAreaOverride) rather than resolving via
+      // the pin, so no area-lookup query happens before the customer lookup.
       pool.query.mockResolvedValueOnce([[{ id: 42, blocked: 0 }]]); // resolveOrderTargetCustomer
 
       const mockConnection = {
@@ -130,6 +141,51 @@ describe('Admin-placed orders (order on behalf of a customer)', () => {
       expect(res.body.order.customerId).toBe(42);
       expect(res.body.order.subtotal).toBe(200);
       expect(mockConnection.commit).toHaveBeenCalledTimes(1);
+    });
+
+    // Regression test for the pinless-order area bug: assertOrderAreaMatchesPin
+    // used to fall back to resolveAreaIdForPricing(undefined, undefined), which
+    // resolves to the platform DEFAULT area, not the admin's own scoped area —
+    // an area 2 admin taking a phone order without ever opening the map picker
+    // either got misrouted into area 1 (whichever area happens to be default)
+    // or 403'd for no reason. Uses area2AdminToken specifically because this
+    // fixture's default area is area 1 — a test scoped to area 1 couldn't tell
+    // "used the admin's own area" apart from "fell back to the default".
+    it('creates a pinless order in the admin\'s own scoped area, not the platform default', async () => {
+      pool.query.mockResolvedValueOnce([[{ id: 42, blocked: 0 }]]); // resolveOrderTargetCustomer
+
+      const mockConnection = {
+        beginTransaction: jest.fn(),
+        query: jest.fn(),
+        commit: jest.fn(),
+        rollback: jest.fn(),
+        release: jest.fn(),
+      };
+      pool.getConnection.mockResolvedValue(mockConnection);
+
+      mockConnection.query
+        .mockResolvedValueOnce([[{ id: 42, name: 'Jane Doe', phone: '9990001111', whatsapp_number: '9990001111', address: 'Saved address', blocked: 0 }]]) // user
+        .mockResolvedValueOnce([[{ shop_open: 1, delivery_available: 1, delivery_charge: 10, night_charge: 0 }]]) // settings
+        .mockResolvedValueOnce([[{ id: 1, name: 'Pizza', price: 100, available: 1 }]]) // products
+        .mockResolvedValueOnce([[]]) // exclusion zones
+        .mockResolvedValueOnce([{ insertId: 6001 }]) // INSERT orders
+        .mockResolvedValueOnce([{ affectedRows: 1 }]); // INSERT order_items
+
+      const res = await request(app)
+        .post('/api/admin/orders')
+        .set('Authorization', `Bearer ${area2AdminToken}`)
+        .send({
+          customer_id: 42,
+          address: '123 Test St',
+          paymentMethod: 'Cash',
+          items: [{ productId: 1, quantity: 2 }],
+        });
+
+      expect(res.statusCode).toEqual(201);
+      const insertOrdersCall = mockConnection.query.mock.calls.find(
+        ([sql]) => typeof sql === 'string' && sql.includes('INSERT INTO orders')
+      );
+      expect(insertOrdersCall[1][0]).toBe(2); // area_id param — the admin's own area, not the default (1)
     });
 
     it('404s when the customer does not exist', async () => {
