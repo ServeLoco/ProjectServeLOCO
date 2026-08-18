@@ -60,22 +60,62 @@ describe('remindPendingShopOrders', () => {
   // shopAlertSweeper.js's comment on why mixing a server clock with a
   // driver-parsed client clock silently broke this pass before).
 
-  it('reminds every row the query returns and stamps the throttle UPDATE', async () => {
+  it('claims a row (compare-and-set) before pushing, then reminds it', async () => {
     pool.query.mockResolvedValueOnce([[{
       order_id: 10, shop_id: 1, order_number: 'ORD-10', owner_user_id: 501, shop_name: 'Burger Point',
+      last_notified_at: null,
     }]]);
-    pool.query.mockResolvedValueOnce([{ affectedRows: 1 }]); // throttle-stamp UPDATE
+    pool.query.mockResolvedValueOnce([{ affectedRows: 1 }]); // claim UPDATE
 
     await remindPendingShopOrders();
 
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringMatching(/UPDATE order_items SET shop_last_notified_at = NOW/),
+      [10, 1, null]
+    );
+    // The push must happen only after the claim UPDATE resolves — asserted
+    // via call order, not just "both happened".
+    expect(pool.query.mock.invocationCallOrder[1]).toBeLessThan(
+      remindShopOrderOwner.mock.invocationCallOrder[0]
+    );
     expect(remindShopOrderOwner).toHaveBeenCalledWith(
       { id: 10, order_number: 'ORD-10' },
       1,
       501
     );
-    expect(pool.query).toHaveBeenLastCalledWith(
-      expect.stringMatching(/UPDATE order_items SET shop_last_notified_at = NOW/),
-      [10, 1]
+  });
+
+  it('does not push when the claim UPDATE affects no rows (another instance already claimed it)', async () => {
+    // Concurrent sweeper on a second API instance (module header: "safe
+    // across... multiple API instances") claimed this row between our
+    // SELECT and our UPDATE — the CAS's shop_last_notified_at <=> ? no
+    // longer matches, affectedRows is 0. Must not ring the shop twice.
+    pool.query.mockResolvedValueOnce([[{
+      order_id: 11, shop_id: 2, order_number: 'ORD-11', owner_user_id: 502, shop_name: 'Tea Stall',
+      last_notified_at: null,
+    }]]);
+    pool.query.mockResolvedValueOnce([{ affectedRows: 0 }]); // lost the race
+
+    await remindPendingShopOrders();
+
+    expect(remindShopOrderOwner).not.toHaveBeenCalled();
+  });
+
+  it('CASes against the last_notified_at value the SELECT actually saw', async () => {
+    const lastNotifiedAt = new Date('2026-08-18T10:00:00Z');
+    pool.query.mockResolvedValueOnce([[{
+      order_id: 12, shop_id: 3, order_number: 'ORD-12', owner_user_id: 503, shop_name: 'Grocer',
+      last_notified_at: lastNotifiedAt,
+    }]]);
+    pool.query.mockResolvedValueOnce([{ affectedRows: 1 }]);
+
+    await remindPendingShopOrders();
+
+    expect(pool.query).toHaveBeenNthCalledWith(
+      2,
+      expect.any(String),
+      [12, 3, lastNotifiedAt]
     );
   });
 
@@ -109,8 +149,8 @@ describe('remindPendingShopOrders', () => {
 
   it('reminds each shop independently on a multi-shop order', async () => {
     pool.query.mockResolvedValueOnce([[
-      { order_id: 20, shop_id: 1, order_number: 'ORD-20', owner_user_id: 601, shop_name: 'Shop A' },
-      { order_id: 20, shop_id: 2, order_number: 'ORD-20', owner_user_id: 602, shop_name: 'Shop B' },
+      { order_id: 20, shop_id: 1, order_number: 'ORD-20', owner_user_id: 601, shop_name: 'Shop A', last_notified_at: null },
+      { order_id: 20, shop_id: 2, order_number: 'ORD-20', owner_user_id: 602, shop_name: 'Shop B', last_notified_at: null },
     ]]);
     pool.query.mockResolvedValue([{ affectedRows: 1 }]);
 
@@ -121,17 +161,23 @@ describe('remindPendingShopOrders', () => {
     expect(remindShopOrderOwner).toHaveBeenCalledWith(expect.anything(), 2, 602);
   });
 
-  it('continues to the next row when one reminder fails', async () => {
+  it('continues to the next row when one claim throws and when one push fails', async () => {
     pool.query.mockResolvedValueOnce([[
-      { order_id: 21, shop_id: 1, order_number: 'ORD-21', owner_user_id: 701, shop_name: 'Bad Shop' },
-      { order_id: 22, shop_id: 2, order_number: 'ORD-22', owner_user_id: 702, shop_name: 'Good Shop' },
+      { order_id: 21, shop_id: 1, order_number: 'ORD-21', owner_user_id: 701, shop_name: 'Bad Claim Shop', last_notified_at: null },
+      { order_id: 22, shop_id: 2, order_number: 'ORD-22', owner_user_id: 702, shop_name: 'Bad Push Shop', last_notified_at: null },
+      { order_id: 23, shop_id: 3, order_number: 'ORD-23', owner_user_id: 703, shop_name: 'Good Shop', last_notified_at: null },
     ]]);
-    remindShopOrderOwner.mockRejectedValueOnce(new Error('push failed'));
-    pool.query.mockResolvedValueOnce([{ affectedRows: 1 }]);
+    pool.query.mockRejectedValueOnce(new Error('db blip')); // row 21's claim throws
+    pool.query.mockResolvedValueOnce([{ affectedRows: 1 }]); // row 22's claim succeeds
+    remindShopOrderOwner.mockRejectedValueOnce(new Error('push failed')); // row 22's push fails
+    pool.query.mockResolvedValueOnce([{ affectedRows: 1 }]); // row 23's claim succeeds
 
     await remindPendingShopOrders();
 
+    // Row 21 never reached remindShopOrderOwner (claim threw first); row 22
+    // did but rejected; row 23 succeeded — net one successful reminder.
     expect(remindShopOrderOwner).toHaveBeenCalledTimes(2);
+    expect(remindShopOrderOwner).toHaveBeenCalledWith(expect.anything(), 3, 703);
   });
 });
 

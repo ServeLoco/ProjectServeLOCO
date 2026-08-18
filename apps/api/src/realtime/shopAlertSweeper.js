@@ -47,7 +47,8 @@ const remindPendingShopOrders = async () => {
   // mismatch silently breaks, which is what made this pass never fire in practice.
   const [rows] = await pool.query(
     `SELECT oi.order_id, oi.shop_id, o.order_number,
-            s.owner_user_id, s.name AS shop_name
+            s.owner_user_id, s.name AS shop_name,
+            MIN(oi.shop_last_notified_at) AS last_notified_at
      FROM order_items oi
      JOIN orders o ON o.id = oi.order_id
      JOIN shops s ON s.id = oi.shop_id AND s.active = 1
@@ -69,15 +70,27 @@ const remindPendingShopOrders = async () => {
 
   for (const row of rows) {
     try {
+      // Claim BEFORE pushing, compare-and-set against the last_notified_at
+      // this SELECT saw (<=> is MySQL's NULL-safe equality — last_notified_at
+      // is NULL for a never-notified row). Multiple API instances can run
+      // this sweeper concurrently (module header's "safe across... multiple
+      // API instances" claim) — without the claim, two instances polling the
+      // same tick both see this row as due and both push, ringing the shop's
+      // phone twice. If the claim doesn't stick (another instance already
+      // claimed it since our SELECT), skip the push entirely rather than
+      // ringing a shop that's already been reminded this cycle.
+      const [claimResult] = await pool.query(
+        `UPDATE order_items SET shop_last_notified_at = NOW(), shop_notify_count = shop_notify_count + 1
+         WHERE order_id = ? AND shop_id = ? AND shop_confirmed_at IS NULL AND shop_rejected_at IS NULL
+           AND shop_last_notified_at <=> ?`,
+        [row.order_id, row.shop_id, row.last_notified_at]
+      );
+      if (claimResult.affectedRows === 0) continue;
+
       await remindShopOrderOwner(
         { id: row.order_id, order_number: row.order_number },
         row.shop_id,
         row.owner_user_id
-      );
-      await pool.query(
-        `UPDATE order_items SET shop_last_notified_at = NOW(), shop_notify_count = shop_notify_count + 1
-         WHERE order_id = ? AND shop_id = ? AND shop_confirmed_at IS NULL AND shop_rejected_at IS NULL`,
-        [row.order_id, row.shop_id]
       );
     } catch (e) {
       console.error('[shop-alert] remind failed for order', row.order_id, 'shop', row.shop_id, e.message);
