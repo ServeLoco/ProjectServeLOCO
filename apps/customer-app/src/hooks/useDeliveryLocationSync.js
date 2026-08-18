@@ -11,6 +11,14 @@ import { invalidate } from '../utils/apiCache';
 
 const GPS_TIMEOUT_MS = 8000;
 const INITIAL_SYNC_TIMEOUT_MS = 10_000;
+// Widest fix (metres) we will accept as evidence of which zone the customer
+// is standing in. Delivery zones here span roughly 2 km, so anything coarser
+// than this cannot place someone reliably. iOS returns a fix fuzzed by
+// kilometres whenever "Precise Location" is off for the app, and — unlike
+// Android's approximate-permission case, which requestPreciseLocationPermission
+// already filters — expo-location exposes no precise/reduced flag on iOS, so
+// coords.accuracy is the only signal available.
+const MAX_TRUSTED_FIX_ACCURACY_M = 1000;
 // Throttles the AppState-active re-check so returning from a quick
 // backgrounding (e.g. a notification) doesn't re-fire GPS + a network call.
 const MIN_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
@@ -76,7 +84,13 @@ function invalidateForAreaChange(newAreaId) {
 // chokepoint). A 304 (null) is a deliberate no-op — the caller keeps
 // whatever it already had.
 function applyBootstrapResult(result) {
-  if (result === null) return;
+  // A null bootstrap result is a successful conditional GET (304). Mark the
+  // settings fresh too, otherwise each pull-to-refresh immediately schedules
+  // an avoidable settings request even though bootstrap confirmed it is fresh.
+  if (result === null) {
+    useSettingsStore.getState().markFetched();
+    return;
+  }
   const previousAreaId = useDeliveryLocationStore.getState().areaId;
   const nextAreaId = result.area?.id ?? null;
   useDeliveryLocationStore.getState().setAreaInfo({
@@ -148,6 +162,14 @@ async function revalidateCartForZoneChange(lat, lng) {
       longitude: lng,
     };
     const bill = normalizeCartCalculation(await cartApi.calculate(payload));
+    // This call is fire-and-forget from sync()'s point of view and can take
+    // an abnormally long time to resolve (slow network, slow device) — long
+    // enough for the customer to have since moved to a different pin. Apply
+    // the result only if `lat`/`lng` are still the pin currently in effect;
+    // otherwise this is a stale answer to a question nobody's asking
+    // anymore, and pruning/re-pricing the cart against it would be wrong.
+    const currentCoords = useDeliveryLocationStore.getState().coords;
+    if (currentCoords?.lat !== lat || currentCoords?.lng !== lng) return;
     useCartStore.getState().syncItemPricesFromServer(bill.items);
     if (bill.unavailableItems?.length) {
       const removed = useCartStore.getState().removeUnavailableItems(bill.unavailableItems);
@@ -219,6 +241,17 @@ function waitForHydration() {
 async function syncDeliveryLocation() {
   lastSyncAt = Date.now();
   const { markInitialSyncComplete } = useDeliveryLocationStore.getState();
+  // The outer Promise.race below only stops the CALLER from waiting past
+  // INITIAL_SYNC_TIMEOUT_MS — it does not cancel `sync()`, which keeps
+  // running for as long as the real GPS fetch takes (device GPS can hang
+  // well past its own GPS_TIMEOUT_MS on some hardware). Without this flag,
+  // a sync the app has already given up on can still resolve seconds later
+  // — after the customer has moved on and started shopping normally — and
+  // silently apply a now-irrelevant location fix, right down to revalidating
+  // (and pruning) whatever they've since added to the cart. Once the race
+  // times out this sync is abandoned: it may still finish, but every
+  // side-effecting continuation below checks this first and no-ops instead.
+  let abandoned = false;
 
   const sync = async () => {
     await waitForHydration();
@@ -239,6 +272,7 @@ async function syncDeliveryLocation() {
         checkInsideZone(coords.lat, coords.lng),
         syncAreaInfo(coords.lat, coords.lng),
       ]);
+      if (abandoned) return;
       if (result !== null) {
         setInsideZone(result.insideZone);
         setZone(result.zoneName, result.zoneId);
@@ -283,11 +317,37 @@ async function syncDeliveryLocation() {
     } finally {
       if (gpsTimeoutId) clearTimeout(gpsTimeoutId);
     }
-    const { latitude, longitude } = position.coords;
+    // The GPS fetch above can take up to GPS_TIMEOUT_MS (8s) — long enough
+    // for the customer to open Change Location and confirm a NEW manual pin
+    // while this fix is still in flight. That explicit, later choice must
+    // win: applying a GPS fix gathered before it would silently snap the
+    // pin back and (via syncAreaInfo's area-mismatch check) wipe whatever
+    // they just added to the cart under the manual pin's area. Only bail
+    // when the store actually changed underneath this await — a `source`
+    // that was ALREADY 'manual' before this sync started must still be
+    // overridden once, same as always (that's the cold-start-GPS-wins
+    // rule this function exists to enforce).
+    const storeNow = useDeliveryLocationStore.getState();
+    if (abandoned || storeNow.source !== source || storeNow.coords?.lat !== coords?.lat || storeNow.coords?.lng !== coords?.lng) {
+      return;
+    }
+    const { latitude, longitude, accuracy } = position.coords;
+    // A fix too coarse to place the customer must not produce a zone verdict:
+    // it would report a customer standing inside a zone as out of range, and
+    // on a cold start the `force` below would overwrite the manual pin they
+    // set precisely to avoid that. Leaving state untouched keeps the last
+    // known pin and lets Home offer the location picker instead.
+    if (typeof accuracy === 'number' && accuracy > MAX_TRUSTED_FIX_ACCURACY_M) {
+      return;
+    }
     const [result] = await Promise.all([
       checkInsideZone(latitude, longitude),
       syncAreaInfo(latitude, longitude),
     ]);
+    // Re-check after this second network round trip too — the customer can
+    // just as easily act during checkInsideZone/syncAreaInfo as during the
+    // GPS fetch itself, and `abandoned` may have flipped while we awaited.
+    if (abandoned) return;
     setGpsLocation(
       latitude,
       longitude,
@@ -309,7 +369,10 @@ async function syncDeliveryLocation() {
     await Promise.race([
       sync(),
       new Promise((resolve) => {
-        timeoutId = setTimeout(resolve, INITIAL_SYNC_TIMEOUT_MS);
+        timeoutId = setTimeout(() => {
+          abandoned = true;
+          resolve();
+        }, INITIAL_SYNC_TIMEOUT_MS);
       }),
     ]);
   } catch (_) {
