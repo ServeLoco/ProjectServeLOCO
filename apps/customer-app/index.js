@@ -14,6 +14,22 @@ import {
   handleAlarmActionEvent,
   isAlarmPayload,
 } from './src/utils/orderAlarmNotifications';
+// Side-effect import: registers the TaskManager task at module scope so it
+// exists before startLocationUpdatesAsync is called, including on the
+// background-only JS relaunches Android/iOS use to deliver a location fix
+// while the app isn't in the foreground (same reasoning as the FCM handler
+// below — must run on every JS load, not just once RiderDashboardScreen mounts).
+// require(), not a static import: expo-task-manager's native module must be
+// linked into the binary (added this release, fenced by this release's
+// runtimeVersion bump) — but runtimeVersion fencing only protects against
+// OTA; a future channel/config mistake that serves this JS to an older
+// binary anyway must not crash app launch over a feature (rider background
+// location) most sessions never touch.
+try {
+  require('./src/tasks/riderBackgroundLocationTask');
+} catch (err) {
+  console.warn('[index] rider background location task unavailable:', err?.message || err);
+}
 
 // ── Background FCM handler (Android killed/background alarm path) ──────────
 // MUST be registered at the top level before AppRegistry, and ONLY here —

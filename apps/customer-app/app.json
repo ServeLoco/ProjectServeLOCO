@@ -2,7 +2,7 @@
   "expo": {
     "name": "VillKro",
     "slug": "villkro",
-    "version": "1.8.3",
+    "version": "1.8.4",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "assetBundlePatterns": [
@@ -37,7 +37,10 @@
         "expo-location",
         {
           "locationWhenInUsePermission": "VillKro uses your location on the delivery map and for live rider tracking while you are online.",
-          "isAndroidForegroundServiceEnabled": false
+          "locationAlwaysAndWhenInUsePermission": "VillKro uses your location — including in the background while you're online as a rider — to match you with nearby orders and keep the delivery area system accurate. This only runs while you are toggled online.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
         }
       ],
       [
@@ -47,6 +50,10 @@
             "enableProguardInReleaseBuilds": true,
             "enableMinifyInReleaseBuilds": true,
             "enableShrinkResourcesInReleaseBuilds": true
+          },
+          "ios": {
+            "useFrameworks": "static",
+            "buildReactNativeFromSource": true
           }
         }
       ]
@@ -56,27 +63,32 @@
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "VillKro uses your location to pin your delivery address and show your position on the rider delivery map.",
-        "NSPhotoLibraryUsageDescription": "VillKro lets admins choose product photos from the library.",
         "UIBackgroundModes": [
           "remote-notification"
-        ]
+        ],
+        "ITSAppUsesNonExemptEncryption": false
       },
-      "bundleIdentifier": "com.yashsiwach.villkro"
+      "bundleIdentifier": "com.yashsiwach.villkro",
+      "buildNumber": "5"
     },
     "android": {
       "softwareKeyboardLayoutMode": "resize",
       "googleServicesFile": "./google-services.json",
       "permissions": [
         "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
         "POST_NOTIFICATIONS",
         "RECEIVE_BOOT_COMPLETED",
         "VIBRATE",
         "USE_FULL_SCREEN_INTENT",
         "FOREGROUND_SERVICE",
-        "FOREGROUND_SERVICE_SPECIAL_USE"
+        "FOREGROUND_SERVICE_SPECIAL_USE",
+        "FOREGROUND_SERVICE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
       ],
+      "blockedPermissions": ["android.permission.RECORD_AUDIO"],
       "package": "com.yashsiwach.villkro",
-      "versionCode": 33,
+      "versionCode": 34,
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon/adaptive-icon-foreground.png",
         "backgroundImage": "./assets/icon/adaptive-icon-background.png",
@@ -89,7 +101,7 @@
       }
     },
     "owner": "yashsiwch",
-    "runtimeVersion": "1.8.3",
+    "runtimeVersion": "1.8.4",
     "updates": {
       "url": "https://u.expo.dev/1df5a9bf-de34-48ea-96f4-68f598d7d318"
     }
