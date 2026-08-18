@@ -8,7 +8,12 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect } from '@react-navigation/native';
 import { colors, spacing, typography, radius, shadows } from '../../theme';
 import { useAuthStore } from '../../stores';
-import { shopApi, subscribeRealtime } from '../../api';
+import {
+  shopApi,
+  subscribeRealtime,
+  subscribeRealtimeLifecycle,
+  getRealtimeConnectionState,
+} from '../../api';
 import { useNewOrderAlert } from '../../hooks/useNewOrderAlert';
 import { stopAlarmSound } from '../../utils/alarmSound';
 import {
@@ -38,6 +43,10 @@ function formatElapsed(startTime, nowMs) {
   const s = diffSec % 60;
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
+
+// Cap for ackedOrderIdsRef below — this screen can stay mounted for a shop's
+// entire shift on an always-on tablet.
+const ACKED_ORDER_IDS_CAP = 200;
 
 /**
  * ShopDashboardScreen
@@ -291,12 +300,55 @@ export default function ShopDashboardScreen() {
     };
   }, [fetchAll, ringBackgroundShopAlarm, showCancelledNotice]);
 
+  // ── Weak-network resilience: offline banner + HTTP polling fallback ────
+  // A socket can sit "connected" for up to ~30s after the underlying network
+  // actually died (see the server's pingInterval/pingTimeout) — during that
+  // window a new-order alarm emitted into it is silently dropped. Poll
+  // GET /shop/orders on a plain interval whenever we know the socket is down
+  // so a new order still surfaces without waiting on the realtime path at all.
+  const [socketConnected, setSocketConnected] = useState(
+    () => getRealtimeConnectionState().connected
+  );
+  useEffect(() => {
+    const unsubLifecycle = subscribeRealtimeLifecycle(({ eventName }) => {
+      setSocketConnected(eventName !== 'disconnected');
+    });
+    return unsubLifecycle;
+  }, []);
+
+  useEffect(() => {
+    if (socketConnected) return undefined;
+    const id = setInterval(() => fetchAll(), 15000);
+    return () => clearInterval(id);
+  }, [socketConnected, fetchAll]);
+
   // ── Repeating alert while anything is waiting in the popup queue ────
   // role: 'shop' — alarm tray clear + foreground 8s loop; background uses
   // socket ringBackgroundShopAlarm + FCM (admin uses default quiet loop).
   useNewOrderAlert(pendingQueue.length > 0, { role: 'shop' });
 
   const currentPopupOrder = pendingQueue[0] || null;
+
+  // Proof-of-delivery for the in-app popup path (foreground, or backgrounded
+  // then foregrounded without ever hitting the killed-app FCM handler) — the
+  // killed-app notifee path already acks from displayAlarmNotification.
+  // Capped FIFO, not an unbounded Set: this screen can stay mounted for a
+  // shop's entire shift on an always-on tablet, and an order id is only
+  // ever useful here to dedupe a re-render of the SAME still-pending popup —
+  // once confirmed/rejected/expired it never reappears, so nothing is lost
+  // by forgetting old ids once the cap is hit.
+  const ackedOrderIdsRef = useRef(new Set());
+  useEffect(() => {
+    if (!currentPopupOrder) return;
+    const id = currentPopupOrder.id;
+    const acked = ackedOrderIdsRef.current;
+    if (acked.has(id)) return;
+    acked.add(id);
+    if (acked.size > ACKED_ORDER_IDS_CAP) {
+      acked.delete(acked.values().next().value); // oldest (Set preserves insertion order)
+    }
+    shopApi.ackOrderAlert(id).catch(() => {});
+  }, [currentPopupOrder]);
 
   const dequeue = useCallback((orderId) => {
     setPendingQueue(prev => prev.filter(o => o.id !== orderId));
@@ -607,6 +659,15 @@ export default function ShopDashboardScreen() {
         </TouchableOpacity>
       </View>
 
+      {!socketConnected && (
+        <View style={styles.offlineBanner}>
+          <AppIcon name="warning" size={16} color={'#8A5A00'} />
+          <Text style={styles.offlineBannerText}>
+            Weak connection — checking for new orders every 15s
+          </Text>
+        </View>
+      )}
+
       {/* Hero open/closed card */}
       <LinearGradient
         colors={[colors.brandGradientStart, colors.brandGradientEnd]}
@@ -730,6 +791,13 @@ const styles = StyleSheet.create({
   },
   cancelledNoticeTitle: { color: colors.white, fontWeight: '800', fontSize: 14 },
   cancelledNoticeItems: { color: 'rgba(255,255,255,0.9)', fontSize: 12, fontWeight: '500', marginTop: 2 },
+  offlineBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+    backgroundColor: colors.warningLight, marginHorizontal: spacing.lg,
+    borderRadius: radius.md, paddingHorizontal: spacing.sm, paddingVertical: spacing.xs + 2,
+    marginBottom: spacing.xs,
+  },
+  offlineBannerText: { color: '#8A5A00', fontSize: 12, fontWeight: '600', flexShrink: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: spacing.lg, paddingTop: spacing.md, paddingBottom: spacing.sm,
