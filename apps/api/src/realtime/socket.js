@@ -38,31 +38,63 @@ const authenticateSocket = async (socket, next) => {
     return next(new Error('AUTH_TOKEN_MISSING'));
   }
 
+  let payload;
   try {
-    const payload = verifyToken(token);
-    const role = payload.role;
-    const id = payload.sub || payload.id;
+    payload = verifyToken(token);
+  } catch (_error) {
+    return next(new Error('AUTH_TOKEN_INVALID'));
+  }
 
-    if (!id || !['customer', 'admin'].includes(role)) {
-      return next(new Error('FORBIDDEN_ROLE'));
-    }
+  const role = payload.role;
+  const id = payload.sub || payload.id;
 
-    // Mirror requireAdmin's revocation check (authMiddleware.js) — an admin
-    // hitting "revoke sessions" for a leaked token must also cut that
-    // token's realtime access, not just its REST access.
-    if (role === 'admin' && process.env.NODE_ENV !== 'test') {
+  if (!id || !['customer', 'admin'].includes(role)) {
+    return next(new Error('FORBIDDEN_ROLE'));
+  }
+
+  // Mirror requireAdmin's revocation check (authMiddleware.js) — an admin
+  // hitting "revoke sessions" for a leaked token must also cut that
+  // token's realtime access, not just its REST access.
+  if (role === 'admin' && process.env.NODE_ENV !== 'test') {
+    try {
       const [rows] = await pool.query('SELECT revoked_before FROM admin_auth_state WHERE id = 1');
       const revokedBefore = rows[0]?.revoked_before;
       if (revokedBefore && payload.iat && payload.iat * 1000 < new Date(revokedBefore).getTime()) {
         return next(new Error('AUTH_TOKEN_INVALID'));
       }
-    }
 
-    socket.data.auth = { id, role, adminRole: payload.adminRole, areaId: payload.areaId };
-    return next();
-  } catch (_error) {
-    return next(new Error('AUTH_TOKEN_INVALID'));
+      // Same live re-check requireAdmin does on every REST request (bug
+      // fix, multi-area audit finding #4). Without this, a deactivated or
+      // reassigned admin who is already connected keeps receiving that
+      // OTHER area's live order broadcasts (customer name/phone/address)
+      // for the rest of the socket's life, up to ADMIN_JWT_EXPIRES_IN
+      // (12h) — the REST-only re-check only stops their next HTTP call,
+      // not a socket connection made before the demotion/deactivation.
+      const liveState = await getLiveAdminState(payload);
+      if (liveState === 'revoked') {
+        return next(new Error('AUTH_TOKEN_INVALID'));
+      }
+      if (liveState) {
+        payload.adminRole = liveState.role;
+        payload.areaId = liveState.area_id;
+      }
+    } catch (_error) {
+      // The token itself verified fine above — this is the revocation/
+      // live-recheck queries failing (DB connection blip, pool exhaustion),
+      // not a bad token. Distinct error code so it doesn't read as an
+      // invalid/expired session in logs or client telemetry, same
+      // distinction requireAdmin's HTTP path already makes (its own catch
+      // calls next(error) rather than collapsing every failure to a 401).
+      // Still rejects the connection either way — skipping this check
+      // because the DB is unreachable would let a demoted/revoked admin's
+      // stale JWT claims through for the outage's duration, exactly what
+      // it exists to prevent.
+      return next(new Error('AUTH_SERVICE_UNAVAILABLE'));
+    }
   }
+
+  socket.data.auth = { id, role, adminRole: payload.adminRole, areaId: payload.areaId };
+  return next();
 };
 
 // No pin exists at the socket layer (H7 — a cold-start connect races the
