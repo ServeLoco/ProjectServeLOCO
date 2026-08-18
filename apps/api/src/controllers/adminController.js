@@ -2152,16 +2152,36 @@ const resolveOrderTargetCustomer = async (req, res) => {
 const assertOrderAreaMatchesPin = async (req, res) => {
   const adminAreaId = requireOrderArea(req, res);
   if (adminAreaId === null) return false;
-  const { latitude, longitude } = req.body || {};
+  // Accept the lat/lng aliases too, exactly as the downstream resolvers do
+  // (cartController.calculateCart reads req.body.latitude ?? req.body.lat;
+  // orderRoutes' createOrderSchema normalizes the same pair). Reading only
+  // `latitude`/`longitude` here let a caller slip the gate by sending the
+  // pin as `lat`/`lng`: this function saw no coordinates and waved the
+  // request through, then calculateCart/createOrder resolved the aliased
+  // pin into whatever area it actually falls in — placing an order outside
+  // the admin's own area, which is the exact cross-area write this gate
+  // exists to stop.
+  const body = req.body || {};
+  const latitude = body.latitude !== undefined ? body.latitude : body.lat;
+  const longitude = body.longitude !== undefined ? body.longitude : body.lng;
+  // A usable pin means BOTH coordinates present and numeric. A half-pin
+  // (only one sent) or a non-numeric one is not something
+  // resolveAreaIdForPricing can place either — it returns the default area
+  // for those, same as for no pin at all — so they take the no-pin branch
+  // rather than being cross-checked against a resolution that was never
+  // real. Explicit null/''-checks rather than truthiness so latitude 0 still
+  // counts as a provided coordinate.
+  const coordProvided = (v) => v !== undefined && v !== null && v !== '' && Number.isFinite(Number(v));
+  const hasPin = coordProvided(latitude) && coordProvided(longitude);
   // No pin at all (CreateOrderModal's map picker is optional — a phone order
   // taken without ever opening it) has nothing to cross-check: without
   // coordinates, resolveAreaIdForPricing can only fall back to the platform
   // DEFAULT area, which is neither "the area this order belongs to" nor
   // necessarily the admin's own scoped area, and would either misroute a
   // pinless order into the wrong area or 403 a legitimate one. Set the
-  // override so calculateCart/createOrder resolve into the admin's own area
-  // instead of independently re-deriving (and landing on the default).
-  if (!latitude && !longitude) {
+  // override so calculateCart/createOrder use the admin's own area instead
+  // of independently re-deriving (and landing on the default).
+  if (!hasPin) {
     req.adminAreaOverride = Number(adminAreaId);
     return true;
   }

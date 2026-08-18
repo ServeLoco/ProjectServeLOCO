@@ -48,6 +48,7 @@ const { emitToAllCustomers } = require('../src/realtime/socket');
 const JWT_SECRET = process.env.JWT_SECRET || 'test_jwt_secret_that_is_long_enough';
 const AREA_1_ADMIN_TOKEN = jwt.sign({ id: 'a1admin', role: 'admin', adminRole: 'area_admin', areaId: 1 }, JWT_SECRET);
 const AREA_2_ADMIN_TOKEN = jwt.sign({ id: 'a2admin', role: 'admin', adminRole: 'area_admin', areaId: 2 }, JWT_SECRET);
+const SUPER_ADMIN_TOKEN = jwt.sign({ id: 'supa1', role: 'admin', adminRole: 'super_admin' }, JWT_SECRET);
 
 const adminApp = express();
 adminApp.use(express.json());
@@ -383,6 +384,243 @@ describe('30.12 — a library category rename reaches both areas and changes nei
     const [sql] = conn.query.mock.calls[2];
     expect(sql).toMatch(/UPDATE categories SET name = \?, slug = \?, type = \?, image_id = \?/);
     expect(sql).not.toMatch(/display_order/i);
+  });
+});
+
+describe('30.15 — admin order surface is area-isolated (multi-area audit finding C1)', () => {
+  // Before the fix, none of the /api/admin/orders handlers referenced
+  // req.areaId at all — any area_admin could list/read/mutate every area's
+  // orders by guessable sequential id. Each assertion below checks the
+  // issued SQL now carries the caller's area predicate.
+
+  const area1Order = {
+    id: 5001, order_number: 'OD-20260804-A1-0007', area_id: 1, customer_id: 42,
+    customer_name: 'Area One Customer', phone: '9000000001', whatsapp_number: '9000000001',
+    address: '1 Area One St', latitude: 10.5, longitude: 10.5, map_url: null,
+    subtotal: 100, delivery_charge: 20, night_charge: 0, rain_charge: 0,
+    fast_delivery_charge: 0, total: 120, delivery_type: 'standard',
+    coupon_id: null, coupon_code: null, coupon_title: null, discount_amount: 0,
+    free_delivery_waiver_amount: 0, payment_method: 'Cash', payment_status: 'Pending',
+    status: 'Pending', note: null, admin_remark: null, cancel_reason: null,
+    created_at: new Date(), updated_at: new Date(),
+    rider_id: null, rider_assigned_at: null, rider_picked_up_at: null,
+    rider_assignment_status: null,
+  };
+
+  it('GET /orders for an area 2 admin issues o.area_id = 2 (no cross-area enumeration)', async () => {
+    // count query, then the paginated select — both must carry the area.
+    pool.query
+      .mockResolvedValueOnce([[{ total: 0 }]]) // COUNT
+      .mockResolvedValueOnce([[]]); // rows
+
+    const res = await request(adminApp)
+      .get('/api/admin/orders')
+      .set('Authorization', `Bearer ${AREA_2_ADMIN_TOKEN}`);
+
+    expect(res.statusCode).toEqual(200);
+    const [countSql, countParams] = pool.query.mock.calls[0];
+    const [selectSql, selectParams] = pool.query.mock.calls[1];
+    expect(countSql).toMatch(/o\.area_id = \?/);
+    expect(countParams[0]).toEqual(2);
+    expect(selectSql).toMatch(/o\.area_id = \?/);
+    expect(selectParams[0]).toEqual(2);
+  });
+
+  it('GET /orders/:id is 404 for an order outside the caller\'s area (id-guess IDOR closed)', async () => {
+    // The area predicate makes the cross-area row unmatchable → empty.
+    pool.query.mockResolvedValueOnce([[]]); // area mismatch → no row
+
+    const res = await request(adminApp)
+      .get('/api/admin/orders/5001')
+      .set('Authorization', `Bearer ${AREA_2_ADMIN_TOKEN}`);
+
+    expect(res.statusCode).toEqual(404);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toMatch(/o\.id = \?/);
+    expect(sql).toMatch(/o\.area_id = \?/);
+    expect(params).toEqual(['5001', 2]);
+  });
+
+  it('PATCH /orders/:id/status SELECT is area-scoped (cross-area cancel/forward-move blocked)', async () => {
+    pool.query.mockResolvedValueOnce([[]]); // area mismatch → 404 before any write
+
+    const res = await request(adminApp)
+      .patch('/api/admin/orders/5001/status')
+      .set('Authorization', `Bearer ${AREA_2_ADMIN_TOKEN}`)
+      .send({ status: 'Cancelled', cancel_reason: 'x' });
+
+    expect(res.statusCode).toEqual(404);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toMatch(/FROM orders WHERE id = \?/);
+    expect(sql).toMatch(/area_id = \?/);
+    expect(params).toEqual(['5001', 2]);
+  });
+
+  it('PATCH /orders/:id/payment is 404 cross-area (payment_status tamper blocked)', async () => {
+    pool.query.mockResolvedValueOnce([[]]);
+    const res = await request(adminApp)
+      .patch('/api/admin/orders/5001/payment')
+      .set('Authorization', `Bearer ${AREA_2_ADMIN_TOKEN}`)
+      .send({ payment_status: 'Paid' });
+    expect(res.statusCode).toEqual(404);
+    const [, params] = pool.query.mock.calls[0];
+    expect(params).toEqual(['5001', 2]);
+  });
+
+  it('PATCH /orders/:id/remark is 404 cross-area', async () => {
+    pool.query.mockResolvedValueOnce([[]]);
+    const res = await request(adminApp)
+      .patch('/api/admin/orders/5001/remark')
+      .set('Authorization', `Bearer ${AREA_2_ADMIN_TOKEN}`)
+      .send({ remark: 'hijacked' });
+    expect(res.statusCode).toEqual(404);
+    expect(pool.query.mock.calls[0][1]).toEqual(['5001', 2]);
+  });
+
+  it('POST /orders/:id/extend-auto-accept is 404 cross-area', async () => {
+    pool.query.mockResolvedValueOnce([[]]);
+    const res = await request(adminApp)
+      .post('/api/admin/orders/5001/extend-auto-accept')
+      .set('Authorization', `Bearer ${AREA_2_ADMIN_TOKEN}`);
+    expect(res.statusCode).toEqual(404);
+    expect(pool.query.mock.calls[0][1]).toEqual(['5001', 2]);
+  });
+
+  it('an area admin CAN still read their OWN area\'s order (positive control)', async () => {
+    // area 2 admin reads an area-2 order: SELECT matches, items load, 200.
+    pool.query
+      .mockResolvedValueOnce([[{ ...area1Order, id: 5002, area_id: 2 }]]) // order row (area 2)
+      .mockResolvedValueOnce([[]]); // order_items
+    const res = await request(adminApp)
+      .get('/api/admin/orders/5002')
+      .set('Authorization', `Bearer ${AREA_2_ADMIN_TOKEN}`);
+    expect(res.statusCode).toEqual(200);
+    expect(pool.query.mock.calls[0][1]).toEqual(['5002', 2]);
+  });
+
+  it('super_admin in "all" mode lists every area (no area predicate injected)', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ total: 0 }]])
+      .mockResolvedValueOnce([[]]);
+    const res = await request(adminApp)
+      .get('/api/admin/orders')
+      .set('Authorization', `Bearer ${SUPER_ADMIN_TOKEN}`)
+      .set('X-Area-Id', 'all');
+    expect(res.statusCode).toEqual(200);
+    const [countSql, countParams] = pool.query.mock.calls[0];
+    expect(countSql).not.toMatch(/o\.area_id = \?/);
+    expect(countParams).toEqual([20, 0]); // pagination only, never an area
+  });
+
+  it('super_admin with X-Area-Id "all" CANNOT write a specific order (400)', async () => {
+    const res = await request(adminApp)
+      .patch('/api/admin/orders/5001/status')
+      .set('Authorization', `Bearer ${SUPER_ADMIN_TOKEN}`)
+      .set('X-Area-Id', 'all')
+      .send({ status: 'Accepted' });
+    expect(res.statusCode).toEqual(400);
+    expect(pool.query).not.toHaveBeenCalled();
+  });
+
+  it('adminCreateOrder: an area 2 admin placing an order whose pin resolves to area 1 is 403', async () => {
+    // resolveAreaIdForPricing is exercised against the real pool mock here
+    // only through assertOrderAreaMatchesPin, which calls it — but that
+    // helper hits the DB. So mock the resolution via the pool calls the
+    // underlying areaScope resolves with: bbox candidates then zones. Simpler
+    // and more robust: assert the FORBIDDEN source uses the admin's pinned
+    // area (2) vs the pin-resolved area. We stub resolveAreaIdForPricing's
+    // data path by making resolveAreaForPoint return area 1 through pool.
+    // area 1 bbox covers the pin; its zones match → area 1.
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, active: 1, min_lat: null, max_lat: null, min_lng: null, max_lng: null, is_default: 1 }]]) // areas
+      .mockResolvedValueOnce([[{ id: 901, area_id: 1, boundary: JSON.stringify([{ lat: 10, lng: 10 }, { lat: 10, lng: 11 }, { lat: 11, lng: 11 }, { lat: 11, lng: 10 }]), active: 1 }]]); // zones for area 1
+    const res = await request(adminApp)
+      .post('/api/admin/orders')
+      .set('Authorization', `Bearer ${AREA_2_ADMIN_TOKEN}`)
+      .send({ customer_id: 42, latitude: 10.5, longitude: 10.5, items: [{ productId: 1, quantity: 1 }], paymentMethod: 'Cash', address: 'x' });
+    expect(res.statusCode).toEqual(403);
+  });
+
+  // The same pin sent under the lat/lng aliases must be gated identically.
+  // cartController.calculateCart and orderRoutes' createOrderSchema both
+  // accept `lat`/`lng` as equivalents of `latitude`/`longitude`, so a gate
+  // that reads only the long names sees "no pin", waves the request
+  // through, and lets the downstream resolver place the order in whatever
+  // area the aliased pin actually falls in — a cross-area write by field
+  // aliasing alone.
+  it('adminCreateOrder: the area gate is not bypassable via the lat/lng aliases', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, active: 1, min_lat: null, max_lat: null, min_lng: null, max_lng: null, is_default: 1 }]]) // areas
+      .mockResolvedValueOnce([[{ id: 901, area_id: 1, boundary: JSON.stringify([{ lat: 10, lng: 10 }, { lat: 10, lng: 11 }, { lat: 11, lng: 11 }, { lat: 11, lng: 10 }]), active: 1 }]]); // zones for area 1
+    const res = await request(adminApp)
+      .post('/api/admin/orders')
+      .set('Authorization', `Bearer ${AREA_2_ADMIN_TOKEN}`)
+      .send({ customer_id: 42, lat: 10.5, lng: 10.5, items: [{ productId: 1, quantity: 1 }], paymentMethod: 'Cash', address: 'x' });
+    expect(res.statusCode).toEqual(403);
+  });
+
+  it('adminCalculateOrder: the area gate is not bypassable via the lat/lng aliases', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 1, active: 1, min_lat: null, max_lat: null, min_lng: null, max_lng: null, is_default: 1 }]]) // areas
+      .mockResolvedValueOnce([[{ id: 901, area_id: 1, boundary: JSON.stringify([{ lat: 10, lng: 10 }, { lat: 10, lng: 11 }, { lat: 11, lng: 11 }, { lat: 11, lng: 10 }]), active: 1 }]]); // zones for area 1
+    const res = await request(adminApp)
+      .post('/api/admin/orders/calculate')
+      .set('Authorization', `Bearer ${AREA_2_ADMIN_TOKEN}`)
+      .send({ customer_id: 42, lat: 10.5, lng: 10.5, items: [{ productId: 1, quantity: 1 }] });
+    expect(res.statusCode).toEqual(403);
+  });
+});
+
+describe('30.19 — customer order history is area-isolated for an area_admin (multi-area audit finding #1/#2)', () => {
+  // Customers are global (§2.2) — the list itself and a single customer's
+  // profile row stay unscoped. Only their order history/count leaked
+  // cross-area: an area_admin reading GET /customers/:id got every OTHER
+  // area's order rows too (address, lat/lng, phone, coupon, payment
+  // status), and GET /customers' order_count summed platform-wide.
+
+  it('GET /customers/:id scopes the order history to the caller\'s area', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 42, name: 'C', phone: '900', whatsapp_number: '900', address: 'x', short_address: 'x', trusted: 0, blocked: 0, created_at: new Date(), updated_at: new Date() }]])
+      .mockResolvedValueOnce([[]]); // orders
+
+    const res = await request(adminApp)
+      .get('/api/admin/customers/42')
+      .set('Authorization', `Bearer ${AREA_2_ADMIN_TOKEN}`);
+
+    expect(res.statusCode).toEqual(200);
+    const [sql, params] = pool.query.mock.calls[1];
+    expect(sql).toMatch(/FROM orders WHERE customer_id = \? AND area_id = \?/);
+    expect(params).toEqual(['42', 2]);
+  });
+
+  it('GET /customers/:id for a super_admin with no area picked keeps the full cross-area history (no regression)', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 42, name: 'C', phone: '900', whatsapp_number: '900', address: 'x', short_address: 'x', trusted: 0, blocked: 0, created_at: new Date(), updated_at: new Date() }]])
+      .mockResolvedValueOnce([[]]);
+
+    const res = await request(adminApp)
+      .get('/api/admin/customers/42')
+      .set('Authorization', `Bearer ${SUPER_ADMIN_TOKEN}`);
+
+    expect(res.statusCode).toEqual(200);
+    const [sql, params] = pool.query.mock.calls[1];
+    expect(sql).not.toMatch(/area_id/);
+    expect(params).toEqual(['42']);
+  });
+
+  it('GET /customers scopes order_count to the caller\'s area, not a platform-wide total', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ total: 0 }]]) // count query
+      .mockResolvedValueOnce([[]]); // rows
+
+    const res = await request(adminApp)
+      .get('/api/admin/customers')
+      .set('Authorization', `Bearer ${AREA_2_ADMIN_TOKEN}`);
+
+    expect(res.statusCode).toEqual(200);
+    const [sql, params] = pool.query.mock.calls[1];
+    expect(sql).toMatch(/orders o WHERE o\.customer_id = u\.id AND o\.area_id = \?/);
+    expect(params[0]).toEqual(2);
   });
 });
 

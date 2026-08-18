@@ -219,9 +219,8 @@ const createOrder = async (req, res) => {
     // req.adminAreaOverride — see cartController.js's calculateCart for the
     // full rationale; same admin-no-pin gap, same fix, mirrored here since
     // adminCreateOrder proxies into this function too.
-    const deliveryAreaId = (!latitude && !longitude && req.adminAreaOverride)
-      ? req.adminAreaOverride
-      : await resolveAreaIdForPricing(latitude, longitude);
+    const deliveryAreaId = req.adminAreaOverride
+      || await resolveAreaIdForPricing(latitude, longitude);
     const deliveryArea = await getAreaById(deliveryAreaId);
 
     const [settingRows] = await connection.query(

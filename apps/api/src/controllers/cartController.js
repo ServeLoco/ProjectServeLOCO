@@ -54,15 +54,20 @@ const calculateCart = async (req, res) => {
   // resolveAreaForPoint makes (that's a checkout-gating concern, TASK 27's job).
   //
   // req.adminAreaOverride is set only by adminController.js's
-  // assertOrderAreaMatchesPin, and only when the admin submitted no pin at
-  // all — never by a real customer request. Without it, a pinless admin
-  // order would resolve here via resolveAreaIdForPricing's own "no pin"
-  // fallback, which is the platform DEFAULT area, not the area_admin's own
-  // scoped area — silently misrouting the order (or, since that gate checks
-  // this same resolution, just 403ing a legitimate pinless order).
-  const deliveryAreaId = (!customerLat && !customerLng && req.adminAreaOverride)
-    ? req.adminAreaOverride
-    : await resolveAreaIdForPricing(customerLat, customerLng);
+  // assertOrderAreaMatchesPin, and only on the branch where the admin
+  // submitted no usable pin — never by a real customer request (it is a
+  // server-set property on req, not a body field, so a client cannot inject
+  // it). Without it, a pinless admin order would resolve here via
+  // resolveAreaIdForPricing's own "no pin" fallback, which is the platform
+  // DEFAULT area, not the area_admin's own scoped area — silently
+  // misrouting the order (or, since that gate checks this same resolution,
+  // just 403ing a legitimate pinless order).
+  //
+  // Trust the flag outright rather than re-deriving "was there a pin" here:
+  // the two predicates drifting apart is exactly how a pin sent under the
+  // lat/lng aliases slipped the area gate before.
+  const deliveryAreaId = req.adminAreaOverride
+    || await resolveAreaIdForPricing(customerLat, customerLng);
 
   const [settingRows] = await pool.query(
     'SELECT shop_open, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, delivery_radius_km, shop_latitude, shop_longitude, radius_pricing_active FROM settings WHERE area_id = ? LIMIT 1',
