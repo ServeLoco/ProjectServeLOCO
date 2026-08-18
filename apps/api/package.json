@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.658.0",
-    "adm-zip": "^0.5.17",
+    "adm-zip": "^0.6.0",
     "bcrypt": "^6.0.0",
     "compression": "^1.7.5",
     "cors": "^2.8.6",
