@@ -1015,20 +1015,30 @@ const getAdminOrders = async (req, res) => {
     params.push(searchWildcard, searchWildcard, searchWildcard);
   }
 
-  // Admin's default "today" filter sends browser-local (IST) dates, but the
-  // DB session time_zone isn't guaranteed to be IST — a plain DATE(created_at)
-  // comparison can put late-night/early-morning orders on the wrong day.
-  if (finalDateFrom) {
-    query += " AND DATE(CONVERT_TZ(o.created_at, '+00:00', ?)) >= ?";
-    params.push(ADMIN_ORDERS_TZ, finalDateFrom);
-  }
+  // o.created_at is a TIMESTAMP written by MySQL's own clock (CURRENT_TIMESTAMP),
+  // which this codebase treats as UTC everywhere else (riders.js, shopOwnerController.js,
+  // buildPeriodDateFilter above) — a plain DATE(created_at) comparison, or one against
+  // a boundary computed in ADMIN_ORDERS_TZ without converting the column first, can put
+  // late-night/early-morning orders on the wrong day. Same CONVERT_TZ pattern as those.
+  if (today) {
+    query += " AND DATE(CONVERT_TZ(o.created_at, '+00:00', ?)) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', ?))";
+    params.push(ADMIN_ORDERS_TZ, ADMIN_ORDERS_TZ);
+  } else {
+    if (finalDateFrom) {
+      query += " AND DATE(CONVERT_TZ(o.created_at, '+00:00', ?)) >= ?";
+      params.push(ADMIN_ORDERS_TZ, finalDateFrom);
+    }
 
-  if (finalDateTo) {
-    query += " AND DATE(CONVERT_TZ(o.created_at, '+00:00', ?)) <= ?";
-    params.push(ADMIN_ORDERS_TZ, finalDateTo);
+    if (finalDateTo) {
+      query += " AND DATE(CONVERT_TZ(o.created_at, '+00:00', ?)) <= ?";
+      params.push(ADMIN_ORDERS_TZ, finalDateTo);
+    }
   }
 
   // Count total for pagination
+  // COUNT over the same WHERE (params, incl. the leading area one, are
+  // shared identically — the area push above happens before any filter,
+  // so the placeholder order is positionally correct for both queries).
   const countQueryStr = query.replace(
     /SELECT[\s\S]+?FROM orders o/,
     'SELECT COUNT(*) as total FROM orders o'
