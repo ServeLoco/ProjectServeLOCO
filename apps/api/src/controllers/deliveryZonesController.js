@@ -1,7 +1,7 @@
 const { pool } = require('../db/mysql');
 const { parseBoundary, polygonAreaKm2, areaEquivalentRadiusKm, polygonSelfIntersects } = require('../utils/deliveryPricing');
 const { emitToAllCustomers } = require('../realtime/socket');
-const { requestAreaId, bustAreaCaches, recomputeAreaBbox } = require('../utils/areaScope');
+const { requestAreaId, bustAreaCaches, recomputeAreaBbox, listAreas } = require('../utils/areaScope');
 const microCache = require('../utils/microCache');
 
 // Admin CRUD for polygon delivery zones (delivery_zones table). Each row is
@@ -206,17 +206,54 @@ const getActiveZonesForArea = async (areaId) => {
   return zones;
 };
 
-const listActiveZonesPublic = async (req, res) => {
-  const areaId = requestAreaId(req);
-  // A pin outside every zone (null) shows no shapes at all — showing
-  // another area's polygons would be actively misleading, not helpful
-  // (§2.4). Only a cold app open with no pin yet resolves to a real area
-  // via resolveCustomerArea's own default-area fallback.
-  if (areaId === null || areaId === 'all') {
-    return res.status(200).json({ data: [] });
-  }
+// A customer can be physically anywhere — GPS live pin, saved address, or
+// wherever they drag the map — independent of which area they last ordered
+// from. This is a shape-only overlay (no pricing/eligibility attached, see
+// comment above), so it shows every active zone from every area rather than
+// guessing "their" area and hiding the rest; delivery eligibility itself
+// still comes from cart-calculate, scoped correctly there.
+// microCache keys must be shaped `<namespace>:<areaId>:<rest>` (see
+// microCache.js) — 0 is never a real area id, so it's a safe "no single
+// area" sentinel here.
+const ALL_ZONES_CACHE_KEY = 'delivery-zones:0:public-all';
 
-  const zones = await getActiveZonesForArea(areaId);
+const getAllActiveZones = async () => {
+  const cached = microCache.get(ALL_ZONES_CACHE_KEY);
+  if (cached) return cached;
+
+  const [rows] = await pool.query(
+    'SELECT id, name, boundary, parent_zone_id FROM delivery_zones WHERE active = 1'
+  );
+  const zones = rows.map((row) => ({
+    id: row.id,
+    name: row.name || null,
+    boundary: parseBoundary(row.boundary),
+    parentZoneId: row.parent_zone_id != null ? row.parent_zone_id : null,
+    parent_zone_id: row.parent_zone_id != null ? row.parent_zone_id : null,
+  }));
+  microCache.set(ALL_ZONES_CACHE_KEY, zones, PUBLIC_ZONES_CACHE_TTL_MS);
+  return zones;
+};
+
+const listActiveZonesPublic = async (req, res) => {
+  const zones = await getAllActiveZones();
+  // Composite ETag over every active area's catalog_version — this response
+  // spans all areas (see comment above), so no single area's version (the
+  // areaScope.catalogETag middleware's approach, which needs req.areaId and
+  // isn't a fit here) can represent it; any one area's zone change bumps
+  // that area's catalog_version via notifyZonesChanged -> bustAreaCaches ->
+  // bumpCatalogVersion, which changes this composite too. An ETag failure
+  // (areas table unreachable, etc.) never blocks the real response.
+  try {
+    const areas = await listAreas({ activeOnly: true });
+    const etag = `"${areas.map((a) => `${a.id}:${a.catalog_version}`).sort().join(',')}"`;
+    res.set('ETag', etag);
+    if (req.headers['if-none-match'] === etag) {
+      return res.status(304).end();
+    }
+  } catch (_) {
+    // Best-effort — fall through to the full response.
+  }
   res.status(200).json({ data: zones });
 };
 
@@ -226,6 +263,10 @@ const listActiveZonesPublic = async (req, res) => {
 const notifyZonesChanged = async (reason, zoneId, areaId) => {
   await recomputeAreaBbox(areaId);
   await bustAreaCaches(areaId);
+  // The all-areas map overlay (getAllActiveZones) spans every area, so a
+  // write in any one of them must bust it too — bustAreaCaches above only
+  // clears this one area's slice.
+  microCache.bust('delivery-zones', 0);
   // Push so any customer mid-checkout gets the new pricing without waiting
   // for their next pin move — see realtimeClient.js's delivery_zones.updated.
   emitToAllCustomers(areaId, 'delivery_zones.updated', { reason, zoneId });
