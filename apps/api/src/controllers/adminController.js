@@ -1015,23 +1015,34 @@ const getAdminOrders = async (req, res) => {
     params.push(searchWildcard, searchWildcard, searchWildcard);
   }
 
-  // o.created_at is a TIMESTAMP written by MySQL's own clock (CURRENT_TIMESTAMP),
-  // which this codebase treats as UTC everywhere else (riders.js, shopOwnerController.js,
-  // buildPeriodDateFilter above) — a plain DATE(created_at) comparison, or one against
-  // a boundary computed in ADMIN_ORDERS_TZ without converting the column first, can put
-  // late-night/early-morning orders on the wrong day. Same CONVERT_TZ pattern as those.
+  // o.created_at is written by CURRENT_TIMESTAMP and rendered on read in the
+  // MySQL server's session time_zone. Verified against the server: session
+  // time_zone = SYSTEM = IST, so created_at IS an IST wall-clock value and
+  // DATE(o.created_at) is already the IST calendar day — it must NOT be
+  // passed through CONVERT_TZ('+00:00', ...) as if it were UTC, which
+  // double-shifts it forward and pushes evening orders (18:30-23:59 IST)
+  // onto the next calendar day, hiding them from "today". Only
+  // UTC_TIMESTAMP() (a real UTC clock read) needs converting, to find
+  // today's IST boundary.
+  //
+  // NOTE: buildPeriodDateFilter above, riders.js and shopOwnerController.js
+  // still wrap created_at in CONVERT_TZ('+00:00', ...) and are therefore
+  // off by a day for evening orders on this configuration. Left alone
+  // deliberately — they must not be "fixed" without first confirming
+  // production's @@global.time_zone, since the correct form flips if that
+  // server runs UTC. See db/mysql.js's timezone option, which must agree.
   if (today) {
-    query += " AND DATE(CONVERT_TZ(o.created_at, '+00:00', ?)) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', ?))";
-    params.push(ADMIN_ORDERS_TZ, ADMIN_ORDERS_TZ);
+    query += ' AND DATE(o.created_at) = DATE(CONVERT_TZ(UTC_TIMESTAMP(), ?, ?))';
+    params.push('+00:00', ADMIN_ORDERS_TZ);
   } else {
     if (finalDateFrom) {
-      query += " AND DATE(CONVERT_TZ(o.created_at, '+00:00', ?)) >= ?";
-      params.push(ADMIN_ORDERS_TZ, finalDateFrom);
+      query += ' AND DATE(o.created_at) >= ?';
+      params.push(finalDateFrom);
     }
 
     if (finalDateTo) {
-      query += " AND DATE(CONVERT_TZ(o.created_at, '+00:00', ?)) <= ?";
-      params.push(ADMIN_ORDERS_TZ, finalDateTo);
+      query += ' AND DATE(o.created_at) <= ?';
+      params.push(finalDateTo);
     }
   }
 
