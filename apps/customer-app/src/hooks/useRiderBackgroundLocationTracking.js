@@ -80,7 +80,15 @@ export function useRiderBackgroundLocationTracking(isOnline, hasActiveAssignment
 
       await Location.startLocationUpdatesAsync(RIDER_BACKGROUND_LOCATION_TASK, {
         accuracy: IDLE_PING_ACCURACY,
+        // Android-only knob (expo-location marks timeInterval "@platform
+        // android"); iOS honours distanceInterval alone.
         timeInterval: IDLE_PING_INTERVAL_MS,
+        // Deliberately 0 so a STATIONARY rider keeps reporting and doesn't
+        // age out of the server's RIDER_LOCATION_MAX_AGE_SEC window — a
+        // metres-based filter would silently stop pinging exactly the rider
+        // who is parked and waiting for an offer. The cost is that iOS then
+        // delivers a fix on nearly every location change; the POST itself is
+        // throttled to IDLE_PING_INTERVAL_MS in riderBackgroundLocationTask.
         distanceInterval: 0,
         foregroundService: {
           notificationTitle: 'VillKro Rider',
@@ -88,6 +96,13 @@ export function useRiderBackgroundLocationTracking(isOnline, hasActiveAssignment
         },
         pausesUpdatesAutomatically: false,
         showsBackgroundLocationIndicator: true,
+        // iOS-only. Batches background deliveries so the OS wakes the app
+        // roughly on our cadence instead of per fix — belt-and-braces with
+        // the task's own POST throttle, which stays authoritative.
+        deferredUpdatesInterval: IDLE_PING_INTERVAL_MS,
+        // iOS-only. Tells CoreLocation this is vehicle movement so it tunes
+        // power/filtering appropriately; without it the default is `other`.
+        activityType: Location.ActivityType.AutomotiveNavigation,
       }).catch(() => {});
       runningRef.current = true;
     }

@@ -10,6 +10,15 @@ jest.mock('expo-location', () => ({
     High: 4,
     Balanced: 3,
   },
+  // Mirrors expo-location's LocationActivityType enum values — the rider
+  // background-location task passes ActivityType.AutomotiveNavigation.
+  ActivityType: {
+    Other: 1,
+    AutomotiveNavigation: 2,
+    Fitness: 3,
+    OtherNavigation: 4,
+    Airborne: 5,
+  },
   PermissionStatus: {
     GRANTED: 'granted',
   },
@@ -26,6 +35,25 @@ jest.mock('expo-location', () => ({
     android: { accuracy: 'fine' },
   })),
   watchPositionAsync: jest.fn(async () => ({ remove: jest.fn() })),
+  getBackgroundPermissionsAsync: jest.fn(async () => ({
+    status: 'granted',
+    granted: true,
+  })),
+  requestBackgroundPermissionsAsync: jest.fn(async () => ({
+    status: 'granted',
+    granted: true,
+  })),
+  hasStartedLocationUpdatesAsync: jest.fn(async () => false),
+  startLocationUpdatesAsync: jest.fn(async () => {}),
+  stopLocationUpdatesAsync: jest.fn(async () => {}),
+}));
+
+// Mock expo-task-manager — native module; not available in Node/Jest.
+jest.mock('expo-task-manager', () => ({
+  defineTask: jest.fn(),
+  isTaskDefined: jest.fn(() => false),
+  isTaskRegisteredAsync: jest.fn(async () => false),
+  unregisterTaskAsync: jest.fn(async () => {}),
 }));
 
 // Mock @rnmapbox/maps — native module; not available in Node/Jest.
