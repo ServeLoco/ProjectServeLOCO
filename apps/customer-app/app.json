@@ -62,7 +62,7 @@
       ]
     ],
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "VillKro uses your location to set your delivery address, show nearby stores, and track your order on the delivery map.",
