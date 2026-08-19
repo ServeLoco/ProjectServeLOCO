@@ -211,7 +211,9 @@ describe('expoPush.sendPushToUser', () => {
     expect(messages).toHaveLength(1);
     expect(messages[0]).toEqual({
       to: VALID_TOKEN_A,
-      sound: 'rider_alarm',
+      // Call sites pass the Android res/raw basename; the payload's `sound`
+      // is consulted only by APNs, which needs the bundled filename.
+      sound: 'rider_alarm.wav',
       title: 'Delivery offer waiting',
       body: 'Order 1042 — accept now before it expires',
       data: { alertType: 'rider_offer_alarm', offerId: '9' },
@@ -220,6 +222,44 @@ describe('expoPush.sendPushToUser', () => {
       ttl: 3600,
       tag: 'rider_offer_9',
       collapseId: 'rider_offer_9',
+    });
+  });
+
+  // On Android 8+ the sound comes from the notification channel (registered
+  // client-side as ORDER_ALARM_CHANNEL_ID with sound: 'order_alarm'), so this
+  // payload field only ever reaches APNs. iOS resolves it against files
+  // bundled into the app and ignores a name it cannot find — a bare
+  // 'order_alarm' matched nothing, so iOS shop/rider alarms silently played
+  // the default notification sound instead of the alarm.
+  describe('iOS custom sound filename', () => {
+    const sendWithSound = async (sound) => {
+      pool.query.mockResolvedValueOnce([[{ push_token: VALID_TOKEN_A }]]);
+      mockSendPushNotificationsAsync = jest.fn(async () => [{ status: 'ok', id: 't1' }]);
+      await sendPushToUser(pool, 42, { title: 'T', body: 'B', sound });
+      return mockSendPushNotificationsAsync.mock.calls[0][0][0].sound;
+    };
+
+    it('appends the bundled extension to a bare custom sound name', async () => {
+      expect(await sendWithSound('order_alarm')).toBe('order_alarm.wav');
+    });
+
+    it('leaves "default" untouched', async () => {
+      expect(await sendWithSound('default')).toBe('default');
+    });
+
+    it('defaults to "default" when no sound is given', async () => {
+      expect(await sendWithSound(undefined)).toBe('default');
+    });
+
+    it('does not double-append when an extension is already present', async () => {
+      expect(await sendWithSound('order_alarm.wav')).toBe('order_alarm.wav');
+    });
+
+    it('passes null through so the caller can send a silent push', async () => {
+      pool.query.mockResolvedValueOnce([[{ push_token: VALID_TOKEN_A }]]);
+      mockSendPushNotificationsAsync = jest.fn(async () => [{ status: 'ok', id: 't1' }]);
+      await sendPushToUser(pool, 42, { title: 'T', body: 'B', sound: null });
+      expect(mockSendPushNotificationsAsync.mock.calls[0][0][0]).not.toHaveProperty('sound');
     });
   });
 });

@@ -21,7 +21,11 @@
         "expo-notifications",
         {
           "icon": "./assets/icon/adaptive-icon-foreground.png",
-          "color": "#FF6B35"
+          "color": "#FF6B35",
+          "sounds": [
+            "./assets/sounds/order_alarm.wav",
+            "./assets/sounds/rider_alarm.wav"
+          ]
         }
       ],
       "expo-audio",
@@ -86,7 +90,9 @@
         "FOREGROUND_SERVICE_LOCATION",
         "ACCESS_COARSE_LOCATION"
       ],
-      "blockedPermissions": ["android.permission.RECORD_AUDIO"],
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO"
+      ],
       "package": "com.yashsiwach.villkro",
       "versionCode": 34,
       "adaptiveIcon": {

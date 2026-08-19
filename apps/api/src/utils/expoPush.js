@@ -32,7 +32,23 @@ const buildMessage = (token, {
 
   // sound: omit or pass custom res/raw basename (e.g. 'order_alarm') for alarm
   // channels. 'default' can override channel custom audio on some OEMs.
-  const soundValue = sound === undefined ? 'default' : sound;
+  //
+  // This field is effectively iOS-facing: on Android 8+ the notification
+  // sound comes from the channel referenced by channelId (the client
+  // registers ORDER_ALARM_CHANNEL_ID with sound: 'order_alarm'), so the
+  // payload value is only consulted by APNs. iOS resolves it against files
+  // bundled in the app and needs the FULL filename — a bare 'order_alarm'
+  // matches nothing there, which is why iOS shop/rider alarms fell back to
+  // the default notification sound. Call sites keep passing the Android
+  // res/raw basename (one convention, matching the channel config) and the
+  // extension is added here for APNs.
+  const IOS_SOUND_EXTENSION = '.wav';
+  const withIosExtension = (value) => (
+    typeof value === 'string' && value !== 'default' && !value.includes('.')
+      ? `${value}${IOS_SOUND_EXTENSION}`
+      : value
+  );
+  const soundValue = sound === undefined ? 'default' : withIosExtension(sound);
 
   return {
     to: token,
