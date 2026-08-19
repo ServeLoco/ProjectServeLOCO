@@ -40,9 +40,8 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "VillKro uses your location on the delivery map and for live rider tracking while you are online.",
-          "locationAlwaysAndWhenInUsePermission": "VillKro uses your location — including in the background while you're online as a rider — to match you with nearby orders and keep the delivery area system accurate. This only runs while you are toggled online.",
-          "isIosBackgroundLocationEnabled": true,
+          "locationWhenInUsePermission": "VillKro uses your location to set your delivery address, show nearby stores, and track your order on the delivery map.",
+          "isIosBackgroundLocationEnabled": false,
           "isAndroidBackgroundLocationEnabled": true,
           "isAndroidForegroundServiceEnabled": true
         }
@@ -66,7 +65,7 @@
       "supportsTablet": true,
       "googleServicesFile": "./GoogleService-Info.plist",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "VillKro uses your location to pin your delivery address and show your position on the rider delivery map.",
+        "NSLocationWhenInUseUsageDescription": "VillKro uses your location to set your delivery address, show nearby stores, and track your order on the delivery map.",
         "UIBackgroundModes": [
           "remote-notification"
         ],

@@ -13,7 +13,17 @@ import React from 'react';
 import ReactTestRenderer, { act } from 'react-test-renderer';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { useRiderBackgroundLocationTracking } from '../src/hooks/useRiderBackgroundLocationTracking';
+import { Platform } from 'react-native';
+
+// The hook reads Platform.OS once, at module scope, to decide whether
+// background location is supported at all (Android only — iOS ships as a
+// customer app and never runs rider mode). jest-expo defaults Platform.OS to
+// 'ios', so the platform must be set BEFORE the module is loaded. Hence
+// require() here rather than a hoisted import.
+Platform.OS = 'android';
+const {
+  useRiderBackgroundLocationTracking,
+} = require('../src/hooks/useRiderBackgroundLocationTracking');
 
 const DISCLOSURE_SHOWN_KEY = 'serveloco-rider-bg-location-disclosure-shown';
 

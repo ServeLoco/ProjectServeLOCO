@@ -1,10 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
+import { Platform } from 'react-native';
 import * as Location from 'expo-location';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { RIDER_BACKGROUND_LOCATION_TASK } from '../tasks/riderBackgroundLocationTask';
 import { IDLE_PING_INTERVAL_MS, IDLE_PING_ACCURACY } from '../utils/riderTracking';
 
 const DISCLOSURE_SHOWN_KEY = 'serveloco-rider-bg-location-disclosure-shown';
+
+// Rider mode ships on Android only — iOS is distributed as a customer-facing
+// app. Rider screens are gated by ACCOUNT ROLE, not platform, so without this
+// an iOS rider-role login would prompt for "Always" location and start a
+// background task for a role that is never used on that platform.
+//
+// This gate is also what lets app.json keep isIosBackgroundLocationEnabled
+// off: no Always request here means no UIBackgroundModes:location in the iOS
+// build, and App Review rejects apps declaring a background mode their iOS
+// functionality never exercises (Guideline 2.5.4). Re-enabling rider mode on
+// iOS means flipping BOTH this constant and that app.json flag together.
+const BACKGROUND_LOCATION_SUPPORTED = Platform.OS === 'android';
 
 /**
  * Keeps a free (online, no active job) rider's position fresh on the server
@@ -30,6 +43,10 @@ export function useRiderBackgroundLocationTracking(isOnline, hasActiveAssignment
   const runningRef = useRef(false);
 
   useEffect(() => {
+    // Inert on unsupported platforms: no permission prompt, no task, and no
+    // stop() either (nothing was ever started).
+    if (!BACKGROUND_LOCATION_SUPPORTED) return undefined;
+
     let cancelled = false;
 
     async function ensureBackgroundPermission() {
