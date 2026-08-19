@@ -21,11 +21,7 @@
         "expo-notifications",
         {
           "icon": "./assets/icon/adaptive-icon-foreground.png",
-          "color": "#FF6B35",
-          "sounds": [
-            "./assets/sounds/order_alarm.wav",
-            "./assets/sounds/rider_alarm.wav"
-          ]
+          "color": "#FF6B35"
         }
       ],
       "expo-audio",
