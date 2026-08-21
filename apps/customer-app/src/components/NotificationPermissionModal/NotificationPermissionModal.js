@@ -44,7 +44,7 @@ function NotificationPermissionModal({ visible, onAllow, onDismiss }) {
 
           <View style={styles.modalActions}>
             <Button
-              label="Allow Notifications"
+              label="Continue"
               onPress={onAllow}
               style={styles.modalBtn}
               variant="primary"

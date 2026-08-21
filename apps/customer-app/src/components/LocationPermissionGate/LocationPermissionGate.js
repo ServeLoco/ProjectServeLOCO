@@ -91,11 +91,11 @@ function LocationPermissionGate({ checking = false, onGranted }) {
 
         <Text style={styles.title}>Enable Location</Text>
         <Text style={styles.subtitle}>
-          Allow location access to discover shops and delivery services available in your area.
+          VillKro uses your location to show the shops and delivery services that cover your area.
         </Text>
 
         <Button
-          label="Allow Location"
+          label="Continue"
           onPress={handleAllow}
           loading={requesting}
           variant="highlight"

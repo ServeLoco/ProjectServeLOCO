@@ -64,10 +64,10 @@ function LocationPermissionCard({ variant, requesting, onAllow, onOpenSettings, 
           </View>
           <Text style={styles.title}>Enable Location</Text>
           <Text style={styles.subtitle}>
-            Allow location access to see shops near you in your area.
+            VillKro uses your location to show shops near you in your area.
           </Text>
           <Button
-            label="Allow Location"
+            label="Continue"
             onPress={onAllow}
             loading={requesting}
             variant="highlight"
@@ -78,7 +78,7 @@ function LocationPermissionCard({ variant, requesting, onAllow, onOpenSettings, 
         </>
       )}
 
-      {!blocked && typeof onPickManually === 'function' ? (
+      {typeof onPickManually === 'function' ? (
         <PressableScale
           onPress={onPickManually}
           style={styles.pickManuallyBtn}

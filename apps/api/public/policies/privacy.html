@@ -15,7 +15,7 @@
 </head>
 <body>
   <h1>VillKro &mdash; Privacy Policy</h1>
-  <p class="meta">Last updated: 2026-06-17</p>
+  <p class="meta">Last updated: 2026-08-21</p>
 
   <h2>1. Who we are</h2>
   <p>VillKro is a hyperlocal marketplace app built and operated by Yash Siwach, based in Gorakhpur, Haryana 125047, India. Contact: <a href="mailto:decodelabsofficial@gmail.com">decodelabsofficial@gmail.com</a>.</p>
@@ -24,7 +24,7 @@
   <ul>
     <li>Account: name, phone, bcrypt-hashed password, optional WhatsApp number.</li>
     <li>Delivery addresses you save.</li>
-    <li>Approximate location (city / pin code) during checkout, foreground only.</li>
+    <li>Precise device location (GPS latitude and longitude), collected only while the app is open and only after you grant permission. Customers use it to set a delivery address and to follow an order on the map; delivery riders share it while they are online and on an active delivery. If you decline the permission you can still set your delivery address by dropping a pin on the map instead.</li>
     <li>Expo push token for order status notifications.</li>
     <li>Order history: items, vendor, status, timestamps.</li>
   </ul>
@@ -34,12 +34,14 @@
 
   <h2>4. Third parties we work with</h2>
   <ul>
+    <li>Google Firebase Authentication &mdash; phone number verification (your phone number is sent to Google to deliver the one-time code).</li>
+    <li>Google Firebase Cloud Messaging &mdash; order status push notifications (receives your device push token).</li>
+    <li>Mapbox &mdash; maps, address search and live delivery tracking (receives location coordinates while the map is in use).</li>
     <li>Azure MySQL &mdash; account data, delivery addresses, sessions.</li>
     <li>MongoDB Atlas &mdash; order history (items, vendor, status, timestamps).</li>
     <li>AWS S3 &mdash; product photos uploaded by vendors.</li>
-    <li>Expo / Google FCM &mdash; push notifications (receives your device push token).</li>
   </ul>
-  <p>We do not sell your data. We do not share it with advertisers.</p>
+  <p>We do not sell your data. We do not share it with advertisers, and we use no analytics or tracking SDKs. Every third party listed above is contractually required to protect your data to the same standard set out in this policy, and may use it only to provide the service described.</p>
 
   <h2>5. Retention</h2>
   <p>Active account + 30 days after deletion.</p>
@@ -49,7 +51,7 @@
     <li><strong>Access</strong>: email <a href="mailto:decodelabsofficial@gmail.com">decodelabsofficial@gmail.com</a></li>
     <li><strong>Correction</strong>: in the app, Profile &rarr; Edit Profile</li>
     <li><strong>Deletion</strong>: in the app, Profile &rarr; Delete Account (immediate soft-delete, hard-purged in 30 days)</li>
-    <li><strong>Withdraw consent</strong>: uninstall the app and email us</li>
+    <li><strong>Withdraw consent</strong>: turn Location or Notifications off for VillKro at any time in the device Settings app &mdash; the app keeps working and you can still set a delivery address by dropping a pin on the map. To withdraw consent entirely, use Profile &rarr; Delete Account in the app.</li>
   </ul>
 
   <h2>7. Children</h2>
