@@ -37,11 +37,16 @@ function triggerAdminSessionClear() {
   try { if (_adminSessionClearHandler) _adminSessionClearHandler(); } catch (_) { /* ignore */ }
 }
 
-// 8s timeout — long enough to survive a sluggish 3G connection, short
-// enough that the user doesn't sit staring at a spinner for 15s on a
-// truly broken request. The error message (set in the catch below)
-// nudges the user toward "network is slow" instead of "server is broken".
-const REQUEST_TIMEOUT_MS = 8000;
+// 20s, raised from 8s. 8s was tuned against a healthy connection and did not
+// survive real conditions: every API call pays ~94ms per MySQL query to the
+// database (a different region from the API), and on congested evening mobile
+// data the round trip stretches well past 8s. The abort is invisible to the
+// server — it answers 200, the phone has already hung up — so these failures
+// never appeared in any dashboard while customers reported the app as down.
+// With MAX_RETRIES below, 8s meant a user could burn 25s of spinner on three
+// requests the server successfully served. Long enough to ride out a slow
+// evening, still short enough to fail a genuinely broken request.
+const REQUEST_TIMEOUT_MS = 20000;
 
 // Auto-retry config. A flaky 5xx (502/503/504) is almost always transient —
 // the server is alive but momentarily overloaded. We retry up to 2 times
