@@ -68,7 +68,7 @@
         "ITSAppUsesNonExemptEncryption": false
       },
       "bundleIdentifier": "com.yashsiwach.villkro",
-      "buildNumber": "5"
+      "buildNumber": "6"
     },
     "android": {
       "softwareKeyboardLayoutMode": "resize",
