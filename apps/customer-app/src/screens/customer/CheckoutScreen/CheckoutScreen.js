@@ -605,6 +605,16 @@ export default function CheckoutScreen() {
     let isActive = true;
 
     if (checkoutItems.length === 0) {
+      // Reachable mid-checkout, not just on entry: dragging the pin into a
+      // zone that doesn't stock the item currently in cart returns it in
+      // unavailableItems, removeUnavailableItems empties the cart, and this
+      // effect re-fires with checkoutItems.length === 0. isCalculating was
+      // left true by whichever run is currently in flight — without
+      // resetting it here, "Please wait, checking delivery…" spins forever
+      // with nothing left to calculate (reproduced live: dragged the pin,
+      // watched the cart's only item get silently dropped, checked
+      // isCalculating in the debugger — stuck true with zero pending work).
+      setIsCalculating(false);
       setBill(null);
       setCalcError(null);
       setFreeDeliveryProgress(null);
