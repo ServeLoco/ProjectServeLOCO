@@ -481,6 +481,57 @@ describe('maybeStartRiderAssignment', () => {
     const r = await assignment.maybeStartRiderAssignment(10);
     expect(r.reason).toBe('no_shops');
   });
+
+  it('does not start while any shop is still undecided, even if another already confirmed', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 10, status: 'Accepted', rider_id: null }]])
+      .mockResolvedValueOnce([[
+        { shop_id: 1, shop_confirmed_at: 'x', shop_rejected_at: null }, // shop 1 confirmed
+        { shop_id: 2, shop_confirmed_at: null, shop_rejected_at: null }, // shop 2 pending
+      ]]);
+    const r = await assignment.maybeStartRiderAssignment(10);
+    expect(r.started).toBe(false);
+    expect(r.reason).toBe('waiting_shops');
+  });
+
+  it('does not start when every shop rejected (auto-cancel handles that order instead)', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 10, status: 'Accepted', rider_id: null }]])
+      .mockResolvedValueOnce([[
+        { shop_id: 1, shop_confirmed_at: null, shop_rejected_at: 'x' },
+        { shop_id: 2, shop_confirmed_at: null, shop_rejected_at: 'x' },
+      ]]);
+    const r = await assignment.maybeStartRiderAssignment(10);
+    expect(r.started).toBe(false);
+    expect(r.reason).toBe('all_shops_rejected');
+  });
+
+  it('starts assignment once all shops decided, even with one shop rejecting and another confirming', async () => {
+    pool.query
+      .mockResolvedValueOnce([[{ id: 10, status: 'Accepted', rider_id: null }]]) // loadOrder (gate check)
+      .mockResolvedValueOnce([[
+        { shop_id: 1, shop_confirmed_at: 'x', shop_rejected_at: null }, // shop 1 confirmed
+        { shop_id: 2, shop_confirmed_at: null, shop_rejected_at: 'x' }, // shop 2 rejected
+      ]]);
+
+    const order = {
+      id: 10, status: 'Accepted', rider_id: null, rider_assignment_status: 'none',
+      order_number: 'ORD-10', payment_method: 'Cash', customer_id: 5, coupon_id: null,
+      customer_name: 'C', phone: '9', address: 'A', total: 100, created_at: null,
+    };
+    const startConn = makeConn([
+      [[order]], // startAssignment's own row lock
+      [{ affectedRows: 1 }], // mark searching
+    ]);
+    pool.getConnection.mockResolvedValueOnce(startConn);
+    pool.query
+      .mockResolvedValueOnce([[]]) // excluded
+      .mockResolvedValueOnce([[]]); // eligible empty — stays waiting, doesn't fail
+
+    const r = await assignment.maybeStartRiderAssignment(10);
+    expect(r.started).toBe(true);
+    expect(r.waiting).toBe(true);
+  });
 });
 
 describe('getExcludedRiderIdsForOrder', () => {

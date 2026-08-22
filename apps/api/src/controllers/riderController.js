@@ -74,6 +74,10 @@ const shapeItemRow = (it, shopName = it.shop_name || null) => ({
   unit_price: it.unit_price,
   lineTotal: it.line_total,
   line_total: it.line_total,
+  // A shop's reject/confirm is all-or-nothing per shop (shopOrderActions),
+  // so these mirror straight off this item's own timestamps.
+  accepted: Boolean(it.shop_confirmed_at),
+  rejected: Boolean(it.shop_rejected_at),
 });
 
 /**
@@ -93,7 +97,8 @@ const loadAssignmentExtrasBatch = async (orderRows) => {
     [orderIds]
   );
   const [itemRows] = await pool.query(
-    `SELECT id, order_id, product_name, quantity, variant_label, shop_id, unit_price, line_total
+    `SELECT id, order_id, product_name, quantity, variant_label, shop_id, unit_price, line_total,
+            shop_confirmed_at, shop_rejected_at
      FROM order_items WHERE order_id IN (?)`,
     [orderIds]
   );
@@ -106,14 +111,51 @@ const loadAssignmentExtrasBatch = async (orderRows) => {
     shopNameById.set(row.id, row.name);
   }
   const itemsByOrder = new Map();
+  // Per order, per shop: the shaped items plus the raw decision timestamps
+  // needed to roll a shop-level accepted/rejected/pending status up from
+  // its (all-or-nothing) items — mirrors adminController's shopConfirmations
+  // logic, but scoped to what the rider view needs (status + item list).
+  const shopEntriesByOrder = new Map();
   for (const row of itemRows) {
     if (!itemsByOrder.has(row.order_id)) itemsByOrder.set(row.order_id, []);
-    itemsByOrder.get(row.order_id).push(shapeItemRow(row, shopNameById.get(row.shop_id) || null));
+    const shapedItem = shapeItemRow(row, shopNameById.get(row.shop_id) || null);
+    itemsByOrder.get(row.order_id).push(shapedItem);
+
+    if (row.shop_id != null) {
+      if (!shopEntriesByOrder.has(row.order_id)) shopEntriesByOrder.set(row.order_id, new Map());
+      const byShop = shopEntriesByOrder.get(row.order_id);
+      if (!byShop.has(row.shop_id)) byShop.set(row.shop_id, []);
+      byShop.get(row.shop_id).push({
+        item: shapedItem,
+        confirmed: row.shop_confirmed_at != null,
+        rejected: row.shop_rejected_at != null,
+      });
+    }
   }
 
   return orderRows.map((orderRow) => {
     const order = shapeOrderSummary(orderRow);
-    order.shops = shopsByOrder.get(orderRow.id) || [];
+    const shopPins = shopsByOrder.get(orderRow.id) || [];
+    const byShop = shopEntriesByOrder.get(orderRow.id) || new Map();
+    // Shop pins carry a status ('accepted' | 'rejected' | 'pending') and
+    // their own item list, so the rider app can render "Shop A accepted: 2
+    // items, Shop B rejected: 1 item" without a second lookup — this is the
+    // breakdown a rider sees once shops make mixed decisions on a
+    // multi-shop order (maybeStartRiderAssignment now offers the order as
+    // soon as at least one shop confirms, instead of requiring all of them).
+    order.shops = shopPins.map((shop) => {
+      const entries = byShop.get(shop.id) || [];
+      const accepted = entries.length > 0 && entries.every((e) => e.confirmed);
+      const rejected = entries.length > 0 && entries.every((e) => e.rejected);
+      const status = rejected ? 'rejected' : (accepted ? 'accepted' : 'pending');
+      return {
+        ...shop,
+        status,
+        accepted,
+        rejected,
+        items: entries.map((e) => e.item),
+      };
+    });
     order.items = itemsByOrder.get(orderRow.id) || [];
     return order;
   });

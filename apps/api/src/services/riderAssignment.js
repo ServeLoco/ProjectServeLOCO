@@ -608,7 +608,15 @@ const startAssignmentIfHouseOnly = async (orderId) => {
 };
 
 /**
- * Start assignment only when all shops on the order have confirmed.
+ * Start assignment once every shop on the order has made its decision
+ * (confirmed or rejected — nobody left pending), as long as at least one
+ * shop confirmed something for the rider to actually pick up. A single
+ * shop rejecting no longer blocks the whole order: the rider still gets
+ * offered the order for whichever shops DID confirm, and sees the
+ * accepted/rejected breakdown via the assignment detail endpoints
+ * (riderController's shapeItemRow/loadAssignmentExtrasBatch).
+ * If every shop rejected, maybeAutoCancelOrderWhenAllShopsRejected (shops.js)
+ * cancels the order instead — nothing here needs to start a search for it.
  * House-only orders (no shop_id items): caller should call startAssignmentIfHouseOnly / startAssignment.
  */
 const maybeStartRiderAssignment = async (orderId) => {
@@ -633,17 +641,19 @@ const maybeStartRiderAssignment = async (orderId) => {
       byShop.get(it.shop_id).push(it);
     }
 
-    // Every shop must have all its items confirmed (or fully rejected — but then
-    // auto-cancel may run; if any shop fully rejected, skip start).
+    // Wait until every shop has decided; track whether anyone confirmed.
+    let anyConfirmed = false;
     for (const shopItemsList of byShop.values()) {
       const allRejected = shopItemsList.every((it) => it.shop_rejected_at != null);
-      if (allRejected) {
-        return { started: false, reason: 'shop_rejected' };
-      }
       const allConfirmed = shopItemsList.every((it) => it.shop_confirmed_at != null);
-      if (!allConfirmed) {
+      if (!allRejected && !allConfirmed) {
         return { started: false, reason: 'waiting_shops' };
       }
+      if (allConfirmed) anyConfirmed = true;
+    }
+
+    if (!anyConfirmed) {
+      return { started: false, reason: 'all_shops_rejected' };
     }
 
     return startAssignment(orderId);
