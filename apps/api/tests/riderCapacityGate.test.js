@@ -12,7 +12,7 @@ const request = require('supertest');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const { pool } = require('../src/db/mysql');
-const { listEligibleRiders, RIDER_MAX_ACTIVE_ORDERS } = require('../src/utils/riders');
+const { listEligibleRiders, RIDER_MAX_ACTIVE_ORDERS, ACTIVE_ORDER_STATUSES } = require('../src/utils/riders');
 const config = require('../src/config/env');
 
 jest.mock('../src/db/mysql', () => ({
@@ -74,80 +74,78 @@ const orderBody = {
 describe('POST /api/orders — rider capacity gate', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  const mockConnectionFor = (extraQueries = []) => ({
+  // The gate reads online_riders / active_orders as subqueries on the same
+  // settings row, so a scenario is just a settings override — no extra
+  // queries land in the transaction's mock queue.
+  const mockConnectionFor = (settingsOverride = {}) => ({
     beginTransaction: jest.fn(),
     query: jest.fn()
       .mockResolvedValueOnce([[{ blocked: 0 }]]) // user check
-      .mockResolvedValueOnce([[baseSettings]]) // settings
+      .mockResolvedValueOnce([[{ ...baseSettings, ...settingsOverride }]]) // settings + capacity counts
       .mockResolvedValueOnce([[{ id: 1, name: 'Test', price: 100, available: 1 }]]) // product
       .mockResolvedValueOnce([[]]) // exclusion zones
       .mockResolvedValueOnce([{ insertId: 5001 }])
       .mockResolvedValueOnce([{ affectedRows: 1 }])
-      .mockImplementation(() => {
-        const next = extraQueries.shift();
-        return next ? Promise.resolve(next) : Promise.resolve([[]]);
-      }),
+      .mockResolvedValue([[]]),
     commit: jest.fn(),
     rollback: jest.fn(),
     release: jest.fn(),
   });
 
-  it('rejects with RIDERS_AT_CAPACITY once active orders hit onlineRiders * multiplier', async () => {
-    pool.getConnection.mockResolvedValue(mockConnectionFor());
-    // 2 online riders * multiplier 3 = capacity 6; 6 active orders already in flight.
-    pool.query
-      .mockResolvedValueOnce([[{ cnt: 2 }]]) // countActiveRiders
-      .mockResolvedValueOnce([[{ cnt: 6 }]]); // countActiveOrdersInArea
+  const placeOrder = () => request(app)
+    .post('/api/orders')
+    .set('Authorization', `Bearer ${token}`)
+    .send(orderBody);
 
-    const res = await request(app)
-      .post('/api/orders')
-      .set('Authorization', `Bearer ${token}`)
-      .send(orderBody);
+  it('rejects with RIDERS_AT_CAPACITY once active orders hit onlineRiders * multiplier', async () => {
+    // 2 online riders * multiplier 3 = capacity 6; 6 active orders in flight.
+    pool.getConnection.mockResolvedValue(mockConnectionFor({ online_riders: 2, active_orders: 6 }));
+
+    const res = await placeOrder();
 
     expect(res.statusCode).toBe(400);
     expect(res.body.code).toBe('RIDERS_AT_CAPACITY');
     expect(res.body.message).toMatch(/29 minutes/);
   });
 
-  it('allows the order through when under capacity', async () => {
-    pool.getConnection.mockResolvedValue(mockConnectionFor());
-    pool.query
-      .mockResolvedValueOnce([[{ cnt: 2 }]]) // countActiveRiders
-      .mockResolvedValueOnce([[{ cnt: 5 }]]); // countActiveOrdersInArea — below capacity of 6
+  it('allows the order through when one under capacity', async () => {
+    pool.getConnection.mockResolvedValue(mockConnectionFor({ online_riders: 2, active_orders: 5 }));
 
-    const res = await request(app)
-      .post('/api/orders')
-      .set('Authorization', `Bearer ${token}`)
-      .send(orderBody);
+    const res = await placeOrder();
 
     expect(res.statusCode).toBe(201);
   });
 
-  it('skips the gate entirely when zero riders are online (delivery_available already covers that case)', async () => {
-    pool.getConnection.mockResolvedValue(mockConnectionFor());
-    pool.query.mockResolvedValueOnce([[{ cnt: 0 }]]); // countActiveRiders — only one call expected
+  it('skips the gate when zero riders are online (delivery_available already covers that case)', async () => {
+    pool.getConnection.mockResolvedValue(mockConnectionFor({ online_riders: 0, active_orders: 99 }));
 
-    const res = await request(app)
-      .post('/api/orders')
-      .set('Authorization', `Bearer ${token}`)
-      .send(orderBody);
+    const res = await placeOrder();
 
     expect(res.statusCode).toBe(201);
-    // Only the countActiveRiders call — countActiveOrdersInArea never runs
-    // when nobody is online, since there's nothing to gate against.
-    expect(pool.query).toHaveBeenCalledTimes(1);
   });
 
-  it('degrades to "not at capacity" and still lets the order through if the capacity check itself errors', async () => {
+  it('treats missing capacity columns as "not at capacity" rather than blocking checkout', async () => {
+    // baseSettings carries no online_riders/active_orders at all.
     pool.getConnection.mockResolvedValue(mockConnectionFor());
-    pool.query.mockRejectedValueOnce(new Error('connection reset'));
 
-    const res = await request(app)
-      .post('/api/orders')
-      .set('Authorization', `Bearer ${token}`)
-      .send(orderBody);
+    const res = await placeOrder();
 
     expect(res.statusCode).toBe(201);
+  });
+
+  it('counts capacity with an indexable status IN list scoped to the delivery area', async () => {
+    const conn = mockConnectionFor({ online_riders: 1, active_orders: 0 });
+    pool.getConnection.mockResolvedValue(conn);
+
+    await placeOrder();
+
+    const [sql, params] = conn.query.mock.calls[1];
+    expect(sql).toContain('AS online_riders');
+    expect(sql).toContain('AS active_orders');
+    // NOT IN ('Delivered','Cancelled') would walk the area's whole order
+    // history on every checkout; the IN list range-scans instead.
+    expect(sql).not.toMatch(/status NOT IN/);
+    expect(params).toContain(ACTIVE_ORDER_STATUSES);
   });
 });
 

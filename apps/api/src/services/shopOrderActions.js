@@ -229,6 +229,19 @@ async function rejectShopOrder(shopId, orderId, { shopName, source = 'owner' } =
   });
 
   await maybeAutoCancelOrderWhenAllShopsRejected(orderId);
+
+  // A reject can be the LAST decision on a multi-shop order whose other
+  // shops already confirmed. Without this the order stalls forever:
+  // auto-cancel above only fires when every shop rejected, and
+  // recoverStuckAssignments only re-drives orders already in
+  // 'searching'/'offered' — one left at 'none' is never picked up again.
+  // maybeStartRiderAssignment no-ops when the order just got cancelled,
+  // when shops are still undecided, or when nobody confirmed anything.
+  const { maybeStartRiderAssignment } = require('./riderAssignment');
+  maybeStartRiderAssignment(Number(orderId)).catch((e) =>
+    console.error('[rider-assign] maybeStart after shop reject failed:', e.message)
+  );
+
   await notifyShopOwnerOrderUpdated(shopId, orderId, 'rejected');
 
   return { ok: true, message: 'Order rejected' };

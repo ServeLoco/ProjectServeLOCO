@@ -32,8 +32,13 @@ jest.mock('../src/utils/adminNotifications', () => ({
   createAdminNotification: jest.fn().mockResolvedValue({ id: 1 }),
 }));
 
+jest.mock('../src/services/riderAssignment', () => ({
+  maybeStartRiderAssignment: jest.fn().mockResolvedValue({ started: false }),
+}));
+
 const { pool } = require('../src/db/mysql');
 const adminInbox = require('../src/utils/adminNotifications');
+const { maybeStartRiderAssignment } = require('../src/services/riderAssignment');
 const { rejectShopOrder } = require('../src/services/shopOrderActions');
 
 const queueRejectCalls = () => {
@@ -86,5 +91,26 @@ describe('rejectShopOrder source copy', () => {
       'UPDATE order_items SET shop_rejected_at = NOW() WHERE order_id = ? AND shop_id = ? AND shop_rejected_at IS NULL',
       [52, 1]
     );
+  });
+
+  // A reject can be the LAST decision on a multi-shop order whose other shops
+  // already confirmed. Without this re-drive the order stalls forever at
+  // rider_assignment_status = 'none': auto-cancel only fires when EVERY shop
+  // rejected, and recoverStuckAssignments only re-scans 'searching'/'offered'.
+  it('re-drives rider assignment after a reject, in case it was the last shop to decide', async () => {
+    queueRejectCalls();
+
+    await rejectShopOrder(1, 53, { shopName: 'X' });
+
+    expect(maybeStartRiderAssignment).toHaveBeenCalledWith(53);
+  });
+
+  it('does not fail the reject when the assignment re-drive throws', async () => {
+    queueRejectCalls();
+    maybeStartRiderAssignment.mockRejectedValueOnce(new Error('engine down'));
+
+    const result = await rejectShopOrder(1, 54, { shopName: 'X' });
+
+    expect(result.ok).toBe(true);
   });
 });

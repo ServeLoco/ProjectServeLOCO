@@ -98,6 +98,11 @@ const loadOrder = async (orderId, connection = pool) => {
  * grow around. Multi-shop orders return every shop so all rings open at once.
  * Empty for house-only orders or shops with no pin, which makes the selector
  * fall back to the plain distance-blind rule.
+ *
+ * Rejected lines are excluded: a partially-confirmed order still gets a rider
+ * (see maybeStartRiderAssignment), and the rider never visits the shop that
+ * rejected, so centring a ring there would bias selection toward a stop that
+ * isn't on the route.
  */
 const getOrderPickupPoints = async (orderId) => {
   try {
@@ -107,6 +112,7 @@ const getOrderPickupPoints = async (orderId) => {
        JOIN shops s ON s.id = oi.shop_id
        WHERE oi.order_id = ?
          AND oi.shop_id IS NOT NULL
+         AND oi.shop_rejected_at IS NULL
          AND s.latitude IS NOT NULL
          AND s.longitude IS NOT NULL`,
       [orderId]

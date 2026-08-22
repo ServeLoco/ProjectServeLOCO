@@ -624,6 +624,12 @@ describe('getOrderPickupPoints', () => {
     await expect(assignment.getOrderPickupPoints(10)).resolves.toEqual([]);
   });
 
+  it('excludes a rejected shop, which the rider never visits on a partially-confirmed order', async () => {
+    pool.query.mockResolvedValueOnce([[]]);
+    await assignment.getOrderPickupPoints(10);
+    expect(pool.query.mock.calls[0][0]).toContain('oi.shop_rejected_at IS NULL');
+  });
+
   it('drops unusable pins instead of placing a ring at 0,0', async () => {
     pool.query.mockResolvedValueOnce([[
       { latitude: null, longitude: null },

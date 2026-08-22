@@ -10,7 +10,7 @@ const { calculateRainCharge } = require('../utils/rainCharge');
 const { resolveDeliveryPricing, loadActiveZones, loadActiveExclusionZones } = require('../utils/deliveryPricing');
 const { resolveAreaIdForPricing, getAreaById } = require('../utils/areaScope');
 const { validateCoupon, validateCouponById, pickBestAutoApply } = require('../utils/coupons');
-const { countActiveRiders, countActiveOrdersInArea } = require('../utils/riders');
+const { ACTIVE_ORDER_STATUSES } = require('../utils/riders');
 const config = require('../config/env');
 
 // Expected business failures → 400. clientCode lets specific failures carry a
@@ -225,9 +225,20 @@ const createOrder = async (req, res) => {
       || await resolveAreaIdForPricing(latitude, longitude);
     const deliveryArea = await getAreaById(deliveryAreaId);
 
+    // The two capacity counters ride along as subqueries on the settings read
+    // rather than as separate calls: createOrder is holding a transaction
+    // connection here, so going back to the outer pool for them would make
+    // every in-flight checkout hold one connection while waiting for a
+    // second — a pool-wide deadlock once concurrent checkouts reach
+    // MYSQL_POOL_SIZE (waitForConnections with queueLimit 0 waits forever).
     const [settingRows] = await connection.query(
-      'SELECT shop_open, delivery_available, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings WHERE area_id = ? LIMIT 1',
-      [deliveryAreaId]
+      `SELECT shop_open, delivery_available, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active,
+              (SELECT COUNT(*) FROM riders r
+                WHERE r.active = 1 AND r.is_online = 1 AND r.area_id = ?) AS online_riders,
+              (SELECT COUNT(*) FROM orders o
+                WHERE o.area_id = ? AND o.status IN (?)) AS active_orders
+       FROM settings WHERE area_id = ? LIMIT 1`,
+      [deliveryAreaId, deliveryAreaId, ACTIVE_ORDER_STATUSES, deliveryAreaId]
     );
     const settings = settingRows[0];
 
@@ -237,27 +248,20 @@ const createOrder = async (req, res) => {
     // Capacity gate: with each rider capped at RIDER_MAX_ACTIVE_ORDERS
     // concurrent deliveries, letting in-flight orders grow unbounded just
     // strands new orders in the search queue with nobody free to take them.
-    // Reject up front instead, once the area's non-terminal order count
-    // reaches onlineRiders * RIDER_CAPACITY_MULTIPLIER, so the customer sees
-    // this before paying rather than after (delivery is still marked
-    // available — riders are online, just fully booked). Best-effort: a
-    // failure here (e.g. riders/orders lookup) must never block checkout,
-    // so it degrades to "not at capacity" rather than throwing.
-    try {
-      const onlineRiders = await countActiveRiders(deliveryAreaId);
-      if (onlineRiders > 0) {
-        const activeOrders = await countActiveOrdersInArea(deliveryAreaId);
-        const capacity = onlineRiders * config.RIDER_CAPACITY_MULTIPLIER;
-        if (activeOrders >= capacity) {
-          throw new OrderError(
-            `All our riders are busy right now. Please try again in about ${config.RIDER_CAPACITY_COOLDOWN_MIN} minutes.`,
-            'RIDERS_AT_CAPACITY'
-          );
-        }
+    // Reject up front instead, once the area's active order count reaches
+    // onlineRiders * RIDER_CAPACITY_MULTIPLIER, so the customer sees this
+    // before paying rather than after (delivery is still marked available —
+    // riders are online, just fully booked). Zero online riders is already
+    // covered by the delivery_available gate above, so skip it there.
+    const onlineRiders = Number(settings.online_riders) || 0;
+    if (onlineRiders > 0) {
+      const activeOrders = Number(settings.active_orders) || 0;
+      if (activeOrders >= onlineRiders * config.RIDER_CAPACITY_MULTIPLIER) {
+        throw new OrderError(
+          `All our riders are busy right now. Please try again in about ${config.RIDER_CAPACITY_COOLDOWN_MIN} minutes.`,
+          'RIDERS_AT_CAPACITY'
+        );
       }
-    } catch (capacityErr) {
-      if (capacityErr instanceof OrderError) throw capacityErr;
-      console.error('[order] capacity gate check failed, allowing order through:', capacityErr.message);
     }
 
     if (isCodBlockedDuringNight(settings) && payment_method === 'Cash') {

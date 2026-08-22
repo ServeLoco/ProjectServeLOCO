@@ -73,20 +73,12 @@ const countActiveRiders = async (areaId) => {
 };
 
 /**
- * Total non-terminal orders in this area right now, regardless of whether
- * they already have a rider — the capacity gate at checkout compares this
- * against onlineRiders * RIDER_CAPACITY_MULTIPLIER, not per-rider load.
+ * Order statuses that still occupy rider capacity. Spelled as an inclusion
+ * list rather than NOT IN ('Delivered','Cancelled') so the checkout capacity
+ * gate's COUNT can range-scan idx_orders_area_status_created instead of
+ * walking every order the area has ever taken.
  */
-const countActiveOrdersInArea = async (areaId) => {
-  const [rows] = await pool.query(
-    `SELECT COUNT(*) AS cnt
-     FROM orders
-     WHERE area_id = ?
-       AND status NOT IN ('Delivered', 'Cancelled')`,
-    [areaId]
-  );
-  return Number(rows[0]?.cnt) || 0;
-};
+const ACTIVE_ORDER_STATUSES = ['Pending', 'Accepted', 'Preparing', 'Out for Delivery'];
 
 /**
  * Eligible for a new offer: active, online, no other pending offer, and not in
@@ -400,12 +392,12 @@ module.exports = {
   RIDER_SEARCH_RADIUS_TIERS_KM,
   RIDER_LOCATION_MAX_AGE_SEC,
   RIDER_MAX_ACTIVE_ORDERS,
+  ACTIVE_ORDER_STATUSES,
   distanceToNearestPickupKm,
   selectRiderByRadiusTiers,
   riderShape,
   getRiderForUser,
   countActiveRiders,
-  countActiveOrdersInArea,
   listEligibleRiders,
   countCompletedDeliveriesToday,
   countCompletedDeliveriesTodayBatch,

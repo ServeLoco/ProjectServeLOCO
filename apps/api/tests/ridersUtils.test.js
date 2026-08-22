@@ -16,10 +16,10 @@ const {
   distanceToNearestPickupKm,
   selectEligibleRider,
   countActiveRiders,
-  countActiveOrdersInArea,
   syncDeliveryAvailabilityFromRiders,
   RIDER_LOCATION_MAX_AGE_SEC,
   RIDER_MAX_ACTIVE_ORDERS,
+  ACTIVE_ORDER_STATUSES,
 } = require('../src/utils/riders');
 
 jest.mock('../src/db/mysql', () => ({
@@ -344,20 +344,13 @@ describe('countActiveRiders', () => {
   });
 });
 
-describe('countActiveOrdersInArea', () => {
-  beforeEach(() => jest.clearAllMocks());
-
-  it('returns numeric count scoped to the area', async () => {
-    pool.query.mockResolvedValueOnce([[{ cnt: 7 }]]);
-    expect(await countActiveOrdersInArea(1)).toBe(7);
-    const [sql, params] = pool.query.mock.calls[0];
-    expect(sql).toMatch(/status NOT IN \('Delivered', 'Cancelled'\)/);
-    expect(params).toEqual([1]);
-  });
-
-  it('returns 0 when no rows', async () => {
-    pool.query.mockResolvedValueOnce([[{ cnt: 0 }]]);
-    expect(await countActiveOrdersInArea(1)).toBe(0);
+describe('ACTIVE_ORDER_STATUSES', () => {
+  it('lists every non-terminal status, so the capacity gate never undercounts', () => {
+    expect(ACTIVE_ORDER_STATUSES).toEqual(
+      expect.arrayContaining(['Pending', 'Accepted', 'Preparing', 'Out for Delivery'])
+    );
+    expect(ACTIVE_ORDER_STATUSES).not.toContain('Delivered');
+    expect(ACTIVE_ORDER_STATUSES).not.toContain('Cancelled');
   });
 });
 
