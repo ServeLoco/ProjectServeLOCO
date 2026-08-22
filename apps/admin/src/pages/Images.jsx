@@ -84,7 +84,7 @@ export default function Images() {
     const value = img.created_at || img.createdAt;
     if (!value) return 'Unknown date';
     const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? 'Unknown date' : date.toLocaleDateString();
+    return Number.isNaN(date.getTime()) ? 'Unknown date' : date.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' });
   };
 
   // Client-side filter: filename + original name + altText + url match the query.

@@ -48,7 +48,7 @@ export default function Health() {
           </div>
           <div className="health-overall-text">
             <h2>{loading ? 'Checking Systems...' : isHealthy ? 'All Systems Operational' : 'System Degraded'}</h2>
-            <p>Last checked: {lastCheck ? lastCheck.toLocaleTimeString() : 'Never'}</p>
+            <p>Last checked: {lastCheck ? lastCheck.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata' }) : 'Never'}</p>
           </div>
         </div>
 

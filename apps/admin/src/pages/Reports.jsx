@@ -39,7 +39,13 @@ const formatINR = (value) => {
 const formatDateLabel = (dateStr) => {
   if (!dateStr) return '';
   try {
-    return new Date(`${dateStr}T00:00:00`).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    // dateStr is a plain YYYY-MM-DD period boundary, not a timestamp — build
+    // it as UTC midnight and format in UTC so no local/IST offset can shift
+    // it onto the wrong calendar day.
+    const [y, m, d] = dateStr.split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-IN', {
+      timeZone: 'UTC', day: '2-digit', month: 'short', year: 'numeric',
+    });
   } catch {
     return dateStr;
   }

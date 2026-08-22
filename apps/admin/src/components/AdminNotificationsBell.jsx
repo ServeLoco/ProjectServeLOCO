@@ -27,7 +27,7 @@ const formatRelativeTime = (iso) => {
   if (hr < 24) return `${hr}h ago`;
   const day = Math.floor(hr / 24);
   if (day < 7) return `${day}d ago`;
-  return then.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  return then.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' });
 };
 
 export default function AdminNotificationsBell() {

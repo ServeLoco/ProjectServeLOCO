@@ -10,6 +10,7 @@ const ADMIN_ORDER_EVENTS = [
   'admin.order.shop_ready',
   'admin.order.rider_updated',
   'admin.order.cancel_request',
+  'admin.order.item_replaced',
 ];
 const ADMIN_NOTIFICATION_EVENTS = ['admin.notification.created', 'admin.notification.unread_count', 'admin.order.auto_accepted', 'admin.order.snoozed'];
 const ADMIN_ANALYTICS_EVENTS = ['analytics.live'];

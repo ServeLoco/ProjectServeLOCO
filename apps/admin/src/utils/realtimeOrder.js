@@ -78,6 +78,27 @@ export function mergeAdminOrderPatch(order, payload = {}) {
     next.total = payload.total;
   }
 
+  if (payload.subtotal !== undefined && payload.subtotal !== null) {
+    next.subtotal = payload.subtotal;
+  }
+
+  // admin.order.item_replaced — swap the matching order_items row in place
+  // so the drawer's item list reflects the new product without a refetch.
+  if (payload.itemId != null && payload.newProduct && Array.isArray(next.items)) {
+    const itemId = Number(payload.itemId);
+    next.items = next.items.map((it) => (
+      Number(it.id) === itemId
+        ? {
+          ...it,
+          product_id: payload.newProduct.productId,
+          product_name: payload.newProduct.productName,
+          unit_price: payload.newProduct.unitPrice,
+          line_total: payload.newProduct.lineTotal,
+        }
+        : it
+    ));
+  }
+
   if (payload.cancel_reason !== undefined || payload.cancelReason !== undefined) {
     next.cancel_reason = payload.cancel_reason ?? payload.cancelReason ?? next.cancel_reason;
   }
@@ -125,6 +146,13 @@ export function mergeAdminOrderPatch(order, payload = {}) {
       next.shopConfirmations = next.shopConfirmations.map((sc) => (
         Number(sc.shopId ?? sc.shop_id) === sid
           ? { ...sc, rejected: true, confirmed: false, ready: false }
+          : sc
+      ));
+    }
+    if (payload.action === 'resent') {
+      next.shopConfirmations = next.shopConfirmations.map((sc) => (
+        Number(sc.shopId ?? sc.shop_id) === sid
+          ? { ...sc, rejected: false, confirmed: false, ready: false }
           : sc
       ));
     }

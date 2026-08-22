@@ -172,7 +172,7 @@ export default function Customers() {
                   </td>
                   <td>{c.phone}</td>
                   <td>{c.order_count || c.total_orders || 0}</td>
-                  <td>{new Date(c.created_at).toLocaleDateString()}</td>
+                  <td>{new Date(c.created_at).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}</td>
                 </tr>
               ))
             )}
@@ -215,7 +215,7 @@ export default function Customers() {
                 <div className="stat-card">
                   <div className="stat-card-label">Joined</div>
                   <div className="stat-card-value" style={{ fontSize: '1.2rem', marginTop: '0.25rem' }}>
-                    {new Date(selectedCustomer.created_at).toLocaleDateString()}
+                    {new Date(selectedCustomer.created_at).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}
                   </div>
                 </div>
               </div>

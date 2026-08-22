@@ -709,7 +709,7 @@ export default function Coupons() {
             <div className="coupon-form-body">
               {redemptionsLoading ? <Loading /> : redemptions.length === 0 ? <EmptyState message="No redemptions yet." /> : (
                 <table className="coupons-table"><thead><tr><th>Order #</th><th>Customer</th><th>Discount</th><th>Order Total</th><th>Date</th></tr></thead><tbody>
-                  {redemptions.map(r => (<tr key={r.id}><td>{r.order_number || r.order_id}</td><td>{r.user_name || '—'}{r.user_phone ? ` (${r.user_phone})` : ''}</td><td>Rs.{Number(r.discount_amount)}</td><td>Rs.{Number(r.order_total || 0)}</td><td>{new Date(r.redeemed_at).toLocaleDateString()}</td></tr>))}
+                  {redemptions.map(r => (<tr key={r.id}><td>{r.order_number || r.order_id}</td><td>{r.user_name || '—'}{r.user_phone ? ` (${r.user_phone})` : ''}</td><td>Rs.{Number(r.discount_amount)}</td><td>Rs.{Number(r.order_total || 0)}</td><td>{new Date(r.redeemed_at).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}</td></tr>))}
                 </tbody></table>
               )}
             </div>

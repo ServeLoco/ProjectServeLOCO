@@ -54,7 +54,7 @@ export default function AnalyticsUserDetail() {
         <div className="avatar">{initial}</div>
         <div className="info">
           <h2>{user.name}</h2>
-          <p>{user.phone} · Joined {user.joinedAt ? new Date(user.joinedAt).toLocaleDateString() : '—'}</p>
+          <p>{user.phone} · Joined {user.joinedAt ? new Date(user.joinedAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—'}</p>
         </div>
       </div>
 
@@ -77,7 +77,7 @@ export default function AnalyticsUserDetail() {
             <tbody>
               {sessions.map((s, i) => (
                 <tr key={i}>
-                  <td>{s.connectedAt ? new Date(s.connectedAt).toLocaleString() : '—'}</td>
+                  <td>{s.connectedAt ? new Date(s.connectedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—'}</td>
                   <td>{fmtDuration(s.durationSec)}</td>
                   <td>{s.platform || '—'}</td>
                   <td>{Object.entries(s.screens || {}).map(([k, v]) => `${k}(${v})`).join(', ') || '—'}</td>
@@ -93,7 +93,7 @@ export default function AnalyticsUserDetail() {
         {timeline?.length > 0 ? (
           timeline.map((e, i) => (
             <div key={i} className="analytics-timeline-item">
-              <span className="time">{e.at ? new Date(e.at).toLocaleString() : '—'}</span>
+              <span className="time">{e.at ? new Date(e.at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—'}</span>
               <span className="desc">{eventLabel(e)}</span>
             </div>
           ))

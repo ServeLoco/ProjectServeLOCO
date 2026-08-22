@@ -31,6 +31,12 @@ const ORDER_STATUS_LABELS = ORDER_STATUS_OPTIONS.reduce((acc, item) => {
   return acc;
 }, {});
 const getOrderStatusLabel = (status) => ORDER_STATUS_LABELS[status] || status || 'Unknown';
+// 'Paid' and 'Success' are the same state (money received) written by two
+// different code paths — auto-flip on delivery vs rider marking COD
+// collected. Collapsed to one option here; the server accepts the 'Paid'
+// filter/write for both (see adminController.getAdminOrders).
+const PAID_LIKE_STATUSES = ['Paid', 'Success'];
+const displayPaymentStatus = (status) => (PAID_LIKE_STATUSES.includes(status) ? 'Paid' : status);
 const formatMoney = (value) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric.toFixed(2) : '0.00';
@@ -61,6 +67,7 @@ const formatDateTime = (value) => {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString('en-IN', {
+    timeZone: 'Asia/Kolkata',
     day: '2-digit',
     month: 'short',
     year: 'numeric',
@@ -69,13 +76,6 @@ const formatDateTime = (value) => {
   });
 };
 const statusClassName = (status) => String(status || 'unknown').toLowerCase().replace(/\s+/g, '-');
-// Local YYYY-MM-DD (not toISOString, which shifts to UTC and can land on the
-// wrong day near midnight for IST users).
-const todayStr = () => {
-  const d = new Date();
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-};
 
 export default function Orders() {
   const { areaId } = useAreaStore() || {};
@@ -132,9 +132,10 @@ export default function Orders() {
       
       const params = { page, limit: 20, ...filtersRef.current };
       if (!historyModeRef.current) {
-        // Default view: today only, regardless of any stale date filter state.
-        params.dateFrom = todayStr();
-        params.dateTo = todayStr();
+        // Default view: today only. Let the server decide "today" (it knows
+        // the admin TZ); sending a browser-computed date here can disagree
+        // with the server's day boundary and silently hide recent orders.
+        params.today = '1';
       }
       Object.keys(params).forEach(k => !params[k] && delete params[k]);
 
@@ -594,7 +595,7 @@ export default function Orders() {
 
       const rows = allFilteredOrders.map(o => [
         `#${o.order_number}`,
-        new Date(o.created_at).toLocaleString(),
+        formatDateTime(o.created_at),
         o.customer_name || '',
         o.phone || '',
         o.whatsapp_number || '',
@@ -670,7 +671,7 @@ export default function Orders() {
           <div style="text-align: right;">
              <div style="font-weight: bold; font-size: 18px;">INVOICE</div>
              <div>Order #${escapeHtml(selectedOrder.order_number)}</div>
-             <div>Date: ${new Date(selectedOrder.created_at).toLocaleString()}</div>
+             <div>Date: ${escapeHtml(formatDateTime(selectedOrder.created_at))}</div>
           </div>
         </div>
         <div class="details">
@@ -864,7 +865,6 @@ export default function Orders() {
             <option value="">All Payment Status</option>
             <option value="Pending">Pending</option>
             <option value="Paid">Paid</option>
-            <option value="Success">Success</option>
             <option value="Failed">Failed</option>
             <option value="Refunded">Refunded</option>
           </select>
@@ -969,7 +969,7 @@ export default function Orders() {
                     </span>
                   </td>
                   <td>
-                    <span className={`payment-pill ${statusClassName(order.payment_status)}`}>{order.payment_status}</span>
+                    <span className={`payment-pill ${statusClassName(order.payment_status)}`}>{displayPaymentStatus(order.payment_status)}</span>
                     <span className="payment-method">{order.payment_method}</span>
                   </td>
                 </tr>
@@ -1145,27 +1145,35 @@ export default function Orders() {
                 <h4>Order Status Management</h4>
                 <div className="status-update-row">
                   <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Fulfillment Status</label>
-                  <select 
-                    value={selectedOrder.status} 
+                  <select
+                    value={selectedOrder.status}
                     onChange={handleStatusChange}
-                    disabled={updating || isTerminalState(selectedOrder.status)}
+                    disabled={updating || selectedOrder.status === 'Delivered'}
                   >
-                    {ORDER_STATUS_OPTIONS.map(status => (
-                      <option key={status.value} value={status.value}>{status.label}</option>
-                    ))}
+                    {selectedOrder.status === 'Cancelled' ? (
+                      // A cancelled order can only be reopened back to Pending
+                      // (server enforces this too) — narrow the picker to match.
+                      <>
+                        <option value="Cancelled">Cancelled</option>
+                        <option value="Pending">Reopen — Order Placed</option>
+                      </>
+                    ) : (
+                      ORDER_STATUS_OPTIONS.map(status => (
+                        <option key={status.value} value={status.value}>{status.label}</option>
+                      ))
+                    )}
                   </select>
                 </div>
 
                 <div className="status-update-row">
                   <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Payment Status</label>
-                  <select 
-                    value={selectedOrder.payment_status} 
+                  <select
+                    value={displayPaymentStatus(selectedOrder.payment_status)}
                     onChange={handlePaymentChange}
                     disabled={updating || isTerminalState(selectedOrder.status)}
                   >
                     <option value="Pending">Pending</option>
                     <option value="Paid">Paid</option>
-                    <option value="Success">Success</option>
                     <option value="Failed">Failed</option>
                     <option value="Refunded">Refunded</option>
                   </select>

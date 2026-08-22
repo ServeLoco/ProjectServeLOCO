@@ -1412,7 +1412,7 @@ function ProductFormDrawer({ product, categories, shops, currentMode, onClose, o
                   </strong>
                   <div style={{ marginTop: 2, opacity: 0.85 }}>
                     Window: {formatTimeWindow(formData.available_from_time, formData.available_until_time)}
-                    {' · '}Server time: {new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false })}
+                    {' · '}Server time: {new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false })}
                   </div>
                 </div>
               )}

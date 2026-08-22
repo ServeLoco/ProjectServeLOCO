@@ -457,7 +457,7 @@ export default function Notifications() {
                 <tbody>
                   {broadcasts.map(b => (
                     <tr key={b.id}>
-                      <td>{new Date(b.created_at).toLocaleString()}</td>
+                      <td>{new Date(b.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}</td>
                       <td>
                         <span className={`badge badge-${b.type}`}>{b.type}</span>
                       </td>

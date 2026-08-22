@@ -175,7 +175,7 @@ export default function MobileAdmins() {
                   <td>
                     <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
                       {a.createdAt || a.created_at
-                        ? new Date(a.createdAt || a.created_at).toLocaleDateString()
+                        ? new Date(a.createdAt || a.created_at).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })
                         : '—'}
                     </span>
                   </td>

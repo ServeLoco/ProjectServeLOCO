@@ -19,7 +19,7 @@ function formatPlacedAt(iso) {
   if (min < 60) return `${min} min ago`;
   const hr = Math.floor(min / 60);
   if (hr < 24) return `${hr} hour${hr === 1 ? '' : 's'} ago`;
-  return then.toLocaleString();
+  return then.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 }
 
 function formatCurrency(value) {

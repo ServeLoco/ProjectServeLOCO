@@ -209,7 +209,7 @@ export default function Dashboard() {
         <div className="dashboard-header-left">
           <h1 className="dashboard-title">Overview</h1>
           <p className="dashboard-subtitle">
-            {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+            {new Date().toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
           </p>
         </div>
 

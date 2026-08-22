@@ -1,0 +1,24 @@
+.rim-overlay {
+  z-index: 1100;
+}
+
+.rim-panel {
+  max-width: 520px;
+}
+
+.rim-current-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0.85rem;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--surface-soft);
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.rim-current-name {
+  flex: 1;
+  padding-right: 0.75rem;
+}

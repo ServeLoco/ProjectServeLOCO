@@ -366,7 +366,7 @@ export default function Analytics() {
                   <td>{w.phone || '—'}</td>
                   <td>{w.cartAdds}</td>
                   <td>{w.cartRemoves}</td>
-                  <td>{w.lastActiveAt ? new Date(w.lastActiveAt).toLocaleDateString() : '—'}</td>
+                  <td>{w.lastActiveAt ? new Date(w.lastActiveAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }) : '—'}</td>
                 </tr>
               ))}
             </tbody>
