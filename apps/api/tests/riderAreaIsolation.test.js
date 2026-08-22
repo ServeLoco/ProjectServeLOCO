@@ -162,7 +162,9 @@ describe('Rider assignment area isolation (TASK 15.8)', () => {
 
     const [eligibleSql, eligibleParams] = pool.query.mock.calls[3];
     expect(eligibleSql).toContain('r.area_id = ?');
-    expect(eligibleParams).toContain(1);
-    expect(eligibleParams).not.toContain(2);
+    // Param order: [locationMaxAge, areaId, maxActiveOrdersCap, ...excludeIds] —
+    // index into the areaId slot rather than a blanket "not contain 2", since
+    // the active-orders cap value can itself legitimately be 2.
+    expect(eligibleParams[1]).toBe(1);
   });
 });

@@ -83,6 +83,16 @@ const config = {
   // frequent enough that a rider can't miss it, less relentless than every 15s.
   RIDER_OFFER_REMIND_SEC: Number(process.env.RIDER_OFFER_REMIND_SEC) || 30,
   RIDER_TODAY_TZ: process.env.RIDER_TODAY_TZ || '+05:30',
+  // A rider carrying this many undelivered orders is excluded from new offers
+  // until one of them is Delivered/Cancelled.
+  RIDER_MAX_ACTIVE_ORDERS: Number(process.env.RIDER_MAX_ACTIVE_ORDERS) || 2,
+  // Order-creation capacity gate: once an area's in-flight (non-terminal)
+  // order count reaches onlineRiders * this multiplier, new checkouts are
+  // rejected with a "riders are busy" message instead of accepted and left
+  // to starve in the search queue.
+  RIDER_CAPACITY_MULTIPLIER: Number(process.env.RIDER_CAPACITY_MULTIPLIER) || 3,
+  // Cooldown minutes surfaced to the customer in the at-capacity message.
+  RIDER_CAPACITY_COOLDOWN_MIN: Number(process.env.RIDER_CAPACITY_COOLDOWN_MIN) || 29,
 
   // Shop auto-open/auto-close schedule sweeper.
   // Wall-clock zone the admin enters open_time/close_time in. The API

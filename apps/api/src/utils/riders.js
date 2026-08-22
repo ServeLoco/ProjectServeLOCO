@@ -10,6 +10,11 @@ const RIDER_SEARCH_RADIUS_TIERS_KM = (config.RIDER_SEARCH_RADIUS_TIERS_KM || [])
   ? config.RIDER_SEARCH_RADIUS_TIERS_KM
   : [1, 2, 3];
 const RIDER_LOCATION_MAX_AGE_SEC = config.RIDER_LOCATION_MAX_AGE_SEC || 600;
+// A rider already carrying this many non-terminal orders is excluded from
+// new offers until one is Delivered/Cancelled — enforced inside
+// listEligibleRiders so both the initial assignment and every
+// continueAssignment re-scan see it, with zero caching to go stale.
+const RIDER_MAX_ACTIVE_ORDERS = config.RIDER_MAX_ACTIVE_ORDERS || 2;
 
 const riderShape = (r) => {
   if (!r) return null;
@@ -68,6 +73,22 @@ const countActiveRiders = async (areaId) => {
 };
 
 /**
+ * Total non-terminal orders in this area right now, regardless of whether
+ * they already have a rider — the capacity gate at checkout compares this
+ * against onlineRiders * RIDER_CAPACITY_MULTIPLIER, not per-rider load.
+ */
+const countActiveOrdersInArea = async (areaId) => {
+  const [rows] = await pool.query(
+    `SELECT COUNT(*) AS cnt
+     FROM orders
+     WHERE area_id = ?
+       AND status NOT IN ('Delivered', 'Cancelled')`,
+    [areaId]
+  );
+  return Number(rows[0]?.cnt) || 0;
+};
+
+/**
  * Eligible for a new offer: active, online, no other pending offer, and not in
  * excludeIds (already offered/rejected this order). Multi-order is allowed.
  *
@@ -80,9 +101,9 @@ const countActiveRiders = async (areaId) => {
  */
 const listEligibleRiders = async ({ excludeIds = [], areaId } = {}) => {
   const exclude = (excludeIds || []).map(Number).filter((n) => Number.isFinite(n) && n > 0);
-  // Freshness param is bound before the area/exclude params — keep this order
-  // in sync with the placeholders below.
-  const params = [RIDER_LOCATION_MAX_AGE_SEC, areaId];
+  // Freshness param, then areaId, then the active-orders cap, then the
+  // exclude list — keep this order in sync with the placeholders below.
+  const params = [RIDER_LOCATION_MAX_AGE_SEC, areaId, RIDER_MAX_ACTIVE_ORDERS];
   let excludeClause = '';
   if (exclude.length > 0) {
     excludeClause = `AND r.id NOT IN (${exclude.map(() => '?').join(',')})`;
@@ -104,6 +125,10 @@ const listEligibleRiders = async ({ excludeIds = [], areaId } = {}) => {
          SELECT 1 FROM rider_order_offers ro
          WHERE ro.rider_id = r.id AND ro.status = 'pending'
        )
+       AND (
+         SELECT COUNT(*) FROM orders o
+         WHERE o.rider_id = r.id AND o.status NOT IN ('Delivered', 'Cancelled')
+       ) < ?
        ${excludeClause}
      ORDER BY r.id ASC`,
     params
@@ -374,11 +399,13 @@ module.exports = {
   RIDER_TODAY_TZ,
   RIDER_SEARCH_RADIUS_TIERS_KM,
   RIDER_LOCATION_MAX_AGE_SEC,
+  RIDER_MAX_ACTIVE_ORDERS,
   distanceToNearestPickupKm,
   selectRiderByRadiusTiers,
   riderShape,
   getRiderForUser,
   countActiveRiders,
+  countActiveOrdersInArea,
   listEligibleRiders,
   countCompletedDeliveriesToday,
   countCompletedDeliveriesTodayBatch,

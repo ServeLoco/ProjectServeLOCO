@@ -406,6 +406,13 @@ describe('Order idempotency', () => {
     dupErr.errno = 1062;
     loser.query.mockRejectedValueOnce(dupErr);
 
+    // Both requests hit the capacity gate's countActiveRiders check via
+    // pool.query before their transaction even opens; 0 online riders skips
+    // the gate (no second countActiveOrdersInArea call) for either.
+    pool.query
+      .mockResolvedValueOnce([[{ cnt: 0 }]]) // winner's countActiveRiders
+      .mockResolvedValueOnce([[{ cnt: 0 }]]); // loser's countActiveRiders
+
     // After rollback+release, the controller fetches via pool.query.
     pool.query
       .mockResolvedValueOnce([[{

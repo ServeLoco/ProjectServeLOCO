@@ -16,8 +16,10 @@ const {
   distanceToNearestPickupKm,
   selectEligibleRider,
   countActiveRiders,
+  countActiveOrdersInArea,
   syncDeliveryAvailabilityFromRiders,
   RIDER_LOCATION_MAX_AGE_SEC,
+  RIDER_MAX_ACTIVE_ORDERS,
 } = require('../src/utils/riders');
 
 jest.mock('../src/db/mysql', () => ({
@@ -169,8 +171,17 @@ describe('listEligibleRiders', () => {
     await listEligibleRiders({ excludeIds: [3, 5], areaId: 1 });
     const [sql, params] = pool.query.mock.calls[0];
     expect(sql).toMatch(/r\.id NOT IN/);
-    // Location-freshness seconds are bound first, then areaId, then the exclude list.
-    expect(params).toEqual([RIDER_LOCATION_MAX_AGE_SEC, 1, 3, 5]);
+    // Location-freshness seconds, then areaId, then the active-orders cap,
+    // then the exclude list.
+    expect(params).toEqual([RIDER_LOCATION_MAX_AGE_SEC, 1, RIDER_MAX_ACTIVE_ORDERS, 3, 5]);
+  });
+
+  it('excludes riders already carrying RIDER_MAX_ACTIVE_ORDERS undelivered orders', async () => {
+    pool.query.mockResolvedValueOnce([[]]);
+    await listEligibleRiders({ areaId: 1 });
+    const [sql] = pool.query.mock.calls[0];
+    expect(sql).toMatch(/status NOT IN \('Delivered', 'Cancelled'\)/);
+    expect(sql).toMatch(/\)\s*<\s*\?/);
   });
 
   it('marks a stale GPS ping as not fresh', async () => {
@@ -330,6 +341,23 @@ describe('countActiveRiders', () => {
   it('returns numeric count', async () => {
     pool.query.mockResolvedValueOnce([[{ cnt: 2 }]]);
     expect(await countActiveRiders(1)).toBe(2);
+  });
+});
+
+describe('countActiveOrdersInArea', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  it('returns numeric count scoped to the area', async () => {
+    pool.query.mockResolvedValueOnce([[{ cnt: 7 }]]);
+    expect(await countActiveOrdersInArea(1)).toBe(7);
+    const [sql, params] = pool.query.mock.calls[0];
+    expect(sql).toMatch(/status NOT IN \('Delivered', 'Cancelled'\)/);
+    expect(params).toEqual([1]);
+  });
+
+  it('returns 0 when no rows', async () => {
+    pool.query.mockResolvedValueOnce([[{ cnt: 0 }]]);
+    expect(await countActiveOrdersInArea(1)).toBe(0);
   });
 });
 

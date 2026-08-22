@@ -10,6 +10,8 @@ const { calculateRainCharge } = require('../utils/rainCharge');
 const { resolveDeliveryPricing, loadActiveZones, loadActiveExclusionZones } = require('../utils/deliveryPricing');
 const { resolveAreaIdForPricing, getAreaById } = require('../utils/areaScope');
 const { validateCoupon, validateCouponById, pickBestAutoApply } = require('../utils/coupons');
+const { countActiveRiders, countActiveOrdersInArea } = require('../utils/riders');
+const config = require('../config/env');
 
 // Expected business failures → 400. clientCode lets specific failures carry a
 // distinct machine-readable code (e.g. OUT_OF_DELIVERY_RANGE) while everything
@@ -231,6 +233,32 @@ const createOrder = async (req, res) => {
 
     if (settings.shop_open === 0 || settings.shop_open === false) throw new OrderError('Shop is currently closed');
     if (settings.delivery_available === 0 || settings.delivery_available === false) throw new OrderError('Delivery is currently unavailable');
+
+    // Capacity gate: with each rider capped at RIDER_MAX_ACTIVE_ORDERS
+    // concurrent deliveries, letting in-flight orders grow unbounded just
+    // strands new orders in the search queue with nobody free to take them.
+    // Reject up front instead, once the area's non-terminal order count
+    // reaches onlineRiders * RIDER_CAPACITY_MULTIPLIER, so the customer sees
+    // this before paying rather than after (delivery is still marked
+    // available — riders are online, just fully booked). Best-effort: a
+    // failure here (e.g. riders/orders lookup) must never block checkout,
+    // so it degrades to "not at capacity" rather than throwing.
+    try {
+      const onlineRiders = await countActiveRiders(deliveryAreaId);
+      if (onlineRiders > 0) {
+        const activeOrders = await countActiveOrdersInArea(deliveryAreaId);
+        const capacity = onlineRiders * config.RIDER_CAPACITY_MULTIPLIER;
+        if (activeOrders >= capacity) {
+          throw new OrderError(
+            `All our riders are busy right now. Please try again in about ${config.RIDER_CAPACITY_COOLDOWN_MIN} minutes.`,
+            'RIDERS_AT_CAPACITY'
+          );
+        }
+      }
+    } catch (capacityErr) {
+      if (capacityErr instanceof OrderError) throw capacityErr;
+      console.error('[order] capacity gate check failed, allowing order through:', capacityErr.message);
+    }
 
     if (isCodBlockedDuringNight(settings) && payment_method === 'Cash') {
       throw new OrderError('Cash on Delivery is not available during night delivery hours. Please choose UPI.');

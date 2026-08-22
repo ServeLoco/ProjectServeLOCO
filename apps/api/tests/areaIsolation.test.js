@@ -181,16 +181,17 @@ describe('30.6 — an area 2 order is never offered to an area 1 rider', () => {
     await listEligibleRiders({ areaId: 2 });
     const [sql, params] = pool.query.mock.calls[0];
     expect(sql).toMatch(/r\.area_id = \?/);
-    expect(params).toContain(2);
-    expect(params).not.toContain(1);
+    // Param order: [locationMaxAge, areaId, maxActiveOrdersCap, ...excludeIds] —
+    // index into the areaId slot rather than a blanket contains/not-contains,
+    // since the active-orders cap value can itself legitimately be 1 or 2.
+    expect(params[1]).toBe(2);
   });
 
   it('listEligibleRiders for area 1 queries r.area_id = 1, never 2', async () => {
     pool.query.mockResolvedValueOnce([[]]);
     await listEligibleRiders({ areaId: 1 });
     const [, params] = pool.query.mock.calls[0];
-    expect(params).toContain(1);
-    expect(params).not.toContain(2);
+    expect(params[1]).toBe(1);
   });
 });
 
