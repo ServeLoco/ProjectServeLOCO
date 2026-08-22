@@ -192,6 +192,11 @@ export default function LocationPicker({
   const mapLayoutRef = useRef({ width: 0, height: 0 });
   // Last camera center from onMapIdle / pan (must stay in sync with native map).
   const lastMapCenterRef = useRef(null);
+  // Last center actually reported to the parent via onLiveCenterChange —
+  // separate from lastMapCenterRef (which readPinCoordinate/confirm need to
+  // always reflect the freshest native value) because this one gates whether
+  // we report again at all. See the epsilon check in handleMapIdle.
+  const lastReportedCenterRef = useRef(null);
   // True after user pans — blocks live-GPS fly retries from yanking the map back.
   const userMovedMapRef = useRef(false);
   // Freeze pin screen offset after Confirm so sheet expand doesn't slide the tip.
@@ -853,7 +858,28 @@ export default function LocationPicker({
       const lat = Number(c[1]);
       if (Number.isFinite(lat) && Number.isFinite(lng)) {
         lastMapCenterRef.current = { latitude: lat, longitude: lng };
-        onLiveCenterChangeRef.current?.(lat, lng);
+
+        // Report to the parent only when the center actually moved. Without
+        // this, a repeat/no-op idle event (e.g. the native camera settling
+        // again after the controlled centerCoordinate write just below —
+        // Android Mapbox's reported center can carry enough float round-trip
+        // error to keep missing an exact match) creates a brand-new
+        // {lat,lng} object every single time. CheckoutScreen keys its cart-
+        // pricing debounce off that object's reference, so a fast-enough
+        // repeat loop cancels the pending fetch before it ever fires —
+        // "Please wait, checking delivery…" spins forever with zero network
+        // traffic, reproduced live on iPhone/Android after dragging the pin
+        // to a new spot. 1e-6 degrees (~11cm at the equator) comfortably
+        // absorbs that float noise while catching every real drag.
+        const prevReported = lastReportedCenterRef.current;
+        const moved = !prevReported
+          || Math.abs(prevReported.lat - lat) >= 1e-6
+          || Math.abs(prevReported.lng - lng) >= 1e-6;
+        if (moved) {
+          lastReportedCenterRef.current = { lat, lng };
+          onLiveCenterChangeRef.current?.(lat, lng);
+        }
+
         // Keep controlled Camera props in sync so sheet re-renders don't snap
         // back to the old live-GPS centerCoordinate.
         setCameraTarget((prev) => {
