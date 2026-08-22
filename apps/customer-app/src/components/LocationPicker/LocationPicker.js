@@ -35,6 +35,10 @@ import AppIcon from '../AppIcon';
 import PressableScale from '../PressableScale';
 
 const GPS_TIMEOUT_MS = 8000;
+// How stale a cached fix may be and still beat failing outright, when the
+// live fix above blows past GPS_TIMEOUT_MS. The pin stays draggable, so a
+// few-minute-old position is a fine starting point.
+const LAST_KNOWN_MAX_AGE_MS = 5 * 60 * 1000;
 // Delivery pin colors (not live GPS — live is the blue recenter FAB only).
 const CUSTOMER_COLOR = '#FF7A3A';
 const CUSTOMER_DARK = '#E05A1A';
@@ -68,13 +72,28 @@ const ZONE_COLOR_PALETTE = [
 ];
 
 // GPS can hang indefinitely on some devices; cap it so buttons never spin forever.
-function getPositionWithTimeout() {
-  return Promise.race([
-    Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('GPS_TIMEOUT')), GPS_TIMEOUT_MS),
-    ),
-  ]);
+async function getPositionWithTimeout() {
+  try {
+    return await Promise.race([
+      Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('GPS_TIMEOUT')), GPS_TIMEOUT_MS),
+      ),
+    ]);
+  } catch (err) {
+    // iOS keeps refining until it actually reaches Accuracy.High (~10 m) and
+    // regularly blows past the cap on a cold indoor fix, where Android's
+    // fused provider would have handed back a cached one immediately. That
+    // made this reject on iPhone only, which the checkout then reported as a
+    // permission problem the user could never fix by granting permission.
+    // A slightly stale fix is a far better starting pin than a hard failure —
+    // the pin stays draggable either way.
+    const lastKnown = await Location
+      .getLastKnownPositionAsync({ maxAge: LAST_KNOWN_MAX_AGE_MS })
+      .catch(() => null);
+    if (lastKnown?.coords) return lastKnown;
+    throw err;
+  }
 }
 
 // Standard ray-casting point-in-polygon test against a zone's boundary
@@ -494,7 +513,7 @@ export default function LocationPicker({
             ? 'Location blocked. Open Settings → Location → Allow (Precise).'
             : 'Allow precise location to use live GPS, or pan the map instead.',
         );
-        onLocateStatusRef.current?.('error');
+        onLocateStatusRef.current?.('error', perm.needsSettings ? 'settings' : 'permission');
         // User tapped recenter and OS won't show the dialog again → open Settings.
         if (fromUser && perm.needsSettings) {
           openAppLocationSettings();
@@ -537,8 +556,11 @@ export default function LocationPicker({
       onLocateStatusRef.current?.('ready');
       return true;
     } catch (_) {
+      // Permission was already verified above, so this is a fix failure, not
+      // an access problem — say so, or the user is sent to grant a permission
+      // they have already granted.
       setGpsError('Could not get live location. Pan the map to pin it instead.');
-      onLocateStatusRef.current?.('error');
+      onLocateStatusRef.current?.('error', 'unavailable');
       dropPin();
       return false;
     } finally {

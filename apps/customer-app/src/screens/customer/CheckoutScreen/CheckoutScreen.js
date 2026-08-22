@@ -129,7 +129,7 @@ const getGpsErrorCopy = (code) => {
     case GPS_ERROR_TIMEOUT:
       return {
         title: "Couldn't get your location",
-        detail: 'GPS timed out.',
+        detail: 'GPS didn\'t respond in time. Drag the map to pin your address instead.',
       };
     case GPS_ERROR_SETTINGS:
       return {
@@ -714,7 +714,7 @@ export default function CheckoutScreen() {
   }, []);
 
   // Recenter / auto-locate status only — does not confirm delivery pin.
-  const handleLocateStatus = useCallback((status) => {
+  const handleLocateStatus = useCallback((status, reason) => {
     if (status === 'loading') {
       setGpsError(null);
       showMapToast('locating');
@@ -727,7 +727,15 @@ export default function CheckoutScreen() {
     }
     if (status === 'error') {
       setGpsStatus('error');
-      setGpsError(GPS_ERROR_DENIED);
+      // Only blame permissions when the picker actually reported a permission
+      // problem. Collapsing every failure to DENIED told iPhone users whose
+      // GPS fix merely timed out to grant a permission they already had —
+      // so retrying showed the same error forever.
+      setGpsError(
+        reason === 'permission' ? GPS_ERROR_DENIED
+          : reason === 'settings' ? GPS_ERROR_SETTINGS
+            : GPS_ERROR_TIMEOUT
+      );
       if (mapToastTimerRef.current) {
         clearTimeout(mapToastTimerRef.current);
         mapToastTimerRef.current = null;
