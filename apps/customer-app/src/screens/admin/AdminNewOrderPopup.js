@@ -16,7 +16,7 @@ function formatPlacedAt(iso) {
   if (diffSec < 60) return `${diffSec} sec ago`;
   const min = Math.floor(diffSec / 60);
   if (min < 60) return `${min} min ago`;
-  return then.toLocaleString();
+  return then.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 }
 
 function formatCurrency(value) {

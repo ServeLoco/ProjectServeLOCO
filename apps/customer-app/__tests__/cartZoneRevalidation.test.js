@@ -100,6 +100,41 @@ describe('syncDeliveryLocation revalidates the cart on a zone change', () => {
     expect(cartApi.calculate).toHaveBeenCalledTimes(1);
   });
 
+  // revalidateCartForZoneChange is fire-and-forget from sync()'s point of
+  // view and can take an abnormally long time to resolve (slow network,
+  // slow device) — long enough for the customer to move to a different pin
+  // before its cart/calculate response comes back. Applying that response
+  // at that point would prune/re-price the cart against coordinates nobody
+  // cares about anymore.
+  it('discards a revalidateCartForZoneChange response that resolves after the pin has since moved on', async () => {
+    useDeliveryLocationStore.setState({
+      zoneId: 9, zoneName: 'Zone A', source: 'gps', coords: { lat: 12.9, lng: 77.6 },
+    });
+    useCartStore.setState({ items: [CART_ITEM] });
+
+    let resolveRevalidation;
+    cartApi.calculate
+      .mockResolvedValueOnce(zoneCalculateResponse({ zoneId: 12, zoneName: 'Zone B' })) // zone check
+      .mockReturnValueOnce(new Promise((resolve) => { resolveRevalidation = resolve; })); // revalidation, held open
+
+    const syncPromise = syncDeliveryLocation();
+    const flush = () => new Promise((r) => setImmediate(r));
+    await flush(); await flush(); await flush();
+
+    // Pin moves on before the slow revalidation response comes back.
+    useDeliveryLocationStore.setState({ coords: { lat: 40.0, lng: 50.0 } });
+
+    resolveRevalidation(zoneCalculateResponse({
+      zoneId: 12, zoneName: 'Zone B',
+      unavailableItems: [{ id: 501, type: 'product', reason: 'product_unavailable' }],
+    }));
+    await syncPromise;
+    await flush(); await flush();
+
+    expect(useCartStore.getState().items).toHaveLength(1);
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
   it('drops unavailable lines and toasts when the new zone invalidates a cart item', async () => {
     useDeliveryLocationStore.setState({ zoneId: 9, zoneName: 'Zone A', source: 'gps' });
     useCartStore.setState({ items: [CART_ITEM] });
@@ -221,6 +256,82 @@ describe('syncDeliveryLocation revalidates the cart on a zone change', () => {
       const state = useDeliveryLocationStore.getState();
       expect(state.coords).toEqual({ lat: 13.5, lng: 80.2 });
       expect(state.source).toBe('gps');
+    });
+
+    // A real GPS fetch can take up to GPS_TIMEOUT_MS — long enough for the
+    // customer to open Change Location and confirm a NEW pin before it
+    // resolves. That later, explicit choice must win: applying the
+    // now-stale GPS fix would snap the pin back and (via the area-mismatch
+    // check) wipe whatever the customer just added to the cart under the
+    // new pin's area.
+    it('does not clobber a manual pin set while the GPS fetch was still in flight', async () => {
+      let resolveGps;
+      Location.getCurrentPositionAsync.mockReturnValue(
+        new Promise((resolve) => { resolveGps = resolve; })
+      );
+      useCartStore.setState({ items: [CART_ITEM] });
+
+      const syncPromise = syncDeliveryLocation();
+      // Let sync() run past its own awaits (waitForHydration, the
+      // permission check) so it actually reads+captures the ORIGINAL pin
+      // before we change it — otherwise this test would race ahead of the
+      // function under test instead of reproducing the real race against it.
+      const flush = () => new Promise((r) => setImmediate(r));
+      await flush(); await flush(); await flush(); await flush();
+
+      // The customer picks a different manual pin mid-flight, in a
+      // different area — this is exactly what Home's Change Location does.
+      useDeliveryLocationStore.getState().setManualLocation(20.1, 90.2, true, 'Zone C', 40);
+      useDeliveryLocationStore.setState({ areaId: 99, areaName: 'Area Nine' });
+
+      resolveGps({ coords: { latitude: 13.5, longitude: 80.2 } });
+      await syncPromise;
+
+      const state = useDeliveryLocationStore.getState();
+      expect(state.coords).toEqual({ lat: 20.1, lng: 90.2 });
+      expect(state.source).toBe('manual');
+      // The cart must survive — the stale GPS fix was never applied, so the
+      // area-mismatch cart wipe in applyBootstrapResult never fires either.
+      expect(useCartStore.getState().items).toHaveLength(1);
+    });
+
+    // syncDeliveryLocation's outer Promise.race only stops the CALLER from
+    // waiting past INITIAL_SYNC_TIMEOUT_MS — it does not cancel `sync()`,
+    // which keeps running on real device GPS that can hang well past that.
+    // A sync the app has already given up on (isInitialSyncComplete already
+    // flipped, the customer already shopping normally) must not be allowed
+    // to resolve later and silently apply a now-irrelevant fix.
+    it('does not apply a GPS fix (or touch the cart) once the sync has timed out and been abandoned', async () => {
+      jest.useFakeTimers();
+      try {
+        let resolveGps;
+        Location.getCurrentPositionAsync.mockReturnValue(
+          new Promise((resolve) => { resolveGps = resolve; })
+        );
+        useCartStore.setState({ items: [CART_ITEM] });
+        useDeliveryLocationStore.setState({ zoneId: 9 });
+
+        const syncPromise = syncDeliveryLocation();
+        // INITIAL_SYNC_TIMEOUT_MS (10s) elapses with GPS still pending —
+        // the outer race gives up and markInitialSyncComplete() would have
+        // already fired for the caller.
+        await jest.advanceTimersByTimeAsync(10_000);
+
+        // The real GPS fetch finally resolves anyway, in a different zone —
+        // exactly the shape that would normally trigger a cart revalidation.
+        cartApi.calculate.mockResolvedValue(zoneCalculateResponse({
+          zoneId: 12, zoneName: 'Zone B', unavailableItems: [{ id: 501, type: 'product', reason: 'product_unavailable' }],
+        }));
+        resolveGps({ coords: { latitude: 13.5, longitude: 80.2 } });
+        await syncPromise;
+
+        // Nothing from the abandoned sync was applied: no GPS fix stored,
+        // no cart pruning.
+        expect(useDeliveryLocationStore.getState().source).not.toBe('gps');
+        expect(useCartStore.getState().items).toHaveLength(1);
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 

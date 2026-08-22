@@ -44,7 +44,7 @@ function parsePhones(input) {
 function formatDateTime(value) {
   if (!value) return '';
   const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString();
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 }
 
 /**

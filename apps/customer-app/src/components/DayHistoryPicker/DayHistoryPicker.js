@@ -14,13 +14,20 @@ import AppIcon from '../AppIcon';
 import { todayDateStr } from '../../utils/dateStr';
 
 const pad = (n) => String(n).padStart(2, '0');
-const toDateStr = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+// `date` here is a pure calendar-date container (not a real instant) —
+// anchored at UTC midnight so subtracting days can't cross a local DST/offset
+// boundary. Format it with timeZone: 'UTC' wherever it's displayed.
+const toDateStr = (d) => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 
 function buildDays(daysBack) {
   const days = [];
-  const now = new Date();
+  // Anchor on the IST calendar day (todayDateStr), not the device's local
+  // day — a device not set to IST would otherwise generate a day list that
+  // doesn't line up with the IST "Today"/"Yesterday" labels below.
+  const [ty, tm, td] = todayDateStr().split('-').map(Number);
+  const todayUtc = Date.UTC(ty, tm - 1, td);
   for (let i = 0; i < daysBack; i += 1) {
-    const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+    const d = new Date(todayUtc - i * 24 * 60 * 60 * 1000);
     days.push({ dateStr: toDateStr(d), date: d });
   }
   return days;
@@ -29,7 +36,7 @@ function buildDays(daysBack) {
 function labelFor(dateStr, date, todayStr, yesterdayStr) {
   if (dateStr === todayStr) return 'Today';
   if (dateStr === yesterdayStr) return 'Yesterday';
-  return date.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+  return date.toLocaleDateString('en-IN', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' });
 }
 
 /**

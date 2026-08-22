@@ -99,6 +99,7 @@ export default function HomeScreen() {
   // every admin-configured zone. insideDeliveryZone is null until the first
   // check resolves, so the banner only shows once we actually know.
   const deliveryCoords = useDeliveryLocationStore(state => state.coords);
+  const deliveryAreaId = useDeliveryLocationStore(state => state.areaId);
   // TASK 28.3 — dashboard/store-modes fetches key off the live pin (the same
   // resolveCustomerArea chain the pin already drives everywhere else)
   // instead of the server's users.last_area_id/default fallback. A ref, not
@@ -112,7 +113,7 @@ export default function HomeScreen() {
   // these (applyBootstrapResult), so depending on them directly would rebuild
   // the callback on every success and re-fire the mount effect in a loop.
   const deliveryAreaIdRef = useRef(null);
-  deliveryAreaIdRef.current = useDeliveryLocationStore(state => state.areaId);
+  deliveryAreaIdRef.current = deliveryAreaId;
   const deliveryCatalogVersionRef = useRef(null);
   deliveryCatalogVersionRef.current = useDeliveryLocationStore(state => state.catalogVersion);
   const insideDeliveryZone = useDeliveryLocationStore(state => state.insideZone);
@@ -339,15 +340,22 @@ export default function HomeScreen() {
   // Skipped on the first resolve (null -> id) — nothing is cached yet then,
   // and clearing would only throw away the in-flight mount fetch.
   const lastZoneIdRef = useRef(deliveryZoneId);
+  const lastAreaIdRef = useRef(deliveryAreaId);
   useEffect(() => {
-    if (lastZoneIdRef.current === deliveryZoneId) return;
-    const hadZone = lastZoneIdRef.current !== null && lastZoneIdRef.current !== undefined;
+    const previousZoneId = lastZoneIdRef.current;
+    const previousAreaId = lastAreaIdRef.current;
+    const zoneChanged = previousZoneId !== deliveryZoneId;
+    const areaChanged = previousAreaId !== deliveryAreaId;
+    if (!zoneChanged && !areaChanged) return;
     lastZoneIdRef.current = deliveryZoneId;
-    if (!hadZone) return;
+    lastAreaIdRef.current = deliveryAreaId;
+    const hadResolvedLocation = (previousZoneId !== null && previousZoneId !== undefined)
+      || (previousAreaId !== null && previousAreaId !== undefined);
+    if (!hadResolvedLocation) return;
     sectionsCacheRef.current = {};
     prefetchedModesRef.current = new Set();
     invalidate('dashboard:');
-  }, [deliveryZoneId]);
+  }, [deliveryAreaId, deliveryZoneId]);
 
   // Staggered entry for cards
   const staggerCatAnims = useRef(Array.from({ length: 12 }, () => new Animated.Value(0))).current;
@@ -885,6 +893,7 @@ export default function HomeScreen() {
         removeItem={removeItem}
         requireAuth={requireAuth}
         onOpenVariantSheet={setVariantSheetProduct}
+        deliveryCoords={deliveryCoords}
       />
 
       {/* Search backdrop — dims the dashboard so the dropdown reads clearly */}
@@ -1323,6 +1332,7 @@ function HomeHeader({
   removeItem,
   requireAuth,
   onOpenVariantSheet,
+  deliveryCoords = null,
 }) {
   const pulseOpacity = pulseAnim.interpolate({
     inputRange: [1, 1.45],
@@ -1567,8 +1577,8 @@ function HomeHeader({
         // last_area_id from) — every customer would search the SAME area's
         // catalog regardless of where they actually are (multi-area audit
         // finding #4).
-        latitude: deliveryCoordsRef.current?.lat,
-        longitude: deliveryCoordsRef.current?.lng,
+        latitude: deliveryCoords?.lat,
+        longitude: deliveryCoords?.lng,
       });
       const items = asArray(response, ['products']).map(normalizeProduct);
       setSearchResults(items);
@@ -1577,7 +1587,7 @@ function HomeHeader({
     } finally {
       setIsSearching(false);
     }
-  }, [isLocationGated]);
+  }, [isLocationGated, deliveryCoords]);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);

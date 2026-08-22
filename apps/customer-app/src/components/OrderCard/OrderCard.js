@@ -35,7 +35,7 @@ function OrderCard({ order = {}, onViewDetails, onCancel, cancellable = false, s
   const statusColor = statusColors[status] || { bg: colors.bgDisabled, text: colors.textSecondary };
 
   const formattedDate = createdAt
-    ? new Date(createdAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })
+    ? new Date(createdAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short' })
     : '';
 
   return (

@@ -34,6 +34,11 @@ const shopApi = {
     apiClient.patch(`/shop/orders/${orderId}/reject`, {}, { auth: 'customer' }),
   readyOrder: (orderId) =>
     apiClient.patch(`/shop/orders/${orderId}/ready`, {}, { auth: 'customer' }),
+  // Fire-and-forget proof-of-delivery: tells the server this device actually
+  // displayed the new-order alarm, so the weak-network reminder sweeper can
+  // ease off cadence instead of assuming the push never landed.
+  ackOrderAlert: (orderId) =>
+    apiClient.post(`/shop/orders/${orderId}/alert-ack`, {}, { auth: 'customer' }),
   getMyGroups: () => apiClient.get('/shop/groups', { auth: 'customer' }),
   createGroup: (name) => apiClient.post('/shop/groups', { name }, { auth: 'customer' }),
   updateGroup: (id, data) => apiClient.patch(`/shop/groups/${id}`, data, { auth: 'customer' }),

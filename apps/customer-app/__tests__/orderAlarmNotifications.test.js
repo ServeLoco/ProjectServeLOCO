@@ -24,7 +24,11 @@ jest.mock('../src/hooks/useLocalNotifications', () => ({
 }));
 
 jest.mock('../src/api/shopApi', () => ({
-  shopApi: { confirmOrder: jest.fn().mockResolvedValue({}), rejectOrder: jest.fn().mockResolvedValue({}) },
+  shopApi: {
+    confirmOrder: jest.fn().mockResolvedValue({}),
+    rejectOrder: jest.fn().mockResolvedValue({}),
+    ackOrderAlert: jest.fn().mockResolvedValue({}),
+  },
 }));
 
 jest.mock('../src/api/riderApi', () => ({
@@ -121,6 +125,9 @@ describe('orderAlarmNotifications', () => {
       // capped at MAX_ORDER_ALARM_RING_MS since shop orders have no server expiry.
       expect(call.android.timeoutAfter).toBeGreaterThan(Date.now());
       expect(call.android.timeoutAfter).toBeLessThanOrEqual(Date.now() + 5 * 60 * 1000 + 1000);
+      // Proof-of-delivery: the alarm rang on this device, so the server's
+      // weak-network reminder sweeper should hear about it and ease off.
+      expect(shopApi.ackOrderAlert).toHaveBeenCalledWith('10');
     });
 
     it('displays a full-screen alarm for a rider offer alert', async () => {
@@ -139,6 +146,9 @@ describe('orderAlarmNotifications', () => {
       // Bounded by the offer's own expiresAt (~120s out here), not left open-ended.
       expect(call.android.timeoutAfter).toBeGreaterThan(Date.now());
       expect(call.android.timeoutAfter).toBeLessThanOrEqual(Date.now() + 121000);
+      // Ack is a shop-alert-only concept — rider offers have their own
+      // accept/expire flow and must not call it.
+      expect(shopApi.ackOrderAlert).not.toHaveBeenCalled();
     });
 
     it('skips re-displaying the same offer within the dedupe window (server reminder resend)', async () => {

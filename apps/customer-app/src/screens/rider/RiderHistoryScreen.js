@@ -21,7 +21,8 @@ function formatWhen(value) {
   try {
     const d = new Date(value);
     if (Number.isNaN(d.getTime())) return '';
-    return d.toLocaleString(undefined, {
+    return d.toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
       month: 'short',
       day: 'numeric',
       hour: '2-digit',

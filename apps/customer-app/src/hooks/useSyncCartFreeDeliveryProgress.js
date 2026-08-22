@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 import { cartApi } from '../api/cartApi';
 import { useCartStore } from '../stores';
+import { useDeliveryLocationStore } from '../stores/useDeliveryLocationStore';
 import { normalizeCartCalculation } from '../utils';
 
 /**
@@ -81,6 +82,12 @@ export function useSyncCartFreeDeliveryProgress({ enabled = true, debounceMs = 3
         const lines = (liveItems || []).filter((item) => item?.product?.id);
         if (!lines.length) return;
 
+        // Without the pin, the server falls back to the account's
+        // last/default area (resolveCustomerArea) instead of wherever the
+        // customer's cart actually was assembled — every line looks
+        // "unavailable" there and removeUnavailableItems below silently
+        // empties the cart a few hundred ms after every add.
+        const { coords } = useDeliveryLocationStore.getState();
         const payload = {
           items: lines.map((item) => ({
             productId: item.product.id,
@@ -92,6 +99,8 @@ export function useSyncCartFreeDeliveryProgress({ enabled = true, debounceMs = 3
           coupon_code: code || undefined,
           coupon_id: !code && couponId ? couponId : undefined,
           no_auto_apply: noAuto,
+          latitude: coords?.lat,
+          longitude: coords?.lng,
         };
 
         const calculated = normalizeCartCalculation(await cartApi.calculate(payload));

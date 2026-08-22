@@ -332,6 +332,18 @@ export async function displayAlarmNotification(data) {
     // OEM-safe audible path: ColorOS often mutes channel sounds; media stack works.
     // Shop + rider: loop until accept/reject (stop via cancel*Alarm).
     await playAlarmSound(isRider ? 'rider' : 'order', { untilStopped: true });
+
+    // Proof-of-delivery for the killed-app path: the notifee alarm above just
+    // rang on THIS device, so tell the server — shopAlertSweeper eases off its
+    // reminder cadence once it knows the push actually landed, instead of
+    // continuing to blast at full frequency as if the phone were still dark.
+    // Fire-and-forget; must never block or fail the alarm display.
+    if (!isRider) {
+      const orderId = data.orderId || data.order_id;
+      if (orderId) {
+        shopApi.ackOrderAlert(orderId).catch(() => {});
+      }
+    }
   } catch (err) {
     clearAlarmActive(isRider ? 'rider' : 'order');
     console.warn('[orderAlarm] display failed:', err?.message || err);

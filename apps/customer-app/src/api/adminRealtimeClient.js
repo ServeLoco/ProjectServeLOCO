@@ -7,7 +7,7 @@ import { getRealtimeBaseUrl } from './realtimeConfig';
 // JWT (role: 'admin') to join the `admin` room server-side; the customer
 // socket (role: 'customer') never receives these events. Event names mirror
 // apps/admin/src/api/realtimeClient.js (web) so both clients stay in sync.
-const ADMIN_ORDER_EVENTS = ['admin.order.created', 'admin.order.updated', 'admin.order.shop_confirmed', 'admin.order.shop_ready'];
+const ADMIN_ORDER_EVENTS = ['admin.order.created', 'admin.order.updated', 'admin.order.shop_confirmed', 'admin.order.shop_ready', 'admin.order.item_replaced'];
 const ADMIN_NOTIFICATION_EVENTS = [
   'admin.notification.created',
   'admin.notification.unread_count',

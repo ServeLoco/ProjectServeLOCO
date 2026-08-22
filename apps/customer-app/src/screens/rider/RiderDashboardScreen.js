@@ -24,6 +24,8 @@ import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useRiderOfferAlert } from '../../hooks/useRiderOfferAlert';
 import { useRiderLocationTracking } from '../../hooks/useRiderLocationTracking';
 import { useRiderIdleLocationPing } from '../../hooks/useRiderIdleLocationPing';
+import { useRiderBackgroundLocationTracking } from '../../hooks/useRiderBackgroundLocationTracking';
+import { RiderBackgroundLocationDisclosure } from '../../components/RiderBackgroundLocationDisclosure';
 import {
   getRiderActionFlags,
   isOutForDelivery,
@@ -300,6 +302,15 @@ export default function RiderDashboardScreen({ navigation }) {
   // distance from the pickup shop, and a rider who never pings is invisible to
   // the near rings. Stops the moment a job starts (the watcher above takes over).
   useRiderIdleLocationPing(isOnline, Boolean(assignment));
+
+  // Background-capable twin of the idle ping above — keeps position fresh for
+  // the server's nearest-ring offer match even while the app is backgrounded
+  // or the screen is locked. Same online/no-job scope, separate OS permission.
+  const {
+    disclosureVisible: bgLocationDisclosureVisible,
+    onDisclosureAllow: handleBgLocationDisclosureAllow,
+    onDisclosureDecline: handleBgLocationDisclosureDecline,
+  } = useRiderBackgroundLocationTracking(isOnline, Boolean(assignment));
 
   const handleToggle = useCallback(async (next) => {
     const prev = isOnline;
@@ -929,6 +940,12 @@ export default function RiderDashboardScreen({ navigation }) {
           queueTotal={offerQueue.length}
         />
       ) : null}
+
+      <RiderBackgroundLocationDisclosure
+        visible={bgLocationDisclosureVisible}
+        onAllow={handleBgLocationDisclosureAllow}
+        onDecline={handleBgLocationDisclosureDecline}
+      />
     </SafeAreaView>
   );
 }

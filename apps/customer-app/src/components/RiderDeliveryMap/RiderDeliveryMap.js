@@ -249,7 +249,7 @@ export default function RiderDeliveryMap({ order, pickedUp, style, onRouteInfo }
 
       if (cancelled) return;
 
-      sub = await Location.watchPositionAsync(
+      const watchSub = await Location.watchPositionAsync(
         RIDER_WATCH_OPTIONS,
         (pos) => {
           const { latitude, longitude, heading } = pos.coords || {};
@@ -258,6 +258,11 @@ export default function RiderDeliveryMap({ order, pickedUp, style, onRouteInfo }
           maybeSendPing({ latitude, longitude, heading });
         },
       );
+      if (cancelled) {
+        watchSub?.remove?.();
+        return;
+      }
+      sub = watchSub;
     })();
 
     return () => {

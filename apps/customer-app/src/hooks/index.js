@@ -15,6 +15,7 @@ export * from './useRiderOfferAlert';
 export * from './useRiderLocationTracking';
 export * from './useRiderLocationPermission';
 export * from './useRiderIdleLocationPing';
+export * from './useRiderBackgroundLocationTracking';
 export * from './usePreciseLocationPermissionOnStart';
 export * from './useHomeLocationPermission';
 export * from './useNewOrderAlert';

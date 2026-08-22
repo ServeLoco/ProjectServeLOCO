@@ -53,7 +53,6 @@ export default function CategoriesScreen() {
     [items]
   );
   
-  const { modes } = useStoreModes();
   const [storeType, setStoreType] = useState(route.params?.storeType || 'packed');
   const [activeChip, setActiveChip] = useState('All');
 
@@ -63,6 +62,9 @@ export default function CategoriesScreen() {
   // panel is zone-based, so category browsing must never show items before
   // we actually know the pin's zone.
   const deliveryCoords = useDeliveryLocationStore(state => state.coords);
+  const deliveryCoordsRef = useRef(deliveryCoords);
+  deliveryCoordsRef.current = deliveryCoords;
+  const { modes } = useStoreModes(deliveryCoords);
   const insideDeliveryZone = useDeliveryLocationStore(state => state.insideZone);
   const deliveryZoneId = useDeliveryLocationStore(state => state.zoneId);
   const isInitialLocationSyncComplete = useDeliveryLocationStore(state => state.isInitialSyncComplete);
@@ -95,11 +97,11 @@ export default function CategoriesScreen() {
     // regardless of where they actually are (multi-area audit finding #4).
     const response = await productsApi.getCategories({
       type: storeType,
-      latitude: deliveryCoords?.lat,
-      longitude: deliveryCoords?.lng,
+      latitude: deliveryCoordsRef.current?.lat,
+      longitude: deliveryCoordsRef.current?.lng,
     });
     return asArray(response, ['categories']).map(normalizeCategory);
-  }, [storeType, deliveryCoords]);
+  }, [storeType]);
 
   const {
     data: categoriesData,

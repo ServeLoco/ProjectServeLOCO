@@ -101,6 +101,27 @@ function mergeAdminOrderPatch(order, payload = {}) {
     next.total = payload.total;
   }
 
+  if (payload.subtotal !== undefined && payload.subtotal !== null) {
+    next.subtotal = payload.subtotal;
+  }
+
+  // admin.order.item_replaced — swap the matching order_items row in place,
+  // same as the web admin panel's mergeAdminOrderPatch.
+  if (payload.itemId != null && payload.newProduct && Array.isArray(next.items)) {
+    const itemId = Number(payload.itemId);
+    next.items = next.items.map((it) => (
+      Number(it.id) === itemId
+        ? {
+          ...it,
+          product_id: payload.newProduct.productId,
+          product_name: payload.newProduct.productName,
+          unit_price: payload.newProduct.unitPrice,
+          line_total: payload.newProduct.lineTotal,
+        }
+        : it
+    ));
+  }
+
   if (updatedAt) {
     next.updated_at = updatedAt;
     next.updatedAt = updatedAt;

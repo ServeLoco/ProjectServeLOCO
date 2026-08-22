@@ -529,7 +529,7 @@ export default function ProfileScreen() {
               Your account and data will be permanently deleted on{' '}
               <Text style={styles.deletionBannerDate}>
                 {new Date(new Date(profile.deletionRequestedAt).getTime() + 30 * 24 * 60 * 60 * 1000)
-                  .toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                  .toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', year: 'numeric' })}
               </Text>{' '}
               (30 days from confirmation).
             </Text>

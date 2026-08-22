@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from 'react';
-import { StyleSheet, Text, View, Animated, Easing, Image } from 'react-native';
+import { StyleSheet, Text, View, Animated, Easing } from 'react-native';
+import { Image } from 'expo-image';
 import { colors, typography, spacing } from '../../theme';
 import { useReducedMotion } from '../../utils';
 import AppIcon from '../AppIcon';
@@ -204,7 +205,7 @@ function SegmentedControl({
                     <Image
                       source={{ uri: iconUrl }}
                       style={{ width: size, height: size, borderRadius: size / 2 }}
-                      resizeMode="cover"
+                      contentFit="cover"
                     />
                   ) : (
                     <AppIcon

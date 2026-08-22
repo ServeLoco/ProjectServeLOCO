@@ -239,8 +239,10 @@ export default function LocationPicker({
   });
 
   // Active delivery zone boundaries, shaded on the map so the customer can
-  // see where to drop the pin instead of guessing. Geometry-only, fetched
-  // once — zone shape edits are rare enough not to need realtime sync here.
+  // see where to drop the pin instead of guessing. Every active zone across
+  // every area — the customer can be physically anywhere, independent of
+  // the area they last ordered from — fetched once since zone shape edits
+  // are rare enough not to need realtime sync here.
   const [deliveryZones, setDeliveryZones] = useState([]);
   // Zones load async and can still be empty right when live GPS resolves
   // (both kick off near mount) — the out-of-zone check reads this ref at

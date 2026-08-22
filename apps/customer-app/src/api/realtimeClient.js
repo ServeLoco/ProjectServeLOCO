@@ -10,6 +10,7 @@ const ORDER_EVENTS = [
   'order.status.updated',
   'order.payment.updated',
   'order.updated',
+  'order.item.replaced',
   'shop.order.assigned',
   'shop.order.cancelled',
   // Admin (or another device) confirmed / ready / rejected — shop dashboard refetches.

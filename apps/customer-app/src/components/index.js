@@ -49,3 +49,4 @@ export { default as RiderDeliveryMap } from './RiderDeliveryMap';
 // AnimatedIllustration/STEPS — LocationPermissionGate.js itself is dead and
 // safe to delete.
 export { default as LocationPermissionCard } from './LocationPermissionCard';
+export { default as RiderBackgroundLocationDisclosure } from './RiderBackgroundLocationDisclosure';

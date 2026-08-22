@@ -20,7 +20,7 @@ function formatWhen(value) {
   try {
     const d = new Date(value);
     if (Number.isNaN(d.getTime())) return '';
-    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   } catch {
     return '';
   }

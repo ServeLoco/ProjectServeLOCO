@@ -83,9 +83,13 @@ function ProductCard({
   // +/- stepper — a "+" can't know which variant to increment.
   const resolvedVariants = product.variants ?? [];
   const isMultiVariant = resolvedVariants.length > 1;
-  const displayPrice = Math.floor(Number(
+  const rawDisplayPrice = Math.floor(Number(
     isMultiVariant ? (product.minPrice ?? product.min_price ?? resolvedPrice) : resolvedPrice
   ));
+  const displayPrice = Number.isFinite(rawDisplayPrice) ? rawDisplayPrice : 0;
+
+  const rawOriginalPrice = Math.floor(Number(resolvedOriginalPrice));
+  const showOriginalPrice = !isMultiVariant && resolvedOriginalPrice != null && Number.isFinite(rawOriginalPrice);
 
   const pressAnim = useRef(new Animated.Value(0)).current;
 
@@ -312,9 +316,9 @@ function ProductCard({
                 <Text style={[styles.price, compact && styles.priceCompact]} numberOfLines={1}>
                   ₹{displayPrice}
                 </Text>
-                {!isMultiVariant && resolvedOriginalPrice ? (
+                {showOriginalPrice ? (
                   <Text style={[styles.originalPrice, compact && styles.originalPriceCompact]} numberOfLines={1}>
-                    ₹{Math.floor(Number(resolvedOriginalPrice))}
+                    ₹{rawOriginalPrice}
                   </Text>
                 ) : null}
               </View>
