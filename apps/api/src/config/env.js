@@ -93,6 +93,13 @@ const config = {
   RIDER_CAPACITY_MULTIPLIER: Number(process.env.RIDER_CAPACITY_MULTIPLIER) || 3,
   // Cooldown minutes surfaced to the customer in the at-capacity message.
   RIDER_CAPACITY_COOLDOWN_MIN: Number(process.env.RIDER_CAPACITY_COOLDOWN_MIN) || 29,
+  // Only orders created inside this window count toward capacity. Without a
+  // bound, an order stuck non-terminal forever (failAssignment deliberately
+  // does NOT auto-cancel — it waits for an admin) would consume a rider slot
+  // permanently, and enough of them would block an area's checkout for good.
+  // 180 min is well past a realistic worst case (10 min shop confirm + 30 min
+  // rider search + pickup + delivery).
+  RIDER_CAPACITY_LOOKBACK_MIN: Number(process.env.RIDER_CAPACITY_LOOKBACK_MIN) || 180,
 
   // Shop auto-open/auto-close schedule sweeper.
   // Wall-clock zone the admin enters open_time/close_time in. The API

@@ -147,6 +147,22 @@ describe('POST /api/orders — rider capacity gate', () => {
     expect(sql).not.toMatch(/status NOT IN/);
     expect(params).toContain(ACTIVE_ORDER_STATUSES);
   });
+
+  // failAssignment deliberately leaves an order non-terminal for an admin to
+  // resolve, so without a recency bound a permanently-stuck order would eat a
+  // rider slot forever and enough of them would block the area's checkout for
+  // good — behind a "try again in 29 minutes" message that never comes true.
+  it('only counts recent orders, so a permanently-stuck one cannot eat a rider slot forever', async () => {
+    const conn = mockConnectionFor({ online_riders: 1, active_orders: 0 });
+    pool.getConnection.mockResolvedValue(conn);
+
+    await placeOrder();
+
+    const [sql, params] = conn.query.mock.calls[1];
+    expect(sql).toMatch(/created_at > NOW\(\) - INTERVAL \? MINUTE/);
+    expect(params).toContain(config.RIDER_CAPACITY_LOOKBACK_MIN);
+    expect(config.RIDER_CAPACITY_LOOKBACK_MIN).toBeGreaterThan(0);
+  });
 });
 
 describe('listEligibleRiders — per-rider active-order cap', () => {

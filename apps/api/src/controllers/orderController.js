@@ -236,9 +236,14 @@ const createOrder = async (req, res) => {
               (SELECT COUNT(*) FROM riders r
                 WHERE r.active = 1 AND r.is_online = 1 AND r.area_id = ?) AS online_riders,
               (SELECT COUNT(*) FROM orders o
-                WHERE o.area_id = ? AND o.status IN (?)) AS active_orders
+                WHERE o.area_id = ? AND o.status IN (?)
+                  AND o.created_at > NOW() - INTERVAL ? MINUTE) AS active_orders
        FROM settings WHERE area_id = ? LIMIT 1`,
-      [deliveryAreaId, deliveryAreaId, ACTIVE_ORDER_STATUSES, deliveryAreaId]
+      [
+        deliveryAreaId,
+        deliveryAreaId, ACTIVE_ORDER_STATUSES, config.RIDER_CAPACITY_LOOKBACK_MIN,
+        deliveryAreaId,
+      ]
     );
     const settings = settingRows[0];
 
