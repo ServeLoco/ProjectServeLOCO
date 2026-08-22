@@ -10,6 +10,27 @@ const extractToken = (req) => {
   return null;
 };
 
+// Shared by requireAdmin (HTTP) and socket.js's connection auth (realtime) —
+// both need the same "is this admin still valid, right now" answer, not
+// whatever role/area a JWT up to ADMIN_JWT_EXPIRES_IN (12h) old happened to
+// carry. Returns:
+//   null        — nothing to re-check (no adminRole claim, a mobile-admin
+//                 session, or an envFallback bootstrap login) — caller keeps
+//                 the JWT's claims as-is.
+//   'revoked'   — the admins row is gone or inactive — caller must treat
+//                 the session as dead.
+//   {role, area_id} — the live row: caller overwrites its stale claims.
+const getLiveAdminState = async (payload) => {
+  if (payload.adminRole === undefined || payload.envFallback) return null;
+  const adminIdRaw = payload.sub || payload.id;
+  if (!/^\d+$/.test(String(adminIdRaw))) return null;
+
+  const [adminRows] = await pool.query('SELECT role, area_id, active FROM admins WHERE id = ?', [Number(adminIdRaw)]);
+  const adminRow = adminRows[0];
+  if (!adminRow || !adminRow.active) return 'revoked';
+  return adminRow;
+};
+
 const requireCustomer = async (req, res, next) => {
   const token = extractToken(req);
   if (!token) {
@@ -104,25 +125,27 @@ const requireAdmin = async (req, res, next) => {
     // (§H10) and can't express "just this one admin", so this is separate.
     // Excludes mobile-admin sessions (sub is "mobile:<id>", not numeric —
     // they're mobile_admins rows, not admins rows) and the legacy env-
-    // password bootstrap super_admin (sub is ADMIN_OWNER_ID, a non-numeric
-    // string) — neither has an admins-table row to re-check.
-    const adminIdRaw = payload.sub || payload.id;
-    if (payload.adminRole !== undefined && /^\d+$/.test(String(adminIdRaw))) {
-      let adminRows;
-      try {
-        [adminRows] = await pool.query('SELECT role, area_id, active FROM admins WHERE id = ?', [Number(adminIdRaw)]);
-      } catch (error) {
-        return next(error);
-      }
-      const adminRow = adminRows[0];
-      if (!adminRow || !adminRow.active) {
+    // password bootstrap super_admin (payload.envFallback — see
+    // utils/auth.js's signAdminToken) — neither has an admins-table row to
+    // re-check. envFallback is an explicit claim, not inferred from
+    // whether `sub` looks numeric: ADMIN_OWNER_ID has no format
+    // requirement, and a numeric value used to make this branch 401 every
+    // env-fallback login forever (the emergency recovery path breaking
+    // exactly when it's needed).
+    try {
+      const liveState = await getLiveAdminState(payload);
+      if (liveState === 'revoked') {
         return res.status(401).json({ code: 'UNAUTHORIZED', message: 'Session is no longer valid. Please log in again.' });
       }
-      // The live row wins over the (up to 12h stale) JWT claim — a
-      // demoted/reassigned admin must not keep acting under their old
-      // role/area for the rest of the token's life.
-      payload.adminRole = adminRow.role;
-      payload.areaId = adminRow.area_id;
+      if (liveState) {
+        // The live row wins over the (up to 12h stale) JWT claim — a
+        // demoted/reassigned admin must not keep acting under their old
+        // role/area for the rest of the token's life.
+        payload.adminRole = liveState.role;
+        payload.areaId = liveState.area_id;
+      }
+    } catch (error) {
+      return next(error);
     }
   }
 
@@ -163,4 +186,5 @@ module.exports = {
   requireCustomer,
   requireAdmin,
   requireSuperAdmin,
+  getLiveAdminState,
 };

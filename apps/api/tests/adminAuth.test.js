@@ -21,7 +21,12 @@ const BCRYPT_ROUNDS = 4;
 
 describe('Admin Auth Tests', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    // resetAllMocks, not clearAllMocks: clearAllMocks wipes call history but
+    // leaves queued mockResolvedValueOnce values in place, so a test whose
+    // code path consumes fewer pool.query calls than it queued bleeds the
+    // leftovers into the next test — which reads as an unrelated failure
+    // several tests later.
+    jest.resetAllMocks();
     delete process.env.ADMIN_OWNER_ID;
     delete process.env.ADMIN_PASSWORD;
     delete process.env.ADMIN_PASSWORD_HASH;

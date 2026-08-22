@@ -22,11 +22,15 @@ const SCREEN_WHITELIST = new Set([
 const DEFAULT_INTERVAL_MS = 5000;
 
 /**
- * @param {{sessionStore:{openSession:Function,closeSession:Function}, emitToAdmins:Function}} deps
+ * @param {{sessionStore:{openSession:Function,closeSession:Function}, emitToAdmins:Function,
+ *   isSocketAlive?:(socketId:string)=>boolean}} deps
+ *   isSocketAlive is the liveness probe for the reaper below (socket.js passes
+ *   io.sockets.sockets.has). Optional: omitted in unit tests, where there is no
+ *   socket.io server and the reaper is simply inert.
  * @param {{intervalMs?:number, now?:()=>Date}} [opts]
  */
 const createPresenceTracker = (deps, opts = {}) => {
-  const { sessionStore, emitToAdmins } = deps;
+  const { sessionStore, emitToAdmins, isSocketAlive } = deps;
   const intervalMs = opts.intervalMs || DEFAULT_INTERVAL_MS;
   const now = opts.now || (() => new Date());
 
@@ -54,6 +58,32 @@ const createPresenceTracker = (deps, opts = {}) => {
     // Admin sockets are never tracked as online users.
     if (meta?.role !== 'customer') return;
 
+    // Insert into the Map BEFORE any await. Previously the entry was written
+    // only after openSession's Mongo round-trip resolved, so a socket that
+    // disconnected inside that window hit removePresence while the Map was
+    // still empty — that call no-opped, and this set() then re-inserted an
+    // entry for an already-dead socket. Nothing could ever remove it: the
+    // Map has no TTL and 'disconnect' had already fired. The result was a
+    // permanent phantom "online" user (seen stuck at 20+ hours in the live
+    // analytics panel) plus an analytics_sessions doc never closed.
+    const entry = {
+      userId: meta.userId,
+      role: meta.role,
+      // Resolved by the caller (socket.js) at connect time — no pin exists
+      // at the socket layer (H7), so this is users.last_area_id → default
+      // area, same as the session doc opened below. May be null if even that
+      // fallback chain came up empty.
+      areaId: meta.areaId ?? null,
+      platform: meta.platform || null,
+      appVersion: meta.appVersion || null,
+      screen: null,
+      connectedAt: now(),
+      sessionId: null,
+      screens: {},
+    };
+    presence.set(socketId, entry);
+    resetPeakIfNewDay();
+
     let sessionId = null;
     try {
       sessionId = await sessionStore.openSession({
@@ -66,22 +96,19 @@ const createPresenceTracker = (deps, opts = {}) => {
       // fire-and-forget — sessionStore already swallows, but double-guard
     }
 
-    presence.set(socketId, {
-      userId: meta.userId,
-      role: meta.role,
-      // Resolved by the caller (socket.js) at connect time — no pin exists
-      // at the socket layer (H7), so this is users.last_area_id → default
-      // area, same as the session doc just opened above. May be null if
-      // even that fallback chain came up empty.
-      areaId: meta.areaId ?? null,
-      platform: meta.platform || null,
-      appVersion: meta.appVersion || null,
-      screen: null,
-      connectedAt: now(),
-      sessionId,
-      screens: {},
-    });
-    resetPeakIfNewDay();
+    if (presence.get(socketId) === entry) {
+      entry.sessionId = sessionId;
+      return;
+    }
+
+    // The socket disconnected (or was reaped) while openSession was in flight.
+    // removePresence already dropped the entry and saw sessionId still null,
+    // so it could not close the doc — close it here rather than resurrecting
+    // a dead entry in the Map.
+    if (sessionId) {
+      Promise.resolve(sessionStore.closeSession(sessionId, entry.screens, entry.connectedAt))
+        .catch(() => {});
+    }
   };
 
   const updateScreen = (socketId, screen) => {
@@ -100,6 +127,21 @@ const createPresenceTracker = (deps, opts = {}) => {
       await sessionStore.closeSession(entry.sessionId, entry.screens, entry.connectedAt);
     } catch (_) {
       // fire-and-forget
+    }
+  };
+
+  // Safety net. The addPresence race above is fixed, but the Map still has no
+  // TTL and its only eviction path is a 'disconnect' event — any future path
+  // that drops one (a handler throwing before removePresence, a socket the
+  // server tears down without emitting) leaks an entry that counts as online
+  // forever and rides in every 5s snapshot. Sweeping against the live socket
+  // set on the same timer bounds that to one interval, whatever the cause.
+  const reapDeadSockets = () => {
+    if (typeof isSocketAlive !== 'function') return;
+    for (const socketId of [...presence.keys()]) {
+      if (!isSocketAlive(socketId)) {
+        removePresence(socketId).catch(() => {});
+      }
     }
   };
 
@@ -175,6 +217,7 @@ const createPresenceTracker = (deps, opts = {}) => {
   // this socket-layer timer path (mirrors socket.js's own guard) so presence
   // unit tests stay DB-free.
   const emitLiveSnapshot = async () => {
+    reapDeadSockets();
     try {
       const areaIds = new Set();
       for (const entry of presence.values()) {
@@ -207,6 +250,7 @@ const createPresenceTracker = (deps, opts = {}) => {
     addPresence,
     updateScreen,
     removePresence,
+    reapDeadSockets,
     getLiveSnapshot,
     emitLiveSnapshot,
     stop,

@@ -462,23 +462,34 @@ const createAdmin = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: invariantError });
   }
 
-  const [existing] = await pool.query('SELECT id FROM admins WHERE username = ?', [finalUsername]);
-  if (existing.length > 0) {
-    return res.status(409).json({ code: 'CONFLICT', message: `Username "${finalUsername}" is already in use` });
-  }
-
   const passwordHash = await bcrypt.hash(password, 10);
   const finalAreaId = role === 'super_admin' ? null : Number(areaId);
-  const [result] = await pool.query(
-    `INSERT INTO admins (username, password_hash, role, area_id, display_name) VALUES (?, ?, ?, ?, ?)`,
-    [finalUsername, passwordHash, role, finalAreaId, displayName || displayNameSnake || null]
-  );
-
-  const [rows] = await pool.query(
-    `SELECT a.*, ar.code AS area_code FROM admins a LEFT JOIN areas ar ON ar.id = a.area_id WHERE a.id = ?`,
-    [result.insertId]
-  );
-  res.status(201).json({ message: 'Admin created', data: shapeAdmin(rows[0]) });
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    // Lock the username index range with the lookup so two concurrent creates
+    // cannot both pass the uniqueness check before either inserts.
+    const [existing] = await connection.query('SELECT id FROM admins WHERE username = ? FOR UPDATE', [finalUsername]);
+    if (existing.length > 0) {
+      await connection.rollback();
+      return res.status(409).json({ code: 'CONFLICT', message: `Username "${finalUsername}" is already in use` });
+    }
+    const [result] = await connection.query(
+      `INSERT INTO admins (username, password_hash, role, area_id, display_name) VALUES (?, ?, ?, ?, ?)`,
+      [finalUsername, passwordHash, role, finalAreaId, displayName || displayNameSnake || null]
+    );
+    const [rows] = await connection.query(
+      `SELECT a.*, ar.code AS area_code FROM admins a LEFT JOIN areas ar ON ar.id = a.area_id WHERE a.id = ?`,
+      [result.insertId]
+    );
+    await connection.commit();
+    res.status(201).json({ message: 'Admin created', data: shapeAdmin(rows[0]) });
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
 };
 
 const updateAdmin = async (req, res) => {
@@ -486,22 +497,27 @@ const updateAdmin = async (req, res) => {
   if (!Number.isFinite(adminId) || adminId <= 0) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Invalid admin id' });
   }
-  const [existingRows] = await pool.query('SELECT * FROM admins WHERE id = ?', [adminId]);
-  if (existingRows.length === 0) {
-    return res.status(404).json({ code: 'NOT_FOUND', message: 'Admin not found' });
-  }
-  const existing = existingRows[0];
-
-  const { password, displayName, display_name: displayNameSnake, active, role } = req.body || {};
-  const areaId = req.body?.areaId !== undefined ? req.body.areaId : req.body?.area_id;
-  const finalRole = role !== undefined ? role : existing.role;
-  const finalAreaId = areaId !== undefined ? areaId : existing.area_id;
-  if (role !== undefined || areaId !== undefined) {
-    const invariantError = await validateRoleAreaInvariant(finalRole, finalAreaId);
-    if (invariantError) {
-      return res.status(400).json({ code: 'VALIDATION_ERROR', message: invariantError });
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [existingRows] = await connection.query('SELECT * FROM admins WHERE id = ? FOR UPDATE', [adminId]);
+    if (existingRows.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ code: 'NOT_FOUND', message: 'Admin not found' });
     }
-  }
+    const existing = existingRows[0];
+
+    const { password, displayName, display_name: displayNameSnake, active, role } = req.body || {};
+    const areaId = req.body?.areaId !== undefined ? req.body.areaId : req.body?.area_id;
+    const finalRole = role !== undefined ? role : existing.role;
+    const finalAreaId = areaId !== undefined ? areaId : existing.area_id;
+    if (role !== undefined || areaId !== undefined) {
+      const invariantError = await validateRoleAreaInvariant(finalRole, finalAreaId);
+      if (invariantError) {
+        await connection.rollback();
+        return res.status(400).json({ code: 'VALIDATION_ERROR', message: invariantError });
+      }
+    }
 
   // Bug fix (multi-area audit finding #9): nothing stopped a super_admin
   // from demoting or deactivating themselves — or the only OTHER
@@ -509,54 +525,66 @@ const updateAdmin = async (req, res) => {
   // /admin/areas) again. The legacy env-password fallback only ever fires
   // while `admins` has zero rows total (adminController.js login), so it is
   // not a recovery path once even one super_admin row still exists.
-  const finalActive = active !== undefined ? Boolean(active) : Boolean(existing.active);
-  const losingSuperAdminStatus = existing.role === 'super_admin' && Boolean(existing.active)
-    && (finalRole !== 'super_admin' || !finalActive);
-  if (losingSuperAdminStatus) {
-    const [[{ cnt }]] = await pool.query(
-      "SELECT COUNT(*) AS cnt FROM admins WHERE role = 'super_admin' AND active = 1 AND id != ?",
+    const finalActive = active !== undefined ? Boolean(active) : Boolean(existing.active);
+    const losingSuperAdminStatus = existing.role === 'super_admin' && Boolean(existing.active)
+      && (finalRole !== 'super_admin' || !finalActive);
+    if (losingSuperAdminStatus) {
+      // Lock every remaining active super-admin while deciding whether this
+      // one may lose its role/status. A concurrent demotion now serializes.
+      const [otherSuperAdmins] = await connection.query(
+        "SELECT id FROM admins WHERE role = 'super_admin' AND active = 1 AND id != ? FOR UPDATE",
+        [adminId]
+      );
+      if (otherSuperAdmins.length === 0) {
+        await connection.rollback();
+        return res.status(400).json({
+          code: 'VALIDATION_ERROR',
+          message: 'Cannot demote or deactivate the last active super_admin.',
+        });
+      }
+    }
+
+    const sets = [];
+    const values = [];
+    if (role !== undefined) { sets.push('role = ?'); values.push(role); }
+    if (role !== undefined || areaId !== undefined) {
+      sets.push('area_id = ?');
+      values.push(finalRole === 'super_admin' ? null : Number(finalAreaId));
+    }
+    if (displayName !== undefined || displayNameSnake !== undefined) {
+      sets.push('display_name = ?');
+      values.push(displayName !== undefined ? displayName : displayNameSnake);
+    }
+    if (active !== undefined) { sets.push('active = ?'); values.push(active ? 1 : 0); }
+    if (password !== undefined) {
+      if (typeof password !== 'string' || password.length < 8) {
+        await connection.rollback();
+        return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'password must be at least 8 characters' });
+      }
+      sets.push('password_hash = ?');
+      values.push(await bcrypt.hash(password, 10));
+    }
+
+    if (sets.length === 0) {
+      await connection.rollback();
+      return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'No fields to update' });
+    }
+
+    values.push(adminId);
+    await connection.query(`UPDATE admins SET ${sets.join(', ')} WHERE id = ?`, values);
+
+    const [rows] = await connection.query(
+      `SELECT a.*, ar.code AS area_code FROM admins a LEFT JOIN areas ar ON ar.id = a.area_id WHERE a.id = ?`,
       [adminId]
     );
-    if (Number(cnt) === 0) {
-      return res.status(400).json({
-        code: 'VALIDATION_ERROR',
-        message: 'Cannot demote or deactivate the last active super_admin.',
-      });
-    }
+    await connection.commit();
+    res.status(200).json({ message: 'Admin updated', data: shapeAdmin(rows[0]) });
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
   }
-
-  const sets = [];
-  const values = [];
-  if (role !== undefined) { sets.push('role = ?'); values.push(role); }
-  if (role !== undefined || areaId !== undefined) {
-    sets.push('area_id = ?');
-    values.push(finalRole === 'super_admin' ? null : Number(finalAreaId));
-  }
-  if (displayName !== undefined || displayNameSnake !== undefined) {
-    sets.push('display_name = ?');
-    values.push(displayName !== undefined ? displayName : displayNameSnake);
-  }
-  if (active !== undefined) { sets.push('active = ?'); values.push(active ? 1 : 0); }
-  if (password !== undefined) {
-    if (typeof password !== 'string' || password.length < 8) {
-      return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'password must be at least 8 characters' });
-    }
-    sets.push('password_hash = ?');
-    values.push(await bcrypt.hash(password, 10));
-  }
-
-  if (sets.length === 0) {
-    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'No fields to update' });
-  }
-
-  values.push(adminId);
-  await pool.query(`UPDATE admins SET ${sets.join(', ')} WHERE id = ?`, values);
-
-  const [rows] = await pool.query(
-    `SELECT a.*, ar.code AS area_code FROM admins a LEFT JOIN areas ar ON ar.id = a.area_id WHERE a.id = ?`,
-    [adminId]
-  );
-  res.status(200).json({ message: 'Admin updated', data: shapeAdmin(rows[0]) });
 };
 
 module.exports = {

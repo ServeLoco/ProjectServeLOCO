@@ -59,7 +59,7 @@ const resolveAdminArea = (req, res, next) => {
     if (!Number.isInteger(parsed) || parsed <= 0) {
       return res.status(400).json({
         code: 'VALIDATION_ERROR',
-        message: 'X-Area-Id must be a positive integer or "all"',
+        message: 'X-Area-Id header must be a positive integer or "all"',
       });
     }
     req.areaId = parsed;

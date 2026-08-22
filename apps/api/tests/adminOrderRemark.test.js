@@ -12,7 +12,7 @@ const app = express();
 app.use(express.json());
 app.use('/api/admin', adminRoutes);
 
-const adminToken = jwt.sign({ id: 'admin', role: 'admin' }, process.env.JWT_SECRET || 'secret');
+const adminToken = jwt.sign({ id: 'admin', role: 'admin', adminRole: 'area_admin', areaId: 1 }, process.env.JWT_SECRET || 'secret');
 
 describe('PATCH /api/admin/orders/:id/remark', () => {
   beforeEach(() => {
@@ -35,7 +35,7 @@ describe('PATCH /api/admin/orders/:id/remark', () => {
 
     const updateCall = pool.query.mock.calls.find(call => /UPDATE orders SET admin_remark/i.test(call[0]));
     expect(updateCall).toBeTruthy();
-    expect(updateCall[1]).toEqual(['Delayed — rider shortage', '1001']);
+    expect(updateCall[1]).toEqual(['Delayed — rider shortage', '1001', 1]);
   });
 
   it('clears the remark to null on a blank body', async () => {
@@ -53,7 +53,7 @@ describe('PATCH /api/admin/orders/:id/remark', () => {
     expect(res.body.order.admin_remark).toBeNull();
 
     const updateCall = pool.query.mock.calls.find(call => /UPDATE orders SET admin_remark/i.test(call[0]));
-    expect(updateCall[1]).toEqual([null, '1001']);
+    expect(updateCall[1]).toEqual([null, '1001', 1]);
   });
 
   it('404s for a non-existent order', async () => {

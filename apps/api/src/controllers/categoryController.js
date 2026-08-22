@@ -152,7 +152,7 @@ const createCategory = async (req, res) => {
 
   const [result] = await pool.query(
     'INSERT INTO categories (area_id, name, slug, type, image_id, active, display_order) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [areaId, name, slug, type, image_id, active !== undefined ? active : true, displayOrder]
+    [areaId, name, slug, type, image_id || null, active !== undefined ? active : true, displayOrder]
   );
   await bustAreaCaches(areaId);
   res.status(201).json({ message: 'Category created', id: result.insertId });
@@ -176,7 +176,7 @@ const updateCategory = async (req, res) => {
   // area_id in the WHERE, not just id: without this, an area_admin could
   // PATCH another area's category by guessing its (globally sequential)
   // numeric id.
-  const [currentRows] = await pool.query('SELECT id, image_id FROM categories WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
+  const [currentRows] = await pool.query('SELECT id, image_id, active FROM categories WHERE id = ? AND deleted = 0 AND area_id = ?', [id, areaId]);
   if (currentRows.length === 0) {
     return res.status(404).json({ code: 'NOT_FOUND', message: 'Category not found' });
   }
@@ -191,7 +191,7 @@ const updateCategory = async (req, res) => {
 
   await pool.query(
     'UPDATE categories SET name = ?, slug = ?, type = ?, image_id = ?, active = ?, display_order = ? WHERE id = ? AND area_id = ?',
-    [name, slug, type, image_id, active, displayOrder, id, areaId]
+    [name, slug, type, image_id || null, active !== undefined ? active : Boolean(currentRows[0].active), displayOrder, id, areaId]
   );
   await bustAreaCaches(areaId);
   if (previousImageId && String(previousImageId) !== String(image_id)) {

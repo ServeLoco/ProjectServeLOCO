@@ -646,6 +646,16 @@ const migrate = async () => {
     // zone rows (zones are hard-deleted).
     await ensureColumn('orders', 'delivery_zone_id', 'delivery_zone_id INT NULL AFTER free_delivery_offer_snapshot');
     await ensureColumn('orders', 'delivery_eta_minutes_snapshot', 'delivery_eta_minutes_snapshot INT NULL AFTER delivery_zone_id');
+    // Stamped exactly when status first leaves Pending (auto-accept or admin
+    // accept). Clock start for the shop-owner response window (shopAlertSweeper)
+    // — created_at is too early, it includes the up-to-2-minute auto-accept
+    // wait itself, which would eat into the shop's response budget.
+    await ensureColumn('orders', 'accepted_at', 'accepted_at TIMESTAMP NULL DEFAULT NULL AFTER rider_search_started_at');
+    // Backfill for rows that left Pending before this column existed — every
+    // run, cheap no-op once caught up (WHERE only matches unbackfilled rows).
+    await connection.query(
+      "UPDATE orders SET accepted_at = created_at WHERE accepted_at IS NULL AND status != 'Pending'"
+    );
 
     // Performance indexes for common order filter queries
     const ensureIndex = async (tableName, indexName, columns) => {
@@ -877,6 +887,17 @@ const migrate = async () => {
     // shop owner pressed Ready. Only valid after shop_confirmed_at is set.
     // Informational for the admin — does NOT gate order status.
     await ensureColumn('order_items', 'shop_ready_at', 'shop_ready_at TIMESTAMP NULL DEFAULT NULL AFTER shop_rejected_at');
+    // Weak-network alert reliability (shopAlertSweeper): when this shop's
+    // items were last (re)pushed to the owner, and how many attempts so far.
+    // NULL last_notified_at = never pushed since notifyShopsForOrder's initial
+    // fan-out landed a write here too, so the sweeper's throttle sees it.
+    await ensureColumn('order_items', 'shop_last_notified_at', 'shop_last_notified_at TIMESTAMP NULL DEFAULT NULL AFTER shop_ready_at');
+    await ensureColumn('order_items', 'shop_notify_count', 'shop_notify_count INT NOT NULL DEFAULT 0 AFTER shop_last_notified_at');
+    // Set when the shop app confirms it actually displayed the alarm
+    // (POST /shop/orders/:id/alert-ack) — proof the push reached the device,
+    // as opposed to the owner just being slow to act on it. Lets the sweeper
+    // ease off reminder frequency once it knows the phone is aware.
+    await ensureColumn('order_items', 'shop_alert_acked_at', 'shop_alert_acked_at TIMESTAMP NULL DEFAULT NULL AFTER shop_notify_count');
     const [orderItemProductFks] = await connection.query(`
       SELECT CONSTRAINT_NAME
       FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE

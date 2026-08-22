@@ -6,7 +6,7 @@
 const { getDb } = require('../db/mongodb');
 const { pool } = require('../db/mysql');
 const { insertEvents } = require('../services/analytics/eventStore');
-const { requestAreaId, getAreaById } = require('../utils/areaScope');
+const { requestAreaId, listAreas } = require('../utils/areaScope');
 
 const DEFAULT_DAYS = 30;
 const MAX_DAYS = 365;
@@ -57,15 +57,14 @@ const areaMatch = (areaId) => (areaId === 'all' ? {} : { areaId });
 
 // Attaches areaCode to each row of a Mongo aggregation result that was
 // grouped by areaId (only meaningful in 'all' mode — §2.10's "areaCode/
-// area_code column added to each row"). Areas are a tiny, TTL-cached table
-// (§3.9), so a lookup per row is cheap.
+// area_code column added to each row"). One cached list avoids N lookups on
+// a cold cache for a report with many grouped rows.
 const withAreaCodes = async (rows, areaIdField = 'areaId') => {
-  const out = [];
-  for (const row of rows) {
-    const area = await getAreaById(row[areaIdField]);
-    out.push({ ...row, areaCode: area?.code || null, area_code: area?.code || null });
-  }
-  return out;
+  const areasById = new Map((await listAreas()).map((area) => [Number(area.id), area]));
+  return rows.map((row) => {
+    const area = areasById.get(Number(row[areaIdField]));
+    return { ...row, areaCode: area?.code || null, area_code: area?.code || null };
+  });
 };
 
 // ── Customer: POST /api/analytics/events ──────────────────────────────────

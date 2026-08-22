@@ -36,6 +36,13 @@ const notifyShopsForOrder = async (order) => {
         orderId: order.id, orderNumber: order.order_number, shopId: row.shop_id,
       });
     }
+    // Stamp the initial alert time so shopAlertSweeper's reminder throttle
+    // (SHOP_ALERT_REMIND_MS) counts from this push, not from its own first tick.
+    await pool.query(
+      `UPDATE order_items SET shop_last_notified_at = NOW(), shop_notify_count = shop_notify_count + 1
+       WHERE order_id = ? AND shop_id IN (?) AND shop_confirmed_at IS NULL AND shop_rejected_at IS NULL`,
+      [order.id, rows.map((r) => r.shop_id)]
+    );
     // Prefer native FCM data-only (killed-app notifee full-screen). Fallback to
     // Expo title+body tray for owners without an fcm_token yet.
     const ownerIds = rows.map((r) => r.owner_user_id);
@@ -114,6 +121,43 @@ const notifyShopsOrderCancelled = async (order) => {
     }
   } catch (e) {
     console.error('[shops] notifyShopsOrderCancelled failed for order', order?.id, e.message);
+  }
+};
+
+// Re-push the same alarm (socket + FCM/Expo) to ONE shop owner who has not
+// yet confirmed/rejected — used by shopAlertSweeper.remindPendingShopOrders
+// for weak-network retries. Unlike notifyShopsForOrder this never fans out
+// to every shop on the order, only the one still waiting. Caller is
+// responsible for the shop_last_notified_at/shop_notify_count write (the
+// sweeper batches that across all reminded rows in one query).
+const remindShopOrderOwner = async (order, shopId, ownerUserId) => {
+  try {
+    const { emitToCustomer } = require('../realtime/socket');
+    const expoPush = require('./expoPush');
+    const fcmAlarm = require('./fcmAlarmPush');
+    emitToCustomer(ownerUserId, 'shop.order.assigned', {
+      orderId: order.id, orderNumber: order.order_number, shopId,
+    });
+    const alarmData = {
+      type: 'shop_order',
+      alertType: 'new_order_alarm',
+      orderId: order.id,
+      orderNumber: order.order_number,
+    };
+    const needExpo = await fcmAlarm.sendFcmDataOnlyToMany(pool, [ownerUserId], alarmData);
+    if (needExpo.length) {
+      await expoPush.sendPushToMany(pool, needExpo, {
+        title: 'Order still waiting for you',
+        body: `Order ${order.order_number} is still waiting for your shop to confirm. Please open the app.`,
+        channelId: 'serveloco-orders-alarm-v5',
+        sound: 'order_alarm',
+        tag: `shop_order_${order.id}`,
+        collapseId: `shop_order_${order.id}`,
+        data: alarmData,
+      });
+    }
+  } catch (e) {
+    console.error('[shops] remindShopOrderOwner failed for order', order?.id, 'shop', shopId, e.message);
   }
 };
 
@@ -200,6 +244,31 @@ const notifyShopsOrderRemarkUpdated = async (order) => {
     }
   } catch (e) {
     console.error('[shops] notifyShopsOrderRemarkUpdated failed for order', order?.id, e.message);
+  }
+};
+
+// Fire-and-forget notify for a single shop whose order item was just
+// replaced by an admin (out-of-stock swap). Unlike notifyShopsOrderRemarkUpdated
+// this never fans out to every shop on the order — only the one shop that
+// owns the replaced line item needs to know.
+const notifyShopsOrderItemReplaced = async (order, shopId) => {
+  try {
+    if (!order?.id || !shopId) return;
+    const [rows] = await pool.query(
+      'SELECT owner_user_id FROM shops WHERE id = ? AND active = 1',
+      [shopId]
+    );
+    const ownerUserId = rows[0]?.owner_user_id;
+    if (!ownerUserId) return;
+    const { emitToCustomer } = require('../realtime/socket');
+    emitToCustomer(ownerUserId, 'shop.order.updated', {
+      orderId: order.id,
+      orderNumber: order.order_number,
+      shopId,
+      action: 'item_replaced',
+    });
+  } catch (e) {
+    console.error('[shops] notifyShopsOrderItemReplaced failed for order', order?.id, e.message);
   }
 };
 
@@ -419,11 +488,13 @@ const maybeAutoCancelOrderWhenAllShopsRejected = async (orderId) => {
 module.exports = {
   getShopForUser,
   notifyShopsForOrder,
+  remindShopOrderOwner,
   syncAreaShopOpenState,
   notifyShopsOrderCancelled,
   notifyShopsRiderAssigned,
   notifyShopsRiderAssignmentFailed,
   notifyShopsOrderStatusChanged,
   notifyShopsOrderRemarkUpdated,
+  notifyShopsOrderItemReplaced,
   maybeAutoCancelOrderWhenAllShopsRejected,
 };

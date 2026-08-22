@@ -208,7 +208,7 @@ describe('Controller -> realtime event integration', () => {
 
       notificationService.createOrderNotification.mockReturnValue(Promise.resolve({ insertId: 204 }));
 
-      const req = { params: { id: 700 }, body: { status: 'Accepted' } };
+      const req = { areaId: 1, params: { id: 700 }, body: { status: 'Accepted' } };
       const res = mockRes();
 
       await adminController.updateOrderStatus(req, res);
@@ -225,7 +225,7 @@ describe('Controller -> realtime event integration', () => {
         id: 701, status: 'Pending', customer_id: 1,
       }]]);
 
-      const req = { params: { id: 701 }, body: { status: 'Pending' } };
+      const req = { areaId: 1, params: { id: 701 }, body: { status: 'Pending' } };
       const res = mockRes();
 
       await adminController.updateOrderStatus(req, res);
@@ -239,7 +239,7 @@ describe('Controller -> realtime event integration', () => {
         id: 702, status: 'Delivered', customer_id: 1,
       }]]);
 
-      const req = { params: { id: 702 }, body: { status: 'Accepted' } };
+      const req = { areaId: 1, params: { id: 702 }, body: { status: 'Accepted' } };
       const res = mockRes();
 
       await adminController.updateOrderStatus(req, res);
@@ -253,7 +253,7 @@ describe('Controller -> realtime event integration', () => {
         id: 703, status: 'Out for Delivery', customer_id: 1,
       }]]);
 
-      const req = { params: { id: 703 }, body: { status: 'Preparing' } };
+      const req = { areaId: 1, params: { id: 703 }, body: { status: 'Preparing' } };
       const res = mockRes();
 
       await adminController.updateOrderStatus(req, res);
@@ -274,7 +274,7 @@ describe('Controller -> realtime event integration', () => {
 
       notificationService.createOrderNotification.mockReturnValue(Promise.resolve({ insertId: 205 }));
 
-      const req = { params: { id: 704 }, body: { status: 'Preparing' } };
+      const req = { areaId: 1, params: { id: 704 }, body: { status: 'Preparing' } };
       const res = mockRes();
 
       await adminController.updateOrderStatus(req, res);
@@ -305,7 +305,7 @@ describe('Controller -> realtime event integration', () => {
 
       notificationService.createOrderNotification.mockReturnValue(Promise.resolve({ insertId: 206 }));
 
-      const req = { params: { id: 705 }, body: { status: 'Cancelled' } };
+      const req = { areaId: 1, params: { id: 705 }, body: { status: 'Cancelled' } };
       const res = mockRes();
 
       await adminController.updateOrderStatus(req, res);
@@ -329,7 +329,7 @@ describe('Controller -> realtime event integration', () => {
 
       notificationService.createOrderNotification.mockReturnValue(Promise.resolve({ insertId: 207 }));
 
-      const req = { params: { id: 706 }, body: { status: 'Delivered' } };
+      const req = { areaId: 1, params: { id: 706 }, body: { status: 'Delivered' } };
       const res = mockRes();
 
       await adminController.updateOrderStatus(req, res);
@@ -356,7 +356,7 @@ describe('Controller -> realtime event integration', () => {
 
       notificationService.createOrderNotification.mockReturnValue(Promise.resolve({ insertId: 208 }));
 
-      const req = { params: { id: 707 }, body: { status: 'Delivered' } };
+      const req = { areaId: 1, params: { id: 707 }, body: { status: 'Delivered' } };
       const res = mockRes();
 
       await adminController.updateOrderStatus(req, res);
@@ -380,7 +380,7 @@ describe('Controller -> realtime event integration', () => {
 
       notificationService.createOrderNotification.mockReturnValue(Promise.resolve({ insertId: 207 }));
 
-      const req = { params: { id: 800 }, body: { payment_status: 'Paid' } };
+      const req = { areaId: 1, params: { id: 800 }, body: { payment_status: 'Paid' } };
       const res = mockRes();
 
       await adminController.updateOrderPayment(req, res);
@@ -401,7 +401,7 @@ describe('Controller -> realtime event integration', () => {
         id: 801, payment_status: 'Pending', status: 'Accepted', customer_id: 1,
       }]]);
 
-      const req = { params: { id: 801 }, body: { payment_status: 'Pending' } };
+      const req = { areaId: 1, params: { id: 801 }, body: { payment_status: 'Pending' } };
       const res = mockRes();
 
       await adminController.updateOrderPayment(req, res);
@@ -416,7 +416,7 @@ describe('Controller -> realtime event integration', () => {
         id: 802, payment_status: 'Pending', status: 'Cancelled', customer_id: 1,
       }]]);
 
-      const req = { params: { id: 802 }, body: { payment_status: 'Paid' } };
+      const req = { areaId: 1, params: { id: 802 }, body: { payment_status: 'Paid' } };
       const res = mockRes();
 
       await adminController.updateOrderPayment(req, res);
@@ -437,7 +437,7 @@ describe('Controller -> realtime event integration', () => {
 
       notificationService.createOrderNotification.mockReturnValue(Promise.resolve({ insertId: 208 }));
 
-      const req = { params: { id: 803 }, body: { payment_status: 'Paid' } };
+      const req = { areaId: 1, params: { id: 803 }, body: { payment_status: 'Paid' } };
       const res = mockRes();
 
       await adminController.updateOrderPayment(req, res);
@@ -459,7 +459,7 @@ describe('Controller -> realtime event integration', () => {
 
       notificationService.createOrderNotification.mockReturnValue(Promise.resolve({ insertId: 209 }));
 
-      const req = { params: { id: 804 }, body: { paymentStatus: 'Failed' } };
+      const req = { areaId: 1, params: { id: 804 }, body: { paymentStatus: 'Failed' } };
       const res = mockRes();
 
       await adminController.updateOrderPayment(req, res);

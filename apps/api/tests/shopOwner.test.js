@@ -309,4 +309,47 @@ describe('Shop-owner API - /api/shop', () => {
     expect(res.statusCode).toEqual(404);
     expect(res.body.code).toBe('NOT_FOUND');
   });
+
+  describe('POST /orders/:orderId/alert-ack', () => {
+    it('acks the alarm and reports acked: true on first call', async () => {
+      pool.query
+        .mockResolvedValueOnce([SHOP_ROW])              // requireShopOwner lookup
+        .mockResolvedValueOnce([{ affectedRows: 1 }]);  // UPDATE shop_alert_acked_at
+
+      const res = await request(app)
+        .post('/api/shop/orders/10/alert-ack')
+        .set('Authorization', `Bearer ${customerToken(7)}`);
+
+      expect(res.statusCode).toEqual(200);
+      expect(res.body).toEqual({ acked: true });
+      expect(pool.query).toHaveBeenLastCalledWith(
+        expect.stringMatching(/UPDATE order_items SET shop_alert_acked_at = NOW/),
+        ['10', 1]
+      );
+    });
+
+    it('is idempotent - second ack reports acked: false, never errors', async () => {
+      pool.query
+        .mockResolvedValueOnce([SHOP_ROW])
+        .mockResolvedValueOnce([{ affectedRows: 0 }]); // already acked / confirmed / rejected
+
+      const res = await request(app)
+        .post('/api/shop/orders/10/alert-ack')
+        .set('Authorization', `Bearer ${customerToken(7)}`);
+
+      expect(res.statusCode).toEqual(200);
+      expect(res.body).toEqual({ acked: false });
+    });
+
+    it("non-owner customer -> 403 (never touches order_items)", async () => {
+      pool.query.mockResolvedValueOnce([[]]); // requireShopOwner finds no shop
+
+      const res = await request(app)
+        .post('/api/shop/orders/10/alert-ack')
+        .set('Authorization', `Bearer ${customerToken(99)}`);
+
+      expect(res.statusCode).toEqual(403);
+      expect(pool.query).toHaveBeenCalledTimes(1);
+    });
+  });
 });

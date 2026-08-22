@@ -9,6 +9,7 @@ const {
   confirmShopOrder,
   rejectShopOrder,
   readyShopOrder,
+  ackShopOrderAlert,
 } = require('../services/shopOrderActions');
 
 // Same fixed offset riders.js uses for "today" — the DB session time_zone
@@ -392,6 +393,14 @@ const readyMyOrder = async (req, res) => {
   res.status(200).json({ message: result.message });
 };
 
+// POST /orders/:orderId/alert-ack — the shop app confirms it actually
+// displayed the new-order alarm. Fire-and-forget from the client's
+// perspective; always 200s, never a state transition.
+const ackMyOrderAlert = async (req, res) => {
+  const result = await ackShopOrderAlert(req.shop.id, req.params.orderId);
+  res.status(200).json({ acked: result.acked });
+};
+
 const groupShape = (g) => ({
   id: g.id,
   name: g.name,
@@ -527,6 +536,7 @@ module.exports = {
   confirmMyOrder,
   rejectMyOrder,
   readyMyOrder,
+  ackMyOrderAlert,
   getMyGroups,
   createMyGroup,
   updateMyGroup,

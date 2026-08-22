@@ -82,6 +82,22 @@ const emitOrderPaymentUpdated = (order) => {
   return payload;
 };
 
+const emitOrderItemReplaced = (order, itemId, oldProduct, newProduct) => {
+  const payload = {
+    orderId: order.id,
+    itemId,
+    oldProduct,
+    newProduct,
+    subtotal: order.subtotal,
+    total: order.total,
+    updatedAt: order.updated_at || order.updatedAt || new Date().toISOString(),
+  };
+  emitToCustomer(order.customer_id, 'order.item.replaced', payload);
+  emitToCustomer(order.customer_id, 'order.updated', payload);
+  emitToAdmins(order.area_id || order.areaId, 'admin.order.item_replaced', payload);
+  return payload;
+};
+
 const emitOrderAutoAccepted = (order) => {
   const payload = toOrderEventPayload(order);
   const areaId = order.area_id || order.areaId;
@@ -139,6 +155,7 @@ module.exports = {
   emitOrderCreated,
   emitOrderPaymentUpdated,
   emitOrderStatusUpdated,
+  emitOrderItemReplaced,
   emitOrderAutoAccepted,
   toOrderEventPayload,
 };

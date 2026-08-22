@@ -5,7 +5,7 @@
 const { pool } = require('../db/mysql');
 const { validatePagination } = require('../validators');
 const { requestAreaId, bustAreaCaches } = require('../utils/areaScope');
-const { materializeToArea, syncLibraryVariants, propagateLibraryEdit, LibraryError } = require('../utils/productLibrary');
+const { materializeToArea, syncLibraryVariants, propagateLibraryEdit, promoteToLibrary, LibraryError } = require('../utils/productLibrary');
 const { decideSearchMode } = require('../utils/search');
 
 // add-to-area targets exactly one area — an area_admin's own (resolveAdminArea
@@ -84,6 +84,7 @@ const getLibrary = async (req, res) => {
 
   const libraryIds = rows.map((r) => r.id);
   const areasByLibraryId = new Map();
+  const variantsByLibraryId = new Map();
   if (libraryIds.length > 0) {
     const [areaRows] = await pool.query(
       `SELECT DISTINCT library_product_id, area_id FROM products
@@ -94,12 +95,30 @@ const getLibrary = async (req, res) => {
       if (!areasByLibraryId.has(row.library_product_id)) areasByLibraryId.set(row.library_product_id, []);
       areasByLibraryId.get(row.library_product_id).push(row.area_id);
     }
+
+    // Edit drawer needs existing variant rows to prefill (bug fix — it was
+    // always opening empty since this list response never carried them).
+    const [variantRows] = await pool.query(
+      `SELECT id, library_product_id, label, display_order, is_default FROM library_variants
+       WHERE library_product_id IN (?) ORDER BY display_order ASC, id ASC`,
+      [libraryIds]
+    );
+    for (const v of variantRows) {
+      if (!variantsByLibraryId.has(v.library_product_id)) variantsByLibraryId.set(v.library_product_id, []);
+      variantsByLibraryId.get(v.library_product_id).push({
+        id: v.id,
+        label: v.label,
+        displayOrder: v.display_order, display_order: v.display_order,
+        isDefault: Boolean(v.is_default), is_default: Boolean(v.is_default),
+      });
+    }
   }
 
   const data = rows.map((row) => ({
     ...libraryRowShape(row),
     areaIds: areasByLibraryId.get(row.id) || [],
     area_ids: areasByLibraryId.get(row.id) || [],
+    variants: variantsByLibraryId.get(row.id) || [],
   }));
 
   res.status(200).json({
@@ -371,49 +390,13 @@ const promoteProductToLibrary = async (req, res) => {
   let libraryProductId;
   try {
     await connection.beginTransaction();
-
-    const [productRows] = await connection.query(
-      'SELECT * FROM products WHERE id = ? AND deleted = 0 FOR UPDATE',
-      [productId]
-    );
-    const product = productRows[0];
-    if (!product) {
-      await connection.rollback();
-      return res.status(404).json({ code: 'NOT_FOUND', message: 'Product not found' });
-    }
-    if (product.library_product_id) {
-      await connection.rollback();
-      return res.status(409).json({ code: 'ALREADY_LINKED', message: 'This product is already linked to a library item' });
-    }
-
-    const [libResult] = await connection.query(
-      `INSERT INTO product_library (name, description, image_id, variant_prompt, suggested_price, status)
-       VALUES (?, ?, ?, ?, ?, 'published')`,
-      [product.name, product.description, product.image_id, product.variant_prompt, product.price]
-    );
-    libraryProductId = libResult.insertId;
-
-    const [variantRows] = await connection.query(
-      'SELECT id, label, display_order, is_default FROM product_variants WHERE product_id = ? AND deleted = 0 ORDER BY display_order ASC, id ASC',
-      [productId]
-    );
-
-    for (const v of variantRows) {
-      const [lvResult] = await connection.query(
-        'INSERT INTO library_variants (library_product_id, label, display_order, is_default) VALUES (?, ?, ?, ?)',
-        [libraryProductId, v.label, v.display_order, v.is_default ? 1 : 0]
-      );
-      await connection.query(
-        'UPDATE product_variants SET library_variant_id = ? WHERE id = ?',
-        [lvResult.insertId, v.id]
-      );
-    }
-
-    await connection.query('UPDATE products SET library_product_id = ? WHERE id = ?', [libraryProductId, productId]);
-
+    ({ libraryProductId } = await promoteToLibrary(connection, productId));
     await connection.commit();
   } catch (err) {
     await connection.rollback();
+    if (err instanceof LibraryError) {
+      return res.status(err.code === 'NOT_FOUND' ? 404 : 409).json({ code: err.code, message: err.message });
+    }
     throw err;
   } finally {
     connection.release();

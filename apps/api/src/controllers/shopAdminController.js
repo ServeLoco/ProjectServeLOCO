@@ -9,6 +9,7 @@ const {
   confirmShopOrder,
   rejectShopOrder,
   readyShopOrder,
+  resendShopOrder,
 } = require('../services/shopOrderActions');
 
 // Shops (TASK 15) and product groups (TASK 11) both carry a real area_id
@@ -519,6 +520,26 @@ const adminReadyShopOrder = async (req, res) => {
   res.status(200).json({ message: result.message });
 };
 
+// PATCH /api/admin/shops/:id/orders/:orderId/resend — clears this shop's
+// rejection so the order reappears in their Accept/Reject queue, e.g.
+// after an admin swaps a rejected item for one the shop actually stocks.
+const adminResendShopOrder = async (req, res) => {
+  const areaId = requireOneArea(req, res);
+  if (areaId === null) return;
+
+  const shopId = Number(req.params.id);
+  const { orderId } = req.params;
+  const shop = await loadShopOr404(shopId, areaId);
+  if (!shop) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: 'Shop not found' });
+  }
+  const result = await resendShopOrder(shopId, orderId, { shopName: shop.name });
+  if (!result.ok) {
+    return res.status(result.status).json({ code: result.code, message: result.message });
+  }
+  res.status(200).json({ message: result.message });
+};
+
 const groupShape = (g) => ({
   id: g.id,
   name: g.name,
@@ -680,6 +701,7 @@ module.exports = {
   adminConfirmShopOrder,
   adminRejectShopOrder,
   adminReadyShopOrder,
+  adminResendShopOrder,
   listShopGroups,
   createShopGroup,
   updateShopGroup,

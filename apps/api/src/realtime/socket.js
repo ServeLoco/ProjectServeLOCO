@@ -1,6 +1,7 @@
 const { Server } = require('socket.io');
 const config = require('../config/env');
 const { verifyToken } = require('../utils/auth');
+const { getLiveAdminState } = require('../middleware/authMiddleware');
 const { createPresenceTracker } = require('./presence');
 const sessionStore = require('../services/analytics/sessionStore');
 const { pool } = require('../db/mysql');
@@ -8,6 +9,12 @@ const { getDefaultArea, listAreas, getAreaById } = require('../utils/areaScope')
 
 let io = null;
 let presenceTracker = null;
+
+// A connection that closes sooner than this is logged with its disconnect
+// reason (see the 'disconnect' handler). 30s sits well above a real session
+// and well below socket.io's own 5s reconnect ceiling, so a client stuck in a
+// reconnect loop lands every time while ordinary traffic stays silent.
+const SHORT_SESSION_LOG_MS = 30_000;
 
 const parseAllowedOrigins = () => {
   const origins = String(config.CORS_ORIGIN || '*')
@@ -162,9 +169,31 @@ const joinAreaRoom = async (socket) => {
 // any connected customer could join any area's `customers:<areaId>` room by
 // guessing an id, regardless of where they actually are. Cheap: getAreaById
 // reads through areaScope's 60s TTL cache, not a DB round trip per event.
+//
+// The real-area check narrows this from "any id" to "any REAL area", not to
+// "this customer's actual area" — every `customers:<areaId>` broadcast is
+// non-PII (shop-open, catalog-version, zone-updated; see emitToAllCustomers
+// call sites), so a forged rejoin costs a connected socket cross-area
+// catalog noise, never a data leak (multi-area audit finding #5). The rate
+// limit below is defense in depth against a modified client spamming rejoins
+// to enumerate active areas or thrash room membership, not a confidentiality
+// control — closing this properly means resolving the area server-side from
+// a client-sent pin (lat/lng), matching resolveCustomerArea's HTTP path,
+// which needs a customer-app payload change and is out of scope here.
+const AREA_CHANGED_MAX_PER_WINDOW = 10;
+const AREA_CHANGED_WINDOW_MS = 60_000;
+
 const rejoinAreaRoom = async (socket, newAreaId) => {
   const auth = socket.data.auth;
   if (!auth || auth.role !== 'customer' || !newAreaId) return;
+
+  const now = Date.now();
+  if (!socket.data.areaChangedWindowStart || now - socket.data.areaChangedWindowStart > AREA_CHANGED_WINDOW_MS) {
+    socket.data.areaChangedWindowStart = now;
+    socket.data.areaChangedCount = 0;
+  }
+  socket.data.areaChangedCount += 1;
+  if (socket.data.areaChangedCount > AREA_CHANGED_MAX_PER_WINDOW) return;
 
   const area = await getAreaById(newAreaId);
   if (!area || !area.active) return;
@@ -200,6 +229,14 @@ const initRealtime = (server) => {
     perMessageDeflate: {
       threshold: 1024,
     },
+    // Defaults (25s/20s) mean a dead socket can sit "connected" for ~45s
+    // before the server notices and the client's own reconnect kicks in —
+    // during that window an emit into it (e.g. a shop-order alarm) is
+    // silently dropped. 15s/15s halves that to ~30s worst case without going
+    // so tight that a genuinely slow-but-alive mobile connection (the exact
+    // weak-network case this exists for) starts flapping disconnect/reconnect.
+    pingInterval: 15000,
+    pingTimeout: 15000,
   });
 
   io.use(authenticateSocket);
@@ -207,10 +244,17 @@ const initRealtime = (server) => {
   // Live analytics presence tracker — in-memory Map of online customers,
   // emits `analytics.live` to the admin room every 5s. Fire-and-forget: a Mongo
   // outage never affects socket connection handling (sessionStore swallows).
-  presenceTracker = createPresenceTracker({ sessionStore, emitToAdmins });
+  presenceTracker = createPresenceTracker({
+    sessionStore,
+    emitToAdmins,
+    // Liveness probe for the tracker's reaper — the Map is keyed by socket.id,
+    // so io.sockets.sockets is the authoritative "is this still connected".
+    isSocketAlive: (socketId) => io.sockets.sockets.has(socketId),
+  });
 
   io.on('connection', (socket) => {
     joinRoleRoom(socket);
+    const connectedAtMs = Date.now();
 
     // Analytics presence — customers only (admin sockets are never counted).
     const auth = socket.data.auth;
@@ -221,13 +265,22 @@ const initRealtime = (server) => {
       // (guarded by the same NODE_ENV!=='test' check) — reuse it here instead of
       // querying users.last_area_id twice per connection.
       joinAreaRoom(socket)
-        .then(() => presenceTracker.addPresence(socket.id, {
-          userId: auth.id,
-          role: auth.role,
-          platform,
-          appVersion,
-          areaId: socket.data.areaId || null,
-        }))
+        .then(() => {
+          // joinAreaRoom resolves a MySQL lookup, so the socket can already be
+          // gone by the time we get here — its 'disconnect' would have fired
+          // before the entry existed, and adding it now means opening a session
+          // doc that immediately needs closing. The reaper would clear it within
+          // one 5s tick either way; skipping is cheaper and keeps the Mongo
+          // write off a connection that no longer exists.
+          if (socket.disconnected) return undefined;
+          return presenceTracker.addPresence(socket.id, {
+            userId: auth.id,
+            role: auth.role,
+            platform,
+            appVersion,
+            areaId: socket.data.areaId || null,
+          });
+        })
         .catch(() => {});
     } else {
       joinAreaRoom(socket).catch(() => {});
@@ -248,7 +301,31 @@ const initRealtime = (server) => {
       if (newAreaId) rejoinAreaRoom(socket, newAreaId).catch(() => {});
     });
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', (reason) => {
+      // Diagnostic for the reconnect storm: one device has been reconnecting on
+      // socket.io's 5s backoff ceiling for a month (5151 sessions, 10 minutes of
+      // total connected time), and nothing recorded *why* its sockets closed.
+      // The handshake succeeds every time — these connections die after
+      // 'connection' fires — so the reason code is the only thing that
+      // separates the candidates: 'transport close' (network dropped),
+      // 'ping timeout' (process frozen/killed mid-session), 'transport error'
+      // (proxy or TLS), 'client namespace disconnect' (the app called
+      // disconnect() itself). Only short-lived connections are logged: a normal
+      // session ending carries no information and would bury the signal.
+      const livedMs = Date.now() - connectedAtMs;
+      if (livedMs < SHORT_SESSION_LOG_MS) {
+        console.warn('[socket] short-lived connection ' + JSON.stringify({
+          userId: socket.data.auth?.id ?? null,
+          role: socket.data.auth?.role ?? null,
+          areaId: socket.data.areaId ?? null,
+          reason,
+          livedMs,
+          transport: socket.conn?.transport?.name ?? null,
+          platform: socket.handshake.auth?.platform ?? null,
+          appVersion: socket.handshake.auth?.appVersion ?? null,
+        }));
+      }
+
       if (presenceTracker) {
         presenceTracker.removePresence(socket.id).catch(() => {});
       }
@@ -340,4 +417,9 @@ module.exports = {
   // Exported for unit testing only — validates the client-supplied areaId
   // against a real DB-backed lookup (bug fix, multi-area audit finding #13).
   rejoinAreaRoom,
+  // Exported for unit testing only — its admin branch now calls
+  // getLiveAdminState (a real DB read), guarded the same NODE_ENV!=='test'
+  // way as the rest of this file's DB-touching connection logic (bug fix,
+  // multi-area audit finding #4).
+  authenticateSocket,
 };

@@ -95,4 +95,26 @@ describe('requireAdmin — live re-check against admins table', () => {
     expect(res.statusCode).toBe(200);
     expect(pool.query).toHaveBeenCalledTimes(1);
   });
+
+  // Bug fix (multi-area audit finding #3): the re-check used to be skipped
+  // by inferring "no admins row to re-check" from `sub` looking non-numeric
+  // — which silently broke the legacy ADMIN_PASSWORD/ADMIN_PASSWORD_HASH
+  // bootstrap login forever whenever ADMIN_OWNER_ID happened to be a
+  // numeric value (nothing enforces it isn't). envFallback is now an
+  // explicit claim signAdminToken sets on that login path, checked directly
+  // instead of guessed from the shape of `sub`.
+  it('does not attempt the admins-table re-check for an envFallback session even when sub is numeric', async () => {
+    const envFallbackToken = jwt.sign(
+      { sub: 1, role: 'admin', adminRole: 'super_admin', areaId: null, envFallback: true },
+      JWT_SECRET
+    );
+    pool.query.mockResolvedValueOnce([[]]); // admin_auth_state only
+
+    const res = await request(app)
+      .get('/api/admin/me')
+      .set('Authorization', `Bearer ${envFallbackToken}`);
+
+    expect(res.statusCode).toBe(200);
+    expect(pool.query).toHaveBeenCalledTimes(1);
+  });
 });

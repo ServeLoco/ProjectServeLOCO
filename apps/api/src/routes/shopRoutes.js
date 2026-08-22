@@ -14,6 +14,7 @@ const {
   confirmMyOrder,
   rejectMyOrder,
   readyMyOrder,
+  ackMyOrderAlert,
   getMyGroups,
   createMyGroup,
   updateMyGroup,
@@ -41,6 +42,7 @@ router.get('/orders/history', asyncHandler(getMyOrderHistory));
 router.patch('/orders/:orderId/confirm', asyncHandler(confirmMyOrder));
 router.patch('/orders/:orderId/reject', asyncHandler(rejectMyOrder));
 router.patch('/orders/:orderId/ready', asyncHandler(readyMyOrder));
+router.post('/orders/:orderId/alert-ack', asyncHandler(ackMyOrderAlert));
 router.get('/groups', asyncHandler(getMyGroups));
 router.post('/groups', asyncHandler(createMyGroup));
 router.patch('/groups/:id', asyncHandler(updateMyGroup));

@@ -27,7 +27,7 @@ const claimedOrders = new Set();
  */
 const acceptPendingOrder = async (orderId, orderNumber, logTag = 'auto-accept') => {
   const [result] = await pool.query(
-    "UPDATE orders SET status = 'Accepted' WHERE id = ? AND status = 'Pending'",
+    "UPDATE orders SET status = 'Accepted', accepted_at = NOW() WHERE id = ? AND status = 'Pending'",
     [orderId]
   );
   if (!result || result.affectedRows === 0) return null;

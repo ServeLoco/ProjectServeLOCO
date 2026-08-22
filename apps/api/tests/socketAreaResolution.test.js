@@ -192,4 +192,21 @@ describe('rejoinAreaRoom', () => {
     expect(getAreaById).not.toHaveBeenCalled();
     expect(socket.join).not.toHaveBeenCalled();
   });
+
+  // Defense in depth (multi-area audit finding #5): every customers:<areaId>
+  // broadcast is non-PII, so this is not a confidentiality control — it just
+  // stops a modified client from spamming rejoins to enumerate active areas
+  // or thrash room membership. See the comment above rejoinAreaRoom.
+  it('stops honoring rejoins past the per-window cap, without erroring', async () => {
+    getAreaById.mockResolvedValue({ id: 2, active: 1 });
+    const socket = fakeSocketWithLeave({ role: 'customer', id: 42 }, 1);
+
+    for (let i = 0; i < 10; i++) {
+      await rejoinAreaRoom(socket, 2);
+    }
+    expect(socket.join).toHaveBeenCalledTimes(10);
+
+    await rejoinAreaRoom(socket, 2);
+    expect(socket.join).toHaveBeenCalledTimes(10); // 11th call in the window is dropped
+  });
 });

@@ -91,6 +91,23 @@ const config = {
   // because this is a wall-clock comparison, same as nightDelivery.js.
   SHOP_SCHEDULE_TZ: process.env.SHOP_SCHEDULE_TZ || 'Asia/Kolkata',
   SHOP_SCHEDULE_SWEEP_MS: Number(process.env.SHOP_SCHEDULE_SWEEP_MS) || 30000,
+
+  // Shop-owner alert reliability (weak-network retries + no-response timeout).
+  // Tick cadence for the sweeper that re-pushes unanswered shop alerts and
+  // auto-rejects ones stuck past the response window.
+  SHOP_ALERT_SWEEP_MS: Number(process.env.SHOP_ALERT_SWEEP_MS) || 5000,
+  // Re-push (socket + FCM/Expo alarm) an unconfirmed shop order this often
+  // until the shop confirms, rejects, or the response window elapses.
+  SHOP_ALERT_REMIND_MS: Number(process.env.SHOP_ALERT_REMIND_MS) || 25000,
+  // Once the shop app has ack'd that the alarm actually displayed
+  // (POST /shop/orders/:id/alert-ack — proof the push reached the device),
+  // ease off to this slower cadence instead of SHOP_ALERT_REMIND_MS — the
+  // owner is aware, no need to keep blasting as if the device were still dark.
+  SHOP_ALERT_REMIND_ACKED_MS: Number(process.env.SHOP_ALERT_REMIND_ACKED_MS) || 60000,
+  // If a shop neither confirms nor rejects within this long of the order
+  // being Accepted, auto-reject that shop's items on its behalf (same
+  // effect as the owner pressing Reject) so the order stops stalling.
+  SHOP_RESPONSE_TIMEOUT_MS: Number(process.env.SHOP_RESPONSE_TIMEOUT_MS) || 600000,
 };
 
 // Validation

@@ -476,20 +476,28 @@ describe('Area + admin management (TASK 24)', () => {
     });
 
     it('409s on a duplicate username', async () => {
-      pool.query.mockResolvedValueOnce([[{ id: 1 }]]);
+      const conn = makeConn([
+        [[{ id: 1 }]], // SELECT id FROM admins WHERE username = ? FOR UPDATE -> found
+      ]);
+      pool.getConnection.mockResolvedValueOnce(conn);
+
       const res = await request(app)
         .post('/api/admin/admins')
         .set('Authorization', `Bearer ${superToken}`)
         .send({ username: 'taken', password: 'longenough1', role: 'super_admin' });
       expect(res.statusCode).toEqual(409);
+      expect(conn.rollback).toHaveBeenCalled();
+      expect(conn.release).toHaveBeenCalled();
     });
 
     it('creates an area_admin bound to a real area, with a bcrypt-hashed password', async () => {
       areaScope.getAreaById.mockResolvedValueOnce(AREA_2);
-      pool.query
-        .mockResolvedValueOnce([[]]) // duplicate-username check
-        .mockResolvedValueOnce([{ insertId: 5 }]) // INSERT
-        .mockResolvedValueOnce([[{ id: 5, username: 'area2', role: 'area_admin', area_id: 2, area_code: 'A2', display_name: null, active: 1, created_at: '2026-01-01' }]]);
+      const conn = makeConn([
+        [[]], // duplicate-username check -> none
+        [{ insertId: 5 }], // INSERT
+        [[{ id: 5, username: 'area2', role: 'area_admin', area_id: 2, area_code: 'A2', display_name: null, active: 1, created_at: '2026-01-01' }]], // joined SELECT
+      ]);
+      pool.getConnection.mockResolvedValueOnce(conn);
 
       const res = await request(app)
         .post('/api/admin/admins')
@@ -500,24 +508,33 @@ describe('Area + admin management (TASK 24)', () => {
       expect(bcrypt.hash).toHaveBeenCalledWith('longenough1', 10);
       expect(res.body.data).toMatchObject({ id: 5, role: 'area_admin', areaId: 2, areaCode: 'A2' });
       expect(res.body.data.password_hash).toBeUndefined();
+      expect(conn.commit).toHaveBeenCalled();
     });
   });
 
   describe('PATCH /admin/admins/:id', () => {
     it('404s for an unknown admin', async () => {
-      pool.query.mockResolvedValueOnce([[]]);
+      const conn = makeConn([
+        [[]], // SELECT * FROM admins WHERE id = ? FOR UPDATE -> none
+      ]);
+      pool.getConnection.mockResolvedValueOnce(conn);
+
       const res = await request(app)
         .patch('/api/admin/admins/99')
         .set('Authorization', `Bearer ${superToken}`)
         .send({ active: false });
       expect(res.statusCode).toEqual(404);
+      expect(conn.rollback).toHaveBeenCalled();
+      expect(conn.release).toHaveBeenCalled();
     });
 
     it('deactivates an admin without touching their password', async () => {
-      pool.query
-        .mockResolvedValueOnce([[{ id: 5, username: 'area2', role: 'area_admin', area_id: 2, active: 1 }]])
-        .mockResolvedValueOnce([{ affectedRows: 1 }])
-        .mockResolvedValueOnce([[{ id: 5, username: 'area2', role: 'area_admin', area_id: 2, area_code: 'A2', display_name: null, active: 0, created_at: '2026-01-01' }]]);
+      const conn = makeConn([
+        [[{ id: 5, username: 'area2', role: 'area_admin', area_id: 2, active: 1 }]], // existing
+        [{ affectedRows: 1 }], // UPDATE
+        [[{ id: 5, username: 'area2', role: 'area_admin', area_id: 2, area_code: 'A2', display_name: null, active: 0, created_at: '2026-01-01' }]], // joined SELECT
+      ]);
+      pool.getConnection.mockResolvedValueOnce(conn);
 
       const res = await request(app)
         .patch('/api/admin/admins/5')
@@ -527,15 +544,21 @@ describe('Area + admin management (TASK 24)', () => {
       expect(res.statusCode).toEqual(200);
       expect(res.body.data.active).toBe(false);
       expect(bcrypt.hash).not.toHaveBeenCalled();
+      expect(conn.commit).toHaveBeenCalled();
     });
 
     it('re-validates the role/area invariant when either changes', async () => {
-      pool.query.mockResolvedValueOnce([[{ id: 5, username: 'area2', role: 'area_admin', area_id: 2, active: 1 }]]);
+      const conn = makeConn([
+        [[{ id: 5, username: 'area2', role: 'area_admin', area_id: 2, active: 1 }]], // existing
+      ]);
+      pool.getConnection.mockResolvedValueOnce(conn);
+
       const res = await request(app)
         .patch('/api/admin/admins/5')
         .set('Authorization', `Bearer ${superToken}`)
         .send({ role: 'super_admin' }); // still carries area_id: 2 from the existing row
       expect(res.statusCode).toEqual(400);
+      expect(conn.rollback).toHaveBeenCalled();
     });
 
     // Bug fix (multi-area audit finding #9): nothing stopped a super_admin
@@ -543,9 +566,11 @@ describe('Area + admin management (TASK 24)', () => {
     // super_admin — leaving zero accounts that could ever reach this
     // endpoint (or /admin/areas) again.
     it('400s deactivating the last active super_admin, without ever writing to the DB', async () => {
-      pool.query
-        .mockResolvedValueOnce([[{ id: 1, username: 'super', role: 'super_admin', area_id: null, active: 1 }]])
-        .mockResolvedValueOnce([[{ cnt: 0 }]]); // zero OTHER active super_admins
+      const conn = makeConn([
+        [[{ id: 1, username: 'super', role: 'super_admin', area_id: null, active: 1 }]], // existing
+        [[]], // zero OTHER active super_admins (id-only rows, not a count)
+      ]);
+      pool.getConnection.mockResolvedValueOnce(conn);
 
       const res = await request(app)
         .patch('/api/admin/admins/1')
@@ -554,14 +579,17 @@ describe('Area + admin management (TASK 24)', () => {
 
       expect(res.statusCode).toEqual(400);
       expect(res.body.code).toEqual('VALIDATION_ERROR');
-      expect(pool.query).toHaveBeenCalledTimes(2);
+      expect(conn.query).toHaveBeenCalledTimes(2);
+      expect(conn.rollback).toHaveBeenCalled();
     });
 
     it('400s demoting the last active super_admin to area_admin', async () => {
       areaScope.getAreaById.mockResolvedValueOnce(AREA_1); // validateRoleAreaInvariant's own check
-      pool.query
-        .mockResolvedValueOnce([[{ id: 1, username: 'super', role: 'super_admin', area_id: null, active: 1 }]])
-        .mockResolvedValueOnce([[{ cnt: 0 }]]);
+      const conn = makeConn([
+        [[{ id: 1, username: 'super', role: 'super_admin', area_id: null, active: 1 }]], // existing
+        [[]], // zero OTHER active super_admins (id-only rows, not a count)
+      ]);
+      pool.getConnection.mockResolvedValueOnce(conn);
 
       const res = await request(app)
         .patch('/api/admin/admins/1')
@@ -571,16 +599,18 @@ describe('Area + admin management (TASK 24)', () => {
       expect(res.statusCode).toEqual(400);
       // Confirms this 400 came from the last-super_admin guard, not the
       // separate role/area invariant check (which would have short-circuited
-      // after only 1 pool.query call, never reaching the COUNT query).
-      expect(pool.query).toHaveBeenCalledTimes(2);
+      // after only 1 conn.query call, never reaching the COUNT query).
+      expect(conn.query).toHaveBeenCalledTimes(2);
     });
 
     it('allows deactivating a super_admin when another active one remains', async () => {
-      pool.query
-        .mockResolvedValueOnce([[{ id: 1, username: 'super', role: 'super_admin', area_id: null, active: 1 }]])
-        .mockResolvedValueOnce([[{ cnt: 1 }]]) // one OTHER active super_admin
-        .mockResolvedValueOnce([{ affectedRows: 1 }])
-        .mockResolvedValueOnce([[{ id: 1, username: 'super', role: 'super_admin', area_id: null, area_code: null, display_name: null, active: 0, created_at: null }]]);
+      const conn = makeConn([
+        [[{ id: 1, username: 'super', role: 'super_admin', area_id: null, active: 1 }]], // existing
+        [[{ id: 2 }]], // one OTHER active super_admin (id-only rows, not a count)
+        [{ affectedRows: 1 }], // UPDATE
+        [[{ id: 1, username: 'super', role: 'super_admin', area_id: null, area_code: null, display_name: null, active: 0, created_at: null }]], // joined SELECT
+      ]);
+      pool.getConnection.mockResolvedValueOnce(conn);
 
       const res = await request(app)
         .patch('/api/admin/admins/1')
@@ -588,13 +618,16 @@ describe('Area + admin management (TASK 24)', () => {
         .send({ active: false });
 
       expect(res.statusCode).toEqual(200);
+      expect(conn.commit).toHaveBeenCalled();
     });
 
     it('does not run the last-super_admin check for an already-inactive super_admin', async () => {
-      pool.query
-        .mockResolvedValueOnce([[{ id: 1, username: 'super', role: 'super_admin', area_id: null, active: 0 }]])
-        .mockResolvedValueOnce([{ affectedRows: 1 }])
-        .mockResolvedValueOnce([[{ id: 1, username: 'super', role: 'super_admin', area_id: null, area_code: null, display_name: null, active: 0, created_at: null }]]);
+      const conn = makeConn([
+        [[{ id: 1, username: 'super', role: 'super_admin', area_id: null, active: 0 }]], // existing, already inactive
+        [{ affectedRows: 1 }], // UPDATE
+        [[{ id: 1, username: 'super', role: 'super_admin', area_id: null, area_code: null, display_name: null, active: 0, created_at: null }]], // joined SELECT
+      ]);
+      pool.getConnection.mockResolvedValueOnce(conn);
 
       const res = await request(app)
         .patch('/api/admin/admins/1')
@@ -602,7 +635,7 @@ describe('Area + admin management (TASK 24)', () => {
         .send({ displayName: 'Renamed' });
 
       expect(res.statusCode).toEqual(200);
-      expect(pool.query).toHaveBeenCalledTimes(3);
+      expect(conn.query).toHaveBeenCalledTimes(3);
     });
   });
 });

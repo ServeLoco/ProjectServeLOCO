@@ -101,6 +101,18 @@ const ALLOWLIST = [
       'areas). Also: this file is the coupon rule engine, which the spec ' +
       'explicitly says to scope only at its inputs, never inside its logic.',
   },
+  {
+    file: 'src/controllers/deliveryZonesController.js',
+    line: 224,
+    reason:
+      "getAllActiveZones, backing the public GET /delivery-zones map overlay " +
+      '— deliberately cross-area. A customer can be physically anywhere ' +
+      '(GPS pin, saved address, wherever they drag the map), independent of ' +
+      'the area they last ordered from, so this shape-only listing (no ' +
+      'pricing/ETA/COD fields) shows every active zone from every area ' +
+      "instead of guessing one. Delivery eligibility itself is unaffected — " +
+      "it still comes from cart-calculate, which stays correctly area-scoped.",
+  },
 ];
 
 function isAllowlisted(relFile, line) {

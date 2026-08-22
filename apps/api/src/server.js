@@ -5,6 +5,7 @@ const { pool } = require('./db/mysql');
 const { closeRealtime, initRealtime } = require('./realtime/socket');
 const orderAutoAccept = require('./realtime/orderAutoAccept');
 const { startRiderOfferSweeper, stopRiderOfferSweeper } = require('./realtime/riderOfferSweeper');
+const { startShopAlertSweeper, stopShopAlertSweeper } = require('./realtime/shopAlertSweeper');
 const { startShopScheduleSweeper, stopShopScheduleSweeper } = require('./realtime/shopScheduleSweeper');
 const { startRollupScheduler, stopRollupScheduler } = require('./services/analytics/rollup');
 
@@ -91,6 +92,8 @@ const startServer = async () => {
     orderAutoAccept.rehydratePendingOrders().catch(() => {});
     // Expire due rider offers and continue assignment chains after restarts.
     startRiderOfferSweeper();
+    // Retry weak-network shop alerts + auto-reject a shop that never responds.
+    startShopAlertSweeper();
     // Auto-open/close shops per their open_time/close_time schedule.
     startShopScheduleSweeper();
     // Run the deletion sweep once at startup, then once a day.
@@ -114,6 +117,7 @@ const shutdown = async () => {
   console.log('SIGTERM/SIGINT signal received: closing HTTP server and database connections');
   orderAutoAccept.clearAll();
   stopRiderOfferSweeper();
+  stopShopAlertSweeper();
   stopShopScheduleSweeper();
   stopRollupScheduler();
   if (global.__purgeTimer) clearInterval(global.__purgeTimer);
