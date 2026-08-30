@@ -261,8 +261,8 @@ const ensureModeSpecificOfferBannerSections = async (areaId) => {
 
       await pool.query(
         `INSERT INTO dashboard_section_items (
-          section_id, item_type, item_id, display_order, active, starts_at, ends_at
-        ) VALUES (?, 'offer', ?, ?, ?, ?, ?)`,
+          section_id, item_type, item_id, display_order, active, starts_at, ends_at, area_id
+        ) VALUES (?, 'offer', ?, ?, ?, ?, ?, ?)`,
         [
           targetSectionId,
           item.item_id,
@@ -270,6 +270,7 @@ const ensureModeSpecificOfferBannerSections = async (areaId) => {
           item.active,
           item.starts_at,
           item.ends_at,
+          areaId,
         ]
       );
     }
@@ -1192,14 +1193,15 @@ const addAdminSectionItem = async (req, res) => {
 
     const [result] = await pool.query(
       `INSERT INTO dashboard_section_items (
-        section_id, item_type, item_id, display_order, active, starts_at, ends_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        section_id, item_type, item_id, display_order, active, starts_at, ends_at, area_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id, item_type, item_id,
         finalDisplayOrder,
         active !== undefined ? active : 1,
         starts_at || null,
-        ends_at || null
+        ends_at || null,
+        areaId
       ]
     );
 
