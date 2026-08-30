@@ -245,6 +245,10 @@ function normalizeCartCalculation(payload = {}) {
   const bill = payload?.bill || payload?.totals || payload?.data || payload;
 
   return {
+    // Which delivery area this pin resolved to — lets the client tell "you
+    // crossed into a different area" (products are area-scoped) apart from
+    // "this item just went out of stock" when unavailableItems shows up.
+    areaId: pickFirst(bill.areaId, bill.area_id, null),
     subtotal: numberOrZero(pickFirst(bill.subtotal, bill.itemTotal, bill.item_total)),
     deliveryCharge: numberOrZero(pickFirst(bill.deliveryCharge, bill.delivery_charge)),
     nightCharge: numberOrZero(pickFirst(bill.nightCharge, bill.night_charge)),

@@ -249,7 +249,6 @@ describe('continueAssignment search window', () => {
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // markSearching
 
     const offerConn = makeConn([
-      [[]], // no pending FOR UPDATE
       [[order]], // order FOR UPDATE
       [[{ e: new Date(Date.now() + 300000) }]], // expires_at
       [{ insertId: 55, affectedRows: 1 }], // insert offer
@@ -292,7 +291,6 @@ describe('pushRiderOffer FCM/Expo branching', () => {
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // markSearching
 
     const offerConn = makeConn([
-      [[]], // no pending FOR UPDATE
       [[order]], // order FOR UPDATE
       [[{ e: new Date(Date.now() + 300000) }]], // expires_at
       [{ insertId: 55, affectedRows: 1 }], // insert offer

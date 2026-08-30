@@ -580,6 +580,11 @@ const calculateCart = async (req, res) => {
   }
 
   const calculation = {
+    // Which area this pin priced against. Products are area-scoped, so the
+    // client needs this to tell "you crossed into another area's catalog"
+    // (cart legitimately cleared) apart from "this item went out of stock".
+    areaId: deliveryAreaId,
+    area_id: deliveryAreaId,
     subtotal,
     deliveryCharge: standardDeliveryCharge,
     nightCharge,

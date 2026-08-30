@@ -232,7 +232,7 @@ const createOrder = async (req, res) => {
     // second — a pool-wide deadlock once concurrent checkouts reach
     // MYSQL_POOL_SIZE (waitForConnections with queueLimit 0 waits forever).
     const [settingRows] = await connection.query(
-      `SELECT shop_open, delivery_available, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active,
+      `SELECT shop_open, delivery_available, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active, rider_capacity_multiplier,
               (SELECT COUNT(*) FROM riders r
                 WHERE r.active = 1 AND r.is_online = 1 AND r.area_id = ?) AS online_riders,
               (SELECT COUNT(*) FROM orders o
@@ -254,14 +254,18 @@ const createOrder = async (req, res) => {
     // concurrent deliveries, letting in-flight orders grow unbounded just
     // strands new orders in the search queue with nobody free to take them.
     // Reject up front instead, once the area's active order count reaches
-    // onlineRiders * RIDER_CAPACITY_MULTIPLIER, so the customer sees this
-    // before paying rather than after (delivery is still marked available —
-    // riders are online, just fully booked). Zero online riders is already
-    // covered by the delivery_available gate above, so skip it there.
+    // onlineRiders * the area's rider_capacity_multiplier, so the customer
+    // sees this before paying rather than after (delivery is still marked
+    // available — riders are online, just fully booked). Per-area, not a
+    // single global number — rider density and delivery distances vary by
+    // area, and areas without their own row yet (predating this column)
+    // fall back to config.RIDER_CAPACITY_MULTIPLIER. Zero online riders is
+    // already covered by the delivery_available gate above, so skip it here.
     const onlineRiders = Number(settings.online_riders) || 0;
     if (onlineRiders > 0) {
       const activeOrders = Number(settings.active_orders) || 0;
-      if (activeOrders >= onlineRiders * config.RIDER_CAPACITY_MULTIPLIER) {
+      const capacityMultiplier = Number(settings.rider_capacity_multiplier) || config.RIDER_CAPACITY_MULTIPLIER;
+      if (activeOrders >= onlineRiders * capacityMultiplier) {
         throw new OrderError(
           `All our riders are busy right now. Please try again in about ${config.RIDER_CAPACITY_COOLDOWN_MIN} minutes.`,
           'RIDERS_AT_CAPACITY'

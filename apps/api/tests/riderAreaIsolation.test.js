@@ -99,7 +99,6 @@ describe('Rider assignment area isolation (TASK 15.8)', () => {
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // markSearching
 
     const offerConn = makeConn([
-      [[]], // no pending FOR UPDATE
       [[order]], // order FOR UPDATE
       [[{ e: new Date(Date.now() + 300000) }]], // expires_at
       [{ insertId: 501, affectedRows: 1 }], // insert offer
@@ -147,7 +146,6 @@ describe('Rider assignment area isolation (TASK 15.8)', () => {
       .mockResolvedValueOnce([{ affectedRows: 1 }]); // markSearching
 
     const offerConn = makeConn([
-      [[]],
       [[order]],
       [[{ e: new Date(Date.now() + 300000) }]],
       [{ insertId: 502, affectedRows: 1 }],

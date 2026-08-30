@@ -81,6 +81,45 @@ const countActiveRiders = async (areaId) => {
 const ACTIVE_ORDER_STATUSES = ['Pending', 'Accepted', 'Preparing', 'Out for Delivery'];
 
 /**
+ * Same at-capacity formula as the createOrder checkout gate
+ * (orderController.js), exposed standalone for the capacity-status polling
+ * endpoint. Not called from createOrder itself — that gate reads these same
+ * two counts as subqueries on its own transaction connection to avoid a
+ * second pool checkout mid-transaction (see the comment there); this
+ * version is for read-only, non-transactional callers.
+ */
+const getCapacityStatus = async (areaId) => {
+  // All three reads ride in ONE round trip as subqueries, deliberately not
+  // reusing countActiveRiders/settingsCache: this is polled every 45s by
+  // every customer sitting on checkout, and MySQL is a cross-region hop
+  // (~94ms each way), so three sequential awaits cost ~3x what one does.
+  // Same reasoning — and the same at-capacity formula — as the createOrder
+  // checkout gate in orderController.js. Areas whose settings row predates
+  // rider_capacity_multiplier fall back to config.RIDER_CAPACITY_MULTIPLIER.
+  const [rows] = await pool.query(
+    `SELECT
+       (SELECT COUNT(*) FROM riders r
+         WHERE r.active = 1 AND r.is_online = 1 AND r.area_id = ?) AS online_riders,
+       (SELECT COUNT(*) FROM orders o
+         WHERE o.area_id = ? AND o.status IN (?)
+           AND o.created_at > NOW() - INTERVAL ? MINUTE) AS active_orders,
+       (SELECT s.rider_capacity_multiplier FROM settings s
+         WHERE s.area_id = ? LIMIT 1) AS capacity_multiplier`,
+    [
+      areaId,
+      areaId, ACTIVE_ORDER_STATUSES, config.RIDER_CAPACITY_LOOKBACK_MIN,
+      areaId,
+    ]
+  );
+  const row = rows[0] || {};
+  const onlineRiders = Number(row.online_riders) || 0;
+  const activeOrders = Number(row.active_orders) || 0;
+  const multiplier = Number(row.capacity_multiplier) || config.RIDER_CAPACITY_MULTIPLIER;
+  const atCapacity = onlineRiders > 0 && activeOrders >= onlineRiders * multiplier;
+  return { onlineRiders, activeOrders, atCapacity };
+};
+
+/**
  * Eligible for a new offer: active, online, no other pending offer, and not in
  * excludeIds (already offered/rejected this order). Multi-order is allowed.
  *
@@ -380,6 +419,23 @@ const syncDeliveryAvailabilityFromRiders = async (areaId) => {
       await syncAreaShopOpenState(areaId);
     }
 
+    // Outside the `changed` branch on purpose: capacity is onlineRiders *
+    // multiplier, so a rider going on/offline moves it even when the
+    // delivery_available gate itself doesn't flip (which it only does at the
+    // 0 <-> 1 boundary).
+    //
+    // Deferred a tick rather than called inline: this runs mid-way through
+    // the caller's own work (adminRiderController is still finishing its
+    // rider UPDATE and re-read), and the capacity query must see that
+    // finished state, not race it — an inline call can read the rider row as
+    // it was BEFORE the toggle and broadcast a verdict that's already wrong.
+    // Fire-and-forget either way; the helper never throws.
+    // Resolve the module NOW and defer only the call: a require() inside the
+    // deferred callback can land after Jest has torn the environment down,
+    // which is a hard worker crash rather than a catchable error.
+    const { broadcastCapacityIfChanged } = require('../realtime/riderCapacityBroadcast');
+    setImmediate(() => broadcastCapacityIfChanged(areaId));
+
     return { changed, activeCount, deliveryAvailable: Boolean(desired) };
   } catch (e) {
     console.error('[riders] syncDeliveryAvailabilityFromRiders failed:', e.message);
@@ -393,6 +449,7 @@ module.exports = {
   RIDER_LOCATION_MAX_AGE_SEC,
   RIDER_MAX_ACTIVE_ORDERS,
   ACTIVE_ORDER_STATUSES,
+  getCapacityStatus,
   distanceToNearestPickupKm,
   selectRiderByRadiusTiers,
   riderShape,

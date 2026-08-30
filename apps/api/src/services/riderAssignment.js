@@ -1,6 +1,8 @@
 /**
  * Rider auto-assignment engine.
- * One pending offer per order at a time. Riders are picked from expanding
+ * One pending offer per order AND per rider at a time, enforced by the
+ * uq_offer_pending_order / uq_offer_pending_rider unique keys (migrate.js)
+ * rather than by app-level locking. Riders are picked from expanding
  * rings around the pickup shop(s) (1/2/3 km, all shops at once on multi-shop
  * orders, then distance-blind); inside a ring, free riders (no active order)
  * are offered before busy ones, then least completed deliveries today.
@@ -284,22 +286,49 @@ const remindPendingOffers = async () => {
 /**
  * Create a single pending offer for chosen rider. Enforces no second pending.
  */
-const createOffer = async (orderId, rider) => {
+// Unique keys on rider_order_offers that a duplicate INSERT can trip, mapped
+// to what each one means for dispatch. Order matters: the pending-* keys are
+// the interesting ones, uq_offer_order_rider is the pre-existing "never
+// re-offer the same order to the same rider" rule.
+const OFFER_CONFLICT_BY_KEY = [
+  ['uq_offer_pending_order', 'order_has_pending_offer'],
+  ['uq_offer_pending_rider', 'rider_has_pending_offer'],
+  ['uq_offer_order_rider', 'rider_already_offered_order'],
+];
+
+const offerConflictReason = (e) => {
+  const msg = String((e && (e.sqlMessage || e.message)) || '');
+  for (const [key, reason] of OFFER_CONFLICT_BY_KEY) {
+    if (msg.includes(key)) return reason;
+  }
+  return 'duplicate_offer';
+};
+
+const isRetryableLockError = (e) => Boolean(e) && (
+  e.code === 'ER_LOCK_DEADLOCK' || e.code === 'ER_LOCK_WAIT_TIMEOUT'
+  || e.errno === 1213 || e.errno === 1205
+);
+
+const OFFER_LOCK_RETRIES = 3;
+// How many riders to walk past when other dispatches keep winning the race
+// for them. Bounded so one order can never spin through the whole roster.
+const OFFER_RIDER_ATTEMPTS = 3;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * One INSERT attempt. "One pending offer per order" and "one pending offer per
+ * rider" are enforced by uq_offer_pending_order / uq_offer_pending_rider (see
+ * migrate.js) — deliberately NOT by a `SELECT ... FOR UPDATE` pre-check, which
+ * gap-locked the supremum of uq_offer_order_rider and deadlocked every
+ * concurrent dispatch against every other one at peak.
+ *
+ * @returns {{offer: object|null, conflict?: string}}
+ */
+const createOfferAttempt = async (orderId, rider) => {
   const connection = await pool.getConnection();
-  let offer = null;
   try {
     await connection.beginTransaction();
-
-    const [pending] = await connection.query(
-      `SELECT id FROM rider_order_offers
-       WHERE order_id = ? AND status = 'pending' FOR UPDATE`,
-      [orderId]
-    );
-    if (pending.length > 0) {
-      await connection.rollback();
-      log('createOffer skipped — pending offer exists', orderId);
-      return null;
-    }
 
     const [orderRows] = await connection.query(
       'SELECT * FROM orders WHERE id = ? FOR UPDATE',
@@ -308,7 +337,7 @@ const createOffer = async (orderId, rider) => {
     const order = orderRows[0];
     if (!order || order.status === 'Cancelled' || order.status === 'Delivered' || order.rider_id) {
       await connection.rollback();
-      return null;
+      return { offer: null, conflict: 'order_not_assignable' };
     }
 
     const [expRows] = await connection.query('SELECT DATE_ADD(NOW(), INTERVAL ? SECOND) AS e', [RIDER_OFFER_TIMEOUT_SEC]);
@@ -325,7 +354,7 @@ const createOffer = async (orderId, rider) => {
     );
 
     await connection.commit();
-    offer = {
+    const offer = {
       id: insertResult.insertId,
       order_id: orderId,
       rider_id: rider.id,
@@ -335,19 +364,78 @@ const createOffer = async (orderId, rider) => {
 
     await notifyRiderOffer(rider, order, offer);
     log('offer created', { orderId, offerId: offer.id, riderId: rider.id });
-    return offer;
+    return { offer };
   } catch (e) {
     await connection.rollback();
-    // Unique uq_offer_order_rider — rider already offered this order
     if (e && e.code === 'ER_DUP_ENTRY') {
-      log('createOffer dup rider for order', orderId, rider.id);
-      return null;
+      const conflict = offerConflictReason(e);
+      log('createOffer conflict', { orderId, riderId: rider.id, conflict });
+      return { offer: null, conflict };
     }
-    console.error('[rider-assign] createOffer failed:', e.message);
     throw e;
   } finally {
     connection.release();
   }
+};
+
+/**
+ * createOfferAttempt plus a bounded retry on lock errors. The gap-lock
+ * deadlock is gone, but two dispatches racing for the same rider still meet
+ * on uq_offer_pending_rider, and a busy peak can still time out a row lock —
+ * neither is a reason to drop an order on the floor.
+ */
+const createOffer = async (orderId, rider) => {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await createOfferAttempt(orderId, rider);
+    } catch (e) {
+      if (isRetryableLockError(e) && attempt < OFFER_LOCK_RETRIES) {
+        // Jittered so retrying dispatches do not re-collide in lockstep.
+        await sleep(20 * (attempt + 1) + Math.floor(Math.random() * 30));
+        continue;
+      }
+      console.error('[rider-assign] createOffer failed:', e.message);
+      throw e;
+    }
+  }
+};
+
+/**
+ * The whole "who gets this order" step, shared by startAssignment and
+ * continueAssignment: eligible pool -> ring/fairness pick -> offer, stepping
+ * to the next-best rider when another dispatch claimed that one first.
+ *
+ * markSearching is done here (not by the caller) so it still lands BEFORE
+ * createOffer flips the order to 'offered' — the order those two writes
+ * happen in is load-bearing.
+ *
+ * @returns {{offer: object|null, riderId: number|null, chosen: object|null, excluded: number[]}}
+ */
+const offerBestEligibleRider = async (orderId, areaId, { markBeforeOffer = false } = {}) => {
+  const excluded = await getExcludedRiderIdsForOrder(orderId);
+  let candidates = await listEligibleRiders({ excludeIds: excluded, areaId });
+  if (candidates.length === 0) return { offer: null, riderId: null, chosen: null, excluded };
+
+  const pickupPoints = await getOrderPickupPoints(orderId);
+  let marked = false;
+
+  for (let attempt = 0; attempt < OFFER_RIDER_ATTEMPTS && candidates.length > 0; attempt += 1) {
+    const chosen = await selectEligibleRider(candidates, { pickupPoints });
+    if (!chosen) break;
+
+    if (markBeforeOffer && !marked) {
+      await markSearching(orderId);
+      marked = true;
+    }
+
+    const { offer, conflict } = await createOffer(orderId, chosen);
+    if (offer) return { offer, riderId: chosen.id, chosen, excluded };
+    // Another order's dispatch won this rider in the same tick — next best.
+    if (conflict !== 'rider_has_pending_offer') break;
+    candidates = candidates.filter((r) => r.id !== chosen.id);
+  }
+
+  return { offer: null, riderId: null, chosen: null, excluded };
 };
 
 /**
@@ -494,23 +582,14 @@ const continueAssignment = async (orderId) => {
     return { continued: false, reason: 'pending_exists' };
   }
 
-  const excluded = await getExcludedRiderIdsForOrder(orderId);
-  const eligible = await listEligibleRiders({ excludeIds: excluded, areaId: order.area_id });
-  if (eligible.length === 0) {
+  const { offer, riderId, excluded } = await offerBestEligibleRider(
+    orderId, order.area_id, { markBeforeOffer: true }
+  );
+  if (!offer) {
     const outcome = await waitOrFailNoEligible(orderId, excluded);
     return { continued: false, ...outcome };
   }
-
-  const pickupPoints = await getOrderPickupPoints(orderId);
-  const chosen = await selectEligibleRider(eligible, { pickupPoints });
-  if (!chosen) {
-    const outcome = await waitOrFailNoEligible(orderId, excluded);
-    return { continued: false, ...outcome };
-  }
-
-  await markSearching(orderId);
-  const offer = await createOffer(orderId, chosen);
-  return { continued: true, offer, riderId: chosen.id };
+  return { continued: true, offer, riderId };
 };
 
 /**
@@ -567,26 +646,18 @@ const startAssignment = async (orderId) => {
       connection.release();
     }
 
-    const excluded = await getExcludedRiderIdsForOrder(orderId);
-    const eligible = await listEligibleRiders({ excludeIds: excluded, areaId: order.area_id });
-    if (eligible.length === 0) {
+    // The row above already stamped 'searching', so no markBeforeOffer here.
+    const { offer, riderId, chosen } = await offerBestEligibleRider(orderId, order.area_id);
+    if (!offer) {
       // Do not fail yet — keep searching until window ends (sweeper re-scans).
       log('startAssignment waiting for riders', { orderId, windowSec: RIDER_SEARCH_WINDOW_SEC });
       return { started: true, waiting: true, reason: 'waiting_for_riders' };
     }
 
-    const pickupPoints = await getOrderPickupPoints(orderId);
-    const chosen = await selectEligibleRider(eligible, { pickupPoints });
-    if (!chosen) {
-      log('startAssignment waiting for riders', { orderId, windowSec: RIDER_SEARCH_WINDOW_SEC });
-      return { started: true, waiting: true, reason: 'waiting_for_riders' };
-    }
-
-    const offer = await createOffer(orderId, chosen);
     log('startAssignment', {
-      orderId, riderId: chosen.id, offerId: offer?.id, distanceKm: chosen.distanceKm,
+      orderId, riderId, offerId: offer.id, distanceKm: chosen?.distanceKm,
     });
-    return { started: true, offer, riderId: chosen.id };
+    return { started: true, offer, riderId };
   } catch (e) {
     console.error('[rider-assign] startAssignment failed:', e.message);
     return { started: false, error: e.message };

@@ -14,6 +14,12 @@ const { requestAreaId, getDefaultArea, bustAreaCaches } = require('../utils/area
 const settingsCache = createTtlCache({ ttlMs: 15_000 });
 const settingsKey = (areaId) => `settings:${areaId}`;
 
+// Upper bound for settings.rider_capacity_multiplier. Not a hard technical
+// limit (the column is DECIMAL(5,2)) — a sanity ceiling so a fat-fingered
+// 30/300 can't quietly switch the checkout capacity gate off for an area.
+// Kept in sync with the `max` on the admin Settings input.
+const RIDER_CAPACITY_MULTIPLIER_MAX = 20;
+
 // Offer admin write/single-item endpoints reject null (super_admin, no
 // X-Area-Id) and 'all' — offer management always targets exactly one area.
 const requireOneArea = (req, res) => {
@@ -156,6 +162,7 @@ const getSettingsForArea = async (areaId) => {
       upi_qr_image_id: null,
       minimum_version: null,
       current_version: null,
+      rider_capacity_multiplier: 3,
     };
     return attachSettingsImageUrls(s);
   });
@@ -177,7 +184,17 @@ const getSettings = async (req, res) => {
   }
 
   const settings = await getSettingsForArea(areaId);
-  res.status(200).json({ data: settings });
+  // rider_capacity_multiplier is a rider-assignment tuning knob (the
+  // createOrder capacity gate + /api/rider-capacity) with no customer-facing
+  // meaning, so it does not belong in a public payload. Stripped here rather
+  // than by switching getSettingsForArea to an allowlist: the admin read
+  // shares that helper and legitimately needs the whole row, and the other
+  // fields customers do receive (upi_id, support_phone) are intentional.
+  // Copy before deleting — getSettingsForArea hands back the cached object,
+  // and mutating it would strip the field from the admin read too.
+  const publicSettings = { ...settings };
+  delete publicSettings.rider_capacity_multiplier;
+  res.status(200).json({ data: publicSettings });
 };
 
 /**
@@ -277,6 +294,7 @@ const updateSettings = async (req, res) => {
     'current_version',
     // Radius-zone pricing: master switch + center pin (revived for zone mode)
     'radius_pricing_active', 'shop_latitude', 'shop_longitude',
+    'rider_capacity_multiplier',
     // DEPRECATED (no longer used): free_delivery_above,
     // delivery_radius_km, delivery_cost_per_km
   ];
@@ -339,6 +357,23 @@ const updateSettings = async (req, res) => {
     const cost = Number(body.delivery_cost_per_km);
     if (!Number.isFinite(cost) || cost < 0) {
       return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Delivery cost per km cannot be negative' });
+    }
+  }
+
+  // Bounded on BOTH ends. Below 1 the checkout capacity gate
+  // (orderController.js) trips with one active order per online rider —
+  // closing the area to new checkouts the moment a single order comes in.
+  // Above RIDER_CAPACITY_MULTIPLIER_MAX a typo (30 for 3, or 300 for 3.00)
+  // silently disables the gate for that area instead, which fails the other
+  // way: orders pile up with nobody free to take them and the only symptom
+  // is riders never getting offers.
+  if (hasValue(body.rider_capacity_multiplier)) {
+    const multiplier = Number(body.rider_capacity_multiplier);
+    if (!Number.isFinite(multiplier) || multiplier < 1 || multiplier > RIDER_CAPACITY_MULTIPLIER_MAX) {
+      return res.status(400).json({
+        code: 'VALIDATION_ERROR',
+        message: `Rider capacity multiplier must be between 1 and ${RIDER_CAPACITY_MULTIPLIER_MAX}`,
+      });
     }
   }
 
@@ -414,7 +449,8 @@ const updateSettings = async (req, res) => {
         'rain_charge',
         'below_threshold_delivery_charge',
         'shop_latitude',
-        'shop_longitude'
+        'shop_longitude',
+        'rider_capacity_multiplier',
         // DEPRECATED: free_delivery_above,
         // delivery_radius_km, delivery_cost_per_km — no longer stored
       ].includes(field)) {
@@ -468,6 +504,14 @@ const updateSettings = async (req, res) => {
     const { emitToAllCustomers } = require('../realtime/socket');
     const finalOpen = Boolean(updatedSettings?.shop_open);
     emitToAllCustomers(areaId, 'settings.shop_open.updated', { shopOpen: finalOpen, shop_open: finalOpen });
+  }
+
+  // Re-tuning the multiplier can flip this area's at-capacity verdict on the
+  // spot, in either direction — push it rather than making every customer on
+  // checkout wait out their next poll. Fire-and-forget; never throws.
+  if (body.rider_capacity_multiplier !== undefined) {
+    const { broadcastCapacityIfChanged } = require('../realtime/riderCapacityBroadcast');
+    broadcastCapacityIfChanged(areaId);
   }
 
   await bustAreaCaches(areaId);

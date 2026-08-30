@@ -24,11 +24,16 @@ const checkout = fs.readFileSync(
   'utf8',
 );
 
+// Brace-balanced, not a fixed character count: these assertions used to slice
+// 900 chars, and broke the moment the branch legitimately grew (the empty-cart
+// bounce-out Alert pushed `return undefined;` to ~1850 chars in, so correct
+// code started failing).
+const { blockAfter } = require('../testHelpers/sourceBlock');
+
 describe('CheckoutScreen — pricing effect empty-cart branch', () => {
   it('resets isCalculating when checkoutItems empties out, not just bill/calcError', () => {
-    const idx = checkout.indexOf('if (checkoutItems.length === 0) {');
-    expect(idx).toBeGreaterThan(-1);
-    const branch = checkout.slice(idx, idx + 900);
+    const branch = blockAfter(checkout, 'if (checkoutItems.length === 0) {');
+    expect(branch).not.toBeNull();
     expect(branch).toMatch(/setIsCalculating\(false\);/);
     // Order matters for readability but not correctness — just confirm it's
     // actually inside this branch, not accidentally the one further down
@@ -38,8 +43,7 @@ describe('CheckoutScreen — pricing effect empty-cart branch', () => {
   });
 
   it('the reset lands before the early return, so it cannot be skipped', () => {
-    const idx = checkout.indexOf('if (checkoutItems.length === 0) {');
-    const branch = checkout.slice(idx, idx + 900);
+    const branch = blockAfter(checkout, 'if (checkoutItems.length === 0) {');
     const setIsCalculatingIdx = branch.indexOf('setIsCalculating(false);');
     const returnIdx = branch.indexOf('return undefined;');
     expect(setIsCalculatingIdx).toBeGreaterThan(-1);

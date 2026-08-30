@@ -99,6 +99,17 @@ const migrate = async () => {
       }
     };
 
+    const ensureUniqueIndex = async (tableName, indexName, columns) => {
+      const [rows] = await connection.query(
+        `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ? LIMIT 1`,
+        [config.MYSQL_DATABASE, tableName, indexName]
+      );
+      if (rows.length === 0) {
+        await connection.query(`ALTER TABLE ${tableName} ADD UNIQUE INDEX ${indexName} (${columns})`);
+      }
+    };
+
     // Users Table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS users (
@@ -940,6 +951,71 @@ const migrate = async () => {
     `);
     console.log('Rider order offers table ready.');
 
+    // --- One pending offer per order AND per rider, enforced by the DB ------
+    //
+    // createOffer used to guarantee "one pending offer per order" in app code
+    // with a `SELECT id FROM rider_order_offers WHERE order_id = ? AND
+    // status = 'pending' FOR UPDATE`. That SELECT matches no rows on a fresh
+    // order, so InnoDB takes an X gap lock on the SUPREMUM record of
+    // uq_offer_order_rider — and since a new order_id always sorts past the
+    // current max, every concurrent dispatch locks that same gap and then
+    // needs an insert-intention lock inside it for its own INSERT. That is a
+    // deadlock cycle: a 40-order / 12-rider burst lost 38 of 40 dispatches to
+    // ER_LOCK_DEADLOCK (scripts/riderDispatchLoadTest.js).
+    //
+    // These generated columns are NULL for every non-pending row (and MySQL
+    // unique keys ignore NULLs), so the two rules become plain unique keys
+    // the INSERT itself enforces. VIRTUAL, not STORED: a stored generated
+    // column forces an ALGORITHM=COPY table rebuild, which both fails with
+    // ER_CANNOT_ADD_FOREIGN (1215) on this FK-carrying table and would lock
+    // the live Area 1 offers table for the length of the copy. Virtual
+    // columns add INPLACE and the unique index materialises the value. The gap-locking pre-SELECT is gone, and the
+    // rider rule also closes the double-book race: listEligibleRiders' "no
+    // pending offer" filter was read outside any lock, so two dispatches in
+    // the same tick could both offer the same rider.
+    //
+    // Existing rows must satisfy the new keys before they can be added: keep
+    // the newest pending offer in each group and cancel the rest. Orders left
+    // without a pending offer are picked back up by recoverStuckAssignments
+    // on the next sweeper tick, so nothing is stranded.
+    await connection.query(`
+      UPDATE rider_order_offers o
+      JOIN (
+        SELECT order_id, MAX(id) AS keep_id
+        FROM rider_order_offers
+        WHERE status = 'pending'
+        GROUP BY order_id
+      ) k ON k.order_id = o.order_id AND o.id <> k.keep_id
+      SET o.status = 'cancelled', o.responded_at = NOW(), o.reject_reason = 'dedupe'
+      WHERE o.status = 'pending'
+    `);
+    await connection.query(`
+      UPDATE rider_order_offers o
+      JOIN (
+        SELECT rider_id, MAX(id) AS keep_id
+        FROM rider_order_offers
+        WHERE status = 'pending'
+        GROUP BY rider_id
+      ) k ON k.rider_id = o.rider_id AND o.id <> k.keep_id
+      SET o.status = 'cancelled', o.responded_at = NOW(), o.reject_reason = 'dedupe'
+      WHERE o.status = 'pending'
+    `);
+
+    await ensureColumn(
+      'rider_order_offers',
+      'pending_order_id',
+      "pending_order_id INT GENERATED ALWAYS AS (IF(status = 'pending', order_id, NULL)) VIRTUAL"
+    );
+    await ensureColumn(
+      'rider_order_offers',
+      'pending_rider_id',
+      "pending_rider_id INT GENERATED ALWAYS AS (IF(status = 'pending', rider_id, NULL)) VIRTUAL"
+    );
+
+    await ensureUniqueIndex('rider_order_offers', 'uq_offer_pending_order', 'pending_order_id');
+    await ensureUniqueIndex('rider_order_offers', 'uq_offer_pending_rider', 'pending_rider_id');
+    console.log('[migrate] rider_order_offers pending-offer unique keys in place.');
+
     // Settings Table
     await connection.query(`
       CREATE TABLE IF NOT EXISTS settings (
@@ -995,6 +1071,14 @@ const migrate = async () => {
     // this is on AND shop_latitude/shop_longitude are set AND at least one
     // active delivery_zones row exists — otherwise flat pricing is used.
     await ensureColumn('settings', 'radius_pricing_active', 'radius_pricing_active BOOLEAN DEFAULT FALSE AFTER rain_charge');
+
+    // Rider capacity multiplier: per-area tuning knob for the checkout
+    // capacity gate (orderController.js) and the rider-capacity polling
+    // endpoint (riderCapacityController.js) — areas differ in rider density
+    // and delivery distances, so one global RIDER_CAPACITY_MULTIPLIER was
+    // too blunt. Admin-editable via Settings; falls back to
+    // config.RIDER_CAPACITY_MULTIPLIER wherever a row predates this column.
+    await ensureColumn('settings', 'rider_capacity_multiplier', 'rider_capacity_multiplier DECIMAL(5, 2) DEFAULT 3.00 AFTER radius_pricing_active');
 
     // Drop free_delivery_above column if it exists (Task 1.1)
     try {
@@ -2097,17 +2181,6 @@ const migrate = async () => {
       );
       if (rows.length > 0) {
         await connection.query(`ALTER TABLE ${tableName} DROP INDEX ${indexName}`);
-      }
-    };
-
-    const ensureUniqueIndex = async (tableName, indexName, columns) => {
-      const [rows] = await connection.query(
-        `SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
-         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = ? LIMIT 1`,
-        [config.MYSQL_DATABASE, tableName, indexName]
-      );
-      if (rows.length === 0) {
-        await connection.query(`ALTER TABLE ${tableName} ADD UNIQUE INDEX ${indexName} (${columns})`);
       }
     };
 

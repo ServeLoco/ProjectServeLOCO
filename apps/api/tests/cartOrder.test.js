@@ -891,3 +891,26 @@ describe('combo items ignore a forged variantId', () => {
     expect(insertCall[1][4]).toBeNull(); // variant_label
   });
 });
+
+// The customer app uses this field to tell "you crossed into another delivery
+// area" (products are area-scoped, so the cart legitimately clears) apart from
+// "this item just went out of stock". Without it on the response the client
+// silently shows the wrong reason, so the contract is pinned here.
+describe('calculateCart exposes the resolved delivery area', () => {
+  beforeEach(() => { jest.clearAllMocks(); });
+
+  it('returns areaId / area_id alongside the bill', async () => {
+    pool.query.mockResolvedValueOnce([[{ shop_open: 1, delivery_charge: 10, night_charge: 0 }]]);
+    pool.query.mockResolvedValueOnce([[{ id: 1, name: 'Pizza', price: 100, available: 1 }]]);
+
+    const res = await request(app)
+      .post('/api/cart/calculate')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ items: [{ productId: 1, quantity: 1 }] });
+
+    expect(res.statusCode).toEqual(200);
+    expect(res.body.areaId).toBeDefined();
+    expect(res.body.area_id).toEqual(res.body.areaId);
+    expect(res.body.data.areaId).toEqual(res.body.areaId);
+  });
+});

@@ -40,6 +40,15 @@ const SHOP_EVENTS = [
   'settings.shop_open.updated',
 ];
 
+// Area riders became fully booked (or freed up) — checkout enables/disables
+// Place Order. Deliberately NOT in SHOP_EVENTS: those bust the product and
+// category SWR caches on every hit, and capacity has nothing to do with the
+// catalog. Checkout also polls /rider-capacity as the reconciler, since an
+// order simply ageing out of the lookback window fires no event.
+const RIDER_CAPACITY_EVENTS = [
+  'settings.rider_capacity.updated',
+];
+
 // Shop/admin toggles product available (OOS) — customers drop cart lines + UI.
 const PRODUCT_AVAILABILITY_EVENTS = [
   'product.availability.updated',
@@ -154,6 +163,14 @@ function subscribeProductAvailabilityEvents(handler) {
   return () => unsubscribers.forEach(unsubscribe => unsubscribe());
 }
 
+function subscribeRiderCapacityEvents(handler) {
+  const unsubscribers = RIDER_CAPACITY_EVENTS.map(eventName =>
+    subscribeRealtime(eventName, payload => handler({ eventName, payload }))
+  );
+
+  return () => unsubscribers.forEach(unsubscribe => unsubscribe());
+}
+
 function subscribeAuthRoleEvents(handler) {
   const unsubscribers = AUTH_ROLE_EVENTS.map(eventName =>
     subscribeRealtime(eventName, payload => handler({ eventName, payload }))
@@ -216,6 +233,10 @@ function bindSocketEvents(nextSocket) {
   });
 
   SHOP_EVENTS.forEach(eventName => {
+    nextSocket.on(eventName, payload => emitLocal(eventName, payload));
+  });
+
+  RIDER_CAPACITY_EVENTS.forEach(eventName => {
     nextSocket.on(eventName, payload => emitLocal(eventName, payload));
   });
 
@@ -346,6 +367,7 @@ export {
   subscribeOrderEvents,
   subscribeRealtime,
   subscribeRealtimeLifecycle,
+  subscribeRiderCapacityEvents,
   subscribeRiderLocation,
   subscribeShopEvents,
   subscribeProductAvailabilityEvents,

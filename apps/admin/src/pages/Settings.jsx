@@ -11,6 +11,11 @@ import MessageBanner from '../components/MessageBanner';
 import PickAreaNotice from '../components/PickAreaNotice';
 import { useAreaStore } from '../stores/useAreaStore';
 
+// Sanity ceiling for the rider capacity multiplier, mirroring
+// RIDER_CAPACITY_MULTIPLIER_MAX in apps/api settingsController.js — keep the
+// two in sync so the form never accepts a value the server will reject.
+const RIDER_CAPACITY_MULTIPLIER_MAX = 20;
+
 const DEFAULT_SETTINGS = {
   shop_open: false,
   delivery_available: false,
@@ -30,7 +35,8 @@ const DEFAULT_SETTINGS = {
   upi_qr_image_id: '',
   upi_qr_image_url: '',
   minimum_version: '',
-  current_version: ''
+  current_version: '',
+  rider_capacity_multiplier: 3
   // Location-based distance pricing is removed, so latitude/longitude/radius are obsolete.
 };
 
@@ -140,7 +146,6 @@ export default function Settings() {
       setSaving(true);
       setFormError(null);
       setFieldErrors({});
-      const nullableNumber = (value) => (value === '' || value === null || value === undefined ? null : Number(value));
       const nonNegativeFields = [
         ['delivery_charge', 'Delivery charge'],
         ['night_charge', 'Night delivery surcharge'],
@@ -163,6 +168,19 @@ export default function Settings() {
           focusFirstInvalid();
           return;
         }
+      }
+
+      // Bounded both ways, matching the server (settingsController.js).
+      // Below 1 the capacity gate closes the area to new checkouts on the
+      // first order; above the ceiling a typo silently switches the gate off.
+      const capacityMultiplier = Number(settings.rider_capacity_multiplier);
+      if (!Number.isFinite(capacityMultiplier) || capacityMultiplier < 1 || capacityMultiplier > RIDER_CAPACITY_MULTIPLIER_MAX) {
+        const msg = `Rider capacity multiplier must be between 1 and ${RIDER_CAPACITY_MULTIPLIER_MAX}.`;
+        setFieldErrors({ rider_capacity_multiplier: msg });
+        setFormError(msg);
+        setSaving(false);
+        focusFirstInvalid();
+        return;
       }
 
       // Night charge requires both start and end times when active.
@@ -212,6 +230,7 @@ export default function Settings() {
         upi_qr_image_id: settings.upi_qr_image_id || null,
         minimum_version: minVer || null,
         current_version: curVer || null,
+        rider_capacity_multiplier: capacityMultiplier,
       };
       const response = await SettingsApi.update(payload);
       if (response.data) {
@@ -284,6 +303,36 @@ export default function Settings() {
               <input type="checkbox" name="delivery_available" checked={settings.delivery_available} onChange={handleChange} />
               <span className="toggle-slider"></span>
             </label>
+          </div>
+        </div>
+      </section>
+
+      {/* ── 1b. Rider Capacity ──────────────────────────────────────────── */}
+      <section className="settings-section">
+        <h2 className="settings-section-title">Rider Capacity</h2>
+        <div className="settings-form-grid">
+          <div className="settings-form-group">
+            <label className="settings-label">Capacity Multiplier</label>
+            <input
+              type="number"
+              min="1"
+              max={RIDER_CAPACITY_MULTIPLIER_MAX}
+              step="0.5"
+              name="rider_capacity_multiplier"
+              className="settings-input"
+              value={settings.rider_capacity_multiplier}
+              onChange={handleChange}
+              aria-invalid={Boolean(fieldErrors.rider_capacity_multiplier)}
+              aria-errormessage={fieldErrors.rider_capacity_multiplier ? 'rider_capacity_multiplier-error' : undefined}
+            />
+            {fieldErrors.rider_capacity_multiplier && (
+              <span id="rider_capacity_multiplier-error" className="field-error" style={{ fontSize: '0.8rem', color: 'var(--danger-color)', marginTop: '4px' }}>
+                {fieldErrors.rider_capacity_multiplier}
+              </span>
+            )}
+            <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
+              New checkouts in this area are paused once active orders reach online riders × this number. Lower it for areas with longer delivery distances or fewer riders; raise it where riders turn orders around fast. Default 3.
+            </span>
           </div>
         </div>
       </section>
@@ -497,8 +546,8 @@ export default function Settings() {
                 🌧️ Rain Charge
               </strong>
               <span style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                When enabled, a fixed surcharge is added to every order's bill. Turn this on/off
-                manually during rain — unlike Night Delivery, there's no time window.
+                When enabled, a fixed surcharge is added to every order&apos;s bill. Turn this on/off
+                manually during rain — unlike Night Delivery, there&apos;s no time window.
               </span>
             </div>
             <label className="toggle-switch">
