@@ -912,18 +912,27 @@ export default function HomeScreen() {
         <View style={styles.topBarRibbonBar} />
       </View>
 
-      {insideDeliveryZone !== false && deliveryCoords && (
+      {/* Second clause (isInitialLocationSyncComplete, no deliveryCoords) is the
+          "Set" affordance restored after dd4f15d: a customer whose GPS never
+          resolves must still have a way to open the picker and set a location
+          manually, instead of the bar just never rendering. */}
+      {(deliveryCoords ? insideDeliveryZone !== false : isInitialLocationSyncComplete) && (
         <View style={styles.locationBar}>
           <AppIcon name="location" size={16} color={colors.saffron} />
           <Text style={styles.locationBarText} numberOfLines={1}>
             {/* zoneName is only ever set in zone-pricing mode. On a flat-pricing
                 install it stays null forever, so the "finding" placeholder must
-                not outlive the initial sync. */}
-            {deliveryZoneName
-              || (isInitialLocationSyncComplete ? 'Delivery location' : 'Finding your area…')}
+                not outlive the initial sync. deliveryCoords absent (this block
+                only renders that case once sync is complete — see the outer
+                condition) means GPS genuinely never resolved, distinct from
+                still-resolving. */}
+            {!deliveryCoords
+              ? "Couldn't get your location"
+              : deliveryZoneName
+                || (isInitialLocationSyncComplete ? 'Delivery location' : 'Finding your area…')}
           </Text>
-          <PressableScale onPress={() => setShowLocationPicker(true)} accessibilityRole="button" accessibilityLabel="Change delivery location">
-            <Text style={styles.locationBarChange}>Change</Text>
+          <PressableScale onPress={() => setShowLocationPicker(true)} accessibilityRole="button" accessibilityLabel={deliveryCoords ? 'Change delivery location' : 'Set delivery location'}>
+            <Text style={styles.locationBarChange}>{deliveryCoords ? 'Change' : 'Set'}</Text>
           </PressableScale>
         </View>
       )}

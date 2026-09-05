@@ -1174,12 +1174,18 @@ const reassignRider = async (orderId, targetRider, areaId) => {
     });
   } catch (_) { /* best-effort */ }
 
-  const offer = await createOffer(orderId, targetRider);
+  // createOffer resolves to { offer, conflict } — offer is only ever null on
+  // failure, so it's always a truthy object; destructure it, don't test the
+  // wrapper's own truthiness (that never fires and previously made this
+  // report ok:true even when the new offer was never actually created).
+  const { offer, conflict } = await createOffer(orderId, targetRider);
   if (!offer) {
     return {
       ok: false,
       code: 'CONFLICT',
-      message: 'Could not create an offer for the selected rider — try again',
+      message: conflict === 'order_not_assignable'
+        ? 'Order is no longer assignable — it may have moved past dispatch already'
+        : 'Could not create an offer for the selected rider — try again',
       status: 409,
     };
   }

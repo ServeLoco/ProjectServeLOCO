@@ -73,7 +73,7 @@ const asNonNegativeInteger = (value, fallback = 0) => {
   return Number.isInteger(numeric) && numeric >= 0 ? numeric : null;
 };
 
-const validateSectionPayload = async ({ title, slug, section_type, store_type, display_order, max_visible_items, starts_at, ends_at }, { partial = false } = {}) => {
+const validateSectionPayload = async ({ title, slug, section_type, store_type, display_order, max_visible_items, starts_at, ends_at }, { partial = false, areaId } = {}) => {
   if (!partial && (!slug || !section_type)) {
     return 'Slug and section type are required';
   }
@@ -87,7 +87,11 @@ const validateSectionPayload = async ({ title, slug, section_type, store_type, d
     return 'Invalid dashboard section type';
   }
   if (store_type !== undefined && store_type !== 'all' && !isSystemModeSlug(store_type)) {
-    const activeSlugs = await getActiveStoreModeSlugs();
+    // areaId threaded from the caller (requireOneArea) — every other
+    // getActiveStoreModeSlugs call site in this file already does this;
+    // this one defaulted to STORE_MODE_AREA_ID_STOPGAP (area 1) and
+    // rejected/silently passed the wrong area's custom store modes.
+    const activeSlugs = await getActiveStoreModeSlugs(areaId);
     if (!activeSlugs.includes(store_type)) {
       return 'Invalid store visibility';
     }
@@ -933,7 +937,7 @@ const createAdminSection = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Store type must be an explicit store mode slug for new sections. "all" is not allowed.' });
   }
 
-  const validationError = await validateSectionPayload(req.body);
+  const validationError = await validateSectionPayload(req.body, { areaId });
   if (validationError) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: validationError });
   }
@@ -1002,7 +1006,7 @@ const updateAdminSection = async (req, res) => {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'Store type must be an explicit store mode slug. "all" is no longer allowed.' });
   }
 
-  const validationError = await validateSectionPayload(req.body, { partial: true });
+  const validationError = await validateSectionPayload(req.body, { partial: true, areaId });
   if (validationError) {
     return res.status(400).json({ code: 'VALIDATION_ERROR', message: validationError });
   }

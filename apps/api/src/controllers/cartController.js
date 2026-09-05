@@ -66,8 +66,18 @@ const calculateCart = async (req, res) => {
   // Trust the flag outright rather than re-deriving "was there a pin" here:
   // the two predicates drifting apart is exactly how a pin sent under the
   // lat/lng aliases slipped the area gate before.
-  const deliveryAreaId = req.adminAreaOverride
+  const resolvedPricingAreaId = req.adminAreaOverride
     || await resolveAreaIdForPricing(customerLat, customerLng);
+  // A valid pin that matches no zone in any area resolves to null (see
+  // resolveAreaIdForPricing) rather than defaulting — this preview still
+  // needs a concrete area id to scope its (purely informational) catalog/
+  // settings queries with, but must never report the cart as deliverable.
+  // pinMatchedNoZone forces deliveryWithinRange = false below regardless of
+  // what pricing mode the fallback area happens to use.
+  const pinMatchedNoZone = resolvedPricingAreaId === null;
+  const deliveryAreaId = pinMatchedNoZone
+    ? (await getDefaultArea())?.id || 1
+    : resolvedPricingAreaId;
 
   const [settingRows] = await pool.query(
     'SELECT shop_open, delivery_charge, night_charge, night_charge_start, night_charge_end, rain_charge_enabled, rain_charge, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, delivery_radius_km, shop_latitude, shop_longitude, radius_pricing_active FROM settings WHERE area_id = ? LIMIT 1',
@@ -313,6 +323,13 @@ const calculateCart = async (req, res) => {
   } else if (pricing.excluded) {
     deliveryWithinRange = false;
     deliveryMessage = pricing.exclusionMessage;
+  }
+  // Overrides whatever the block above decided: a pin that matched no zone
+  // anywhere is never deliverable, even in flat-pricing mode where
+  // resolveDeliveryPricing has no geography check of its own to catch it.
+  if (pinMatchedNoZone) {
+    deliveryWithinRange = false;
+    if (!requiresLocation) deliveryMessage = 'Delivery is not available at this location.';
   }
 
   let nightCharge = pricing.nightCharge > 0 ? toMoney(pricing.nightCharge) : 0;
@@ -715,21 +732,30 @@ const validateCouponHandler = async (req, res) => {
   let deliveryAreaId = null;
   let zoneId = null;
   if (hasCoords) {
+    // resolveAreaIdForPricing returns null when the pin is valid but matches
+    // no zone in any area — fall back to the same no-pin area resolution
+    // used below rather than let deliveryAreaId stay null, which coupons.js
+    // treats as "run unscoped" (the exact leak this file's finding #12 fix
+    // was written to close, just reached via a different path).
     deliveryAreaId = await resolveAreaIdForPricing(customerLat, customerLng);
-    const [settingRows] = await pool.query(
-      'SELECT delivery_charge, night_charge, night_charge_start, night_charge_end, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings WHERE area_id = ? LIMIT 1',
-      [deliveryAreaId]
-    );
-    const zoneSettings = settingRows[0] || {};
-    if (zoneSettings.radius_pricing_active) {
-      const pricing = resolveDeliveryPricing({
-        customerLat,
-        customerLng,
-        deliveryType: 'standard',
-        settings: zoneSettings,
-        zones: await loadActiveZones(pool, deliveryAreaId),
-      });
-      zoneId = pricing.zone ? pricing.zone.id : null;
+    if (deliveryAreaId === null) {
+      deliveryAreaId = await resolveNoPinAreaId(userId);
+    } else {
+      const [settingRows] = await pool.query(
+        'SELECT delivery_charge, night_charge, night_charge_start, night_charge_end, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings WHERE area_id = ? LIMIT 1',
+        [deliveryAreaId]
+      );
+      const zoneSettings = settingRows[0] || {};
+      if (zoneSettings.radius_pricing_active) {
+        const pricing = resolveDeliveryPricing({
+          customerLat,
+          customerLng,
+          deliveryType: 'standard',
+          settings: zoneSettings,
+          zones: await loadActiveZones(pool, deliveryAreaId),
+        });
+        zoneId = pricing.zone ? pricing.zone.id : null;
+      }
     }
   } else {
     deliveryAreaId = await resolveNoPinAreaId(userId);
@@ -837,21 +863,28 @@ const getAvailableCoupons = async (req, res) => {
   let deliveryAreaId = null;
   let zoneId = null;
   if (hasCoords) {
+    // Same null-means-"matched no zone" fallback as validateCouponHandler
+    // above — must not leave deliveryAreaId null (coupons.js runs unscoped
+    // for null).
     deliveryAreaId = await resolveAreaIdForPricing(customerLat, customerLng);
-    const [settingRows] = await pool.query(
-      'SELECT delivery_charge, night_charge, night_charge_start, night_charge_end, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings WHERE area_id = ? LIMIT 1',
-      [deliveryAreaId]
-    );
-    const zoneSettings = settingRows[0] || {};
-    if (zoneSettings.radius_pricing_active) {
-      const pricing = resolveDeliveryPricing({
-        customerLat,
-        customerLng,
-        deliveryType: 'standard',
-        settings: zoneSettings,
-        zones: await loadActiveZones(pool, deliveryAreaId),
-      });
-      zoneId = pricing.zone ? pricing.zone.id : null;
+    if (deliveryAreaId === null) {
+      deliveryAreaId = await resolveNoPinAreaId(userId);
+    } else {
+      const [settingRows] = await pool.query(
+        'SELECT delivery_charge, night_charge, night_charge_start, night_charge_end, fast_delivery_enabled, fast_delivery_charge, standard_delivery_minutes, fast_delivery_minutes, shop_latitude, shop_longitude, radius_pricing_active FROM settings WHERE area_id = ? LIMIT 1',
+        [deliveryAreaId]
+      );
+      const zoneSettings = settingRows[0] || {};
+      if (zoneSettings.radius_pricing_active) {
+        const pricing = resolveDeliveryPricing({
+          customerLat,
+          customerLng,
+          deliveryType: 'standard',
+          settings: zoneSettings,
+          zones: await loadActiveZones(pool, deliveryAreaId),
+        });
+        zoneId = pricing.zone ? pricing.zone.id : null;
+      }
     }
   } else {
     deliveryAreaId = await resolveNoPinAreaId(userId);

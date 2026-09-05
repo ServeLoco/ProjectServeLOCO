@@ -1140,8 +1140,16 @@ const migrate = async () => {
       // swallowed — without this constraint, deleting a parent zone leaves
       // children pointing at a row that no longer exists, and the delete
       // handler's "children fall back to ON DELETE SET NULL" promise is a lie.
+      // MariaDB (unlike real MySQL) reports this exact redundant re-add —
+      // the CREATE TABLE above already declares this FK inline, so on a
+      // fresh install this ALTER is always a genuine duplicate from the
+      // start — as ER_CANT_CREATE_TABLE/1005 wrapping InnoDB errno 121,
+      // not the 1061/1826 codes real MySQL uses for "already exists".
+      // Narrow to that specific wrapped-121 shape so a genuine table-create
+      // failure for any other reason still throws.
       const alreadyExists = e.code === 'ER_DUP_KEYNAME' || e.code === 'ER_FK_DUP_NAME'
-        || e.errno === 1061 || e.errno === 1826;
+        || e.errno === 1061 || e.errno === 1826
+        || (e.errno === 1005 && /errno:\s*121\b/.test(e.sqlMessage || ''));
       if (!alreadyExists) throw e;
     }
 
@@ -1369,10 +1377,27 @@ const migrate = async () => {
       { name: 'Daily Essentials', slug: 'daily-essentials', type: 'packed', display_order: 6 }
     ];
 
+    // Same area_id gap as the sample-products seed below: categories.area_id
+    // is NOT NULL with no DEFAULT once the area-scoping section has run.
+    // INSERT IGNORE means this fails safe (skips the row) rather than
+    // crashing, but silently becomes permanently-inert dead code instead of
+    // actually seeding a missing default category on a fresh/rehearsal DB.
+    const [categoriesAreaCol] = await connection.query(`
+      SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'categories' AND COLUMN_NAME = 'area_id'
+    `, [config.MYSQL_DATABASE]);
+    const categoriesHasAreaId = categoriesAreaCol.length > 0;
+
     for (const cat of categories) {
-      await connection.query(`
-        INSERT IGNORE INTO categories (name, slug, type, display_order) VALUES (?, ?, ?, ?)
-      `, [cat.name, cat.slug, cat.type, cat.display_order]);
+      if (categoriesHasAreaId) {
+        await connection.query(`
+          INSERT IGNORE INTO categories (name, slug, type, display_order, area_id) VALUES (?, ?, ?, ?, 1)
+        `, [cat.name, cat.slug, cat.type, cat.display_order]);
+      } else {
+        await connection.query(`
+          INSERT IGNORE INTO categories (name, slug, type, display_order) VALUES (?, ?, ?, ?)
+        `, [cat.name, cat.slug, cat.type, cat.display_order]);
+      }
       await connection.query(`
         UPDATE categories SET display_order = ? WHERE slug = ? AND display_order = 0
       `, [cat.display_order, cat.slug]);
@@ -1392,13 +1417,35 @@ const migrate = async () => {
       { name: 'Amul Milk', price: 33.00, category_id: catMap['daily-essentials'], unit: '500ml' }
     ];
 
+    // products.area_id is NOT NULL with no DEFAULT once the area-scoping
+    // section below has run once (any restart after that point re-enters
+    // this seed block on the same connection). This plain, non-IGNORE INSERT
+    // predates that column and was never updated for it — on a rerun where
+    // any of the 6 hardcoded names is missing from the catalog, it would
+    // throw ER_NO_DEFAULT_FOR_FIELD and crash the whole migrate step (and,
+    // via "migrate.js && node src/server.js", the boot). Area 1 is the same
+    // default every other legacy-row backfill in this file uses.
+    const [productsAreaCol] = await connection.query(`
+      SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'products' AND COLUMN_NAME = 'area_id'
+    `, [config.MYSQL_DATABASE]);
+    const productsHasAreaId = productsAreaCol.length > 0;
+
     for (const prod of sampleProducts) {
       if (prod.category_id) {
-        await connection.query(`
-          INSERT INTO products (name, price, category_id, unit) 
-          SELECT ?, ?, ?, ? FROM DUAL
-          WHERE NOT EXISTS (SELECT 1 FROM products WHERE name = ?)
-        `, [prod.name, prod.price, prod.category_id, prod.unit, prod.name]);
+        if (productsHasAreaId) {
+          await connection.query(`
+            INSERT INTO products (name, price, category_id, unit, area_id)
+            SELECT ?, ?, ?, ?, 1 FROM DUAL
+            WHERE NOT EXISTS (SELECT 1 FROM products WHERE name = ?)
+          `, [prod.name, prod.price, prod.category_id, prod.unit, prod.name]);
+        } else {
+          await connection.query(`
+            INSERT INTO products (name, price, category_id, unit)
+            SELECT ?, ?, ?, ? FROM DUAL
+            WHERE NOT EXISTS (SELECT 1 FROM products WHERE name = ?)
+          `, [prod.name, prod.price, prod.category_id, prod.unit, prod.name]);
+        }
       }
     }
     console.log('Seeded sample products.');
@@ -2166,9 +2213,11 @@ const migrate = async () => {
         // ER_DUP_KEYNAME / ER_FK_DUP_NAME / errno 1061 (dup index) / 1826
         // (dup FK) just mean a previous run already added it. Anything
         // else must not be silently swallowed — see the delivery_zones
-        // parent FK above for the same reasoning.
+        // parent FK above for the same reasoning, including the MariaDB
+        // wrapped-121 case documented there.
         const alreadyExists = e.code === 'ER_DUP_KEYNAME' || e.code === 'ER_FK_DUP_NAME'
-          || e.errno === 1061 || e.errno === 1826;
+          || e.errno === 1061 || e.errno === 1826
+          || (e.errno === 1005 && /errno:\s*121\b/.test(e.sqlMessage || ''));
         if (!alreadyExists) throw e;
       }
     };

@@ -111,9 +111,15 @@ describe('POST /api/cart/validate-coupon — zone is derived server-side', () =>
   });
 
   it('resolves no zone when the pin is outside every zone', async () => {
+    // A pin that matches no zone anywhere now falls back through
+    // resolveNoPinAreaId (bug fix — a matched-no-zone pin must not silently
+    // default to the wrong area's catalog; see areaScope.resolveAreaIdForPricing).
+    // Its getDefaultArea() call hits the 60s areas cache queueAreaResolution
+    // already warmed above (loadAllAreas), so only the user lookup makes a
+    // real query here — same real DB round trip count as before this fix,
+    // just a different function reaching it.
     queueAreaResolution();
-    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]);
-    pool.query.mockResolvedValueOnce([[ZONE_ROW]]);
+    pool.query.mockResolvedValueOnce([[{ last_area_id: null }]]); // resolveNoPinAreaId: user lookup
 
     const far = offsetPoint(CENTER.lat, CENTER.lng, 0, 50);
     const res = await request(app)
@@ -123,7 +129,7 @@ describe('POST /api/cart/validate-coupon — zone is derived server-side', () =>
 
     expect(res.statusCode).toEqual(200);
     expect(validateCoupon).toHaveBeenCalledWith(
-      expect.objectContaining({ zoneId: null })
+      expect.objectContaining({ zoneId: null, areaId: 1 })
     );
   });
 
@@ -194,9 +200,9 @@ describe('GET /api/cart/available-coupons — zone is derived server-side', () =
   });
 
   it('resolves no zone when the pin is outside every zone', async () => {
+    // Same fallback as the validate-coupon test above — see its comment.
     queueAreaResolution();
-    pool.query.mockResolvedValueOnce([[ZONE_SETTINGS]]);
-    pool.query.mockResolvedValueOnce([[ZONE_ROW]]);
+    pool.query.mockResolvedValueOnce([[{ last_area_id: null }]]); // resolveNoPinAreaId: user lookup
 
     const far = offsetPoint(CENTER.lat, CENTER.lng, 0, 50);
     const res = await request(app)
@@ -206,7 +212,7 @@ describe('GET /api/cart/available-coupons — zone is derived server-side', () =
 
     expect(res.statusCode).toEqual(200);
     expect(findApplicableCoupons).toHaveBeenCalledWith(
-      expect.objectContaining({ zoneId: null })
+      expect.objectContaining({ zoneId: null, areaId: 1 })
     );
   });
 

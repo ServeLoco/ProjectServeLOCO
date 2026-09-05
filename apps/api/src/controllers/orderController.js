@@ -223,6 +223,16 @@ const createOrder = async (req, res) => {
     // adminCreateOrder proxies into this function too.
     const deliveryAreaId = req.adminAreaOverride
       || await resolveAreaIdForPricing(latitude, longitude);
+    // resolveAreaIdForPricing returns null (rather than defaulting) when the
+    // pin is valid but matches no zone in any area — flat-pricing mode has no
+    // other geography check, so this must hard-reject here rather than let a
+    // wrongly-defaulted area's catalog/shops/riders fulfill the order.
+    if (deliveryAreaId === null) {
+      throw new OrderError(
+        'Delivery is not available at this location. Please choose a closer address.',
+        'OUT_OF_DELIVERY_RANGE'
+      );
+    }
     const deliveryArea = await getAreaById(deliveryAreaId);
 
     // The two capacity counters ride along as subqueries on the settings read

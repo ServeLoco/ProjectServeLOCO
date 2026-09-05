@@ -217,7 +217,11 @@ function findAreaScopingViolations() {
 
   for (const file of files) {
     const text = fs.readFileSync(file, 'utf8');
-    const relFile = path.relative(path.join(__dirname, '..'), file);
+    // ALLOWLIST entries are forward-slash strings; path.relative returns
+    // backslash-separated paths on Windows, which never matched an entry —
+    // isAllowlisted silently allowlisted nothing on a Windows checkout,
+    // failing this test on every genuinely-allowlisted call site.
+    const relFile = path.relative(path.join(__dirname, '..'), file).split(path.sep).join('/');
 
     const queryCallRegex = /\.query\s*\(/g;
     let callMatch;

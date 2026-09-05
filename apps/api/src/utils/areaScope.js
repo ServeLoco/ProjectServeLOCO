@@ -112,19 +112,69 @@ async function resolveAreaForPoint(lat, lng) {
 
 /**
  * Best-effort area id for a pricing calculation (cart preview, order
- * creation) that already has its own "nothing matched" safety net —
- * resolveDeliveryPricing falls back to flat pricing when zones is empty,
- * regardless of WHY it's empty. Those callers don't need resolveAreaForPoint's
- * strict null-means-"we don't deliver here" distinction (that's a checkout-
- * gating concern, TASK 13/27's job); they just need a definite area id to
- * scope the zone/exclusion-zone queries with. Falls back to the default
- * area when the pin is missing/invalid or matches no zone.
+ * creation). Falls back to the default area when the pin itself is
+ * missing/invalid, or when delivery_zones simply aren't configured anywhere
+ * — a purely-flat-pricing install (radius_pricing_active off, no zones ever
+ * drawn) is a legitimate, common setup with no geography to check against;
+ * defaulting there is the existing, correct behavior and must not change.
+ *
+ * A VALID pin that matches no zone in an area that HAS zones configured is
+ * the one case that must NOT default: resolveDeliveryPricing's own "nothing
+ * matched" fallback only fires in zone-pricing mode, and does nothing in
+ * flat-pricing mode — flat mode has no geography check at all. Defaulting
+ * for that specific case previously meant a customer standing in Area 2
+ * whose pin matched none of Area 2's real zones could be silently priced,
+ * cataloged and fulfilled against Area 1 instead — the cross-area
+ * contamination §2.4 exists to prevent. Returns `null` only for that case;
+ * callers that need a non-null area id for informational/catalog scoping
+ * while still rejecting the order must fall back explicitly and force their
+ * own out-of-range signal (see cartController.calculateCart).
  */
 async function resolveAreaIdForPricing(lat, lng) {
-  const resolved = await resolveAreaForPoint(lat, lng);
-  if (resolved) return resolved.areaId;
-  const defaultArea = await getDefaultArea();
-  return defaultArea ? defaultArea.id : 1;
+  // Number(null) === 0 and Number.isFinite(0) is true — a genuinely missing
+  // pin (null/undefined/'') would otherwise read as a valid (0,0) fix, the
+  // same "Atlantic off Africa" trap guarded against elsewhere in this
+  // codebase (see utils/riders.js's distanceToNearestPickupKm).
+  const isBlank = (v) => v === undefined || v === null || v === '';
+  if (isBlank(lat) || isBlank(lng)) {
+    const defaultArea = await getDefaultArea();
+    return defaultArea ? defaultArea.id : 1;
+  }
+  const numLat = Number(lat);
+  const numLng = Number(lng);
+  if (!Number.isFinite(numLat) || !Number.isFinite(numLng)) {
+    const defaultArea = await getDefaultArea();
+    return defaultArea ? defaultArea.id : 1;
+  }
+
+  // Mirrors resolveAreaForPoint's own candidate/zone-match loop, but tracks
+  // whether ANY candidate area actually has zones defined — that's the
+  // signal for whether geography is even in use, which resolveAreaForPoint
+  // itself doesn't expose (it only reports match/no-match, not why).
+  //
+  // Zero CANDIDATES is a different case from candidates-with-no-zones, and
+  // must not be folded into the same fallback: an area with no bbox yet is
+  // ALWAYS a candidate (see bboxCandidateAreas), so candidates is only ever
+  // empty when every area already has a computed bbox (i.e. already has
+  // real zones somewhere) and this point falls outside all of them — a
+  // point structurally outside every area's territory, not a "zones aren't
+  // configured yet" install. That must return null like any other
+  // no-zone-matched case, not default (verified live: a pin 5° north of a
+  // real area with real zones was defaulting into that area's catalog).
+  const candidates = await bboxCandidateAreas(numLat, numLng);
+  if (candidates.length === 0) return null;
+  let anyZonesConfigured = false;
+  for (const area of candidates) {
+    const zones = await loadZonesForArea(area.id);
+    if (zones.length > 0) anyZonesConfigured = true;
+    const zone = matchZone(numLat, numLng, zones);
+    if (zone) return area.id;
+  }
+  if (!anyZonesConfigured) {
+    const defaultArea = await getDefaultArea();
+    return defaultArea ? defaultArea.id : 1;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------

@@ -76,7 +76,7 @@ const createAdminNotification = async ({ type, title, body, relatedUrl = null, r
       // push is an external Expo HTTP round trip — blocking their response on
       // it added hundreds of ms for a side effect the caller never reads.
       // Failures still log inside notifyMobileAdminsPush/expoPush.
-      notifyMobileAdminsPush({ title, body, type, relatedId })
+      notifyMobileAdminsPush({ title, body, type, relatedId, areaId })
         .catch((err) => console.error('[adminNotifications] push failed:', err.message));
     }
     return notification;

@@ -2358,10 +2358,15 @@ const assertOrderAreaMatchesPin = async (req, res) => {
     return true;
   }
   const orderAreaId = await resolveAreaIdForPricing(latitude, longitude);
+  // orderAreaId is null when the pin is valid but matches no zone in any
+  // area — always rejects below (null !== a real area id), which is correct:
+  // an order that resolves to nowhere can't belong to the admin's area either.
   if (orderAreaId !== Number(adminAreaId)) {
     res.status(403).json({
       code: 'FORBIDDEN',
-      message: `Order resolves to area ${orderAreaId}; you are scoped to area ${adminAreaId}. Set the pin (and X-Area-Id) for that area.`,
+      message: orderAreaId === null
+        ? `This pin doesn't fall inside any delivery area. Set a pin inside area ${adminAreaId} (and X-Area-Id) for that area.`
+        : `Order resolves to area ${orderAreaId}; you are scoped to area ${adminAreaId}. Set the pin (and X-Area-Id) for that area.`,
     });
     return false;
   }

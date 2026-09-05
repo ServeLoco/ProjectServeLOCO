@@ -598,7 +598,15 @@ export default function CheckoutScreen() {
             const cooldown = Number(data?.cooldownMinutes ?? data?.cooldown_minutes);
             if (Number.isFinite(cooldown) && cooldown > 0) setCapacityCooldownMin(cooldown);
           })
-          .catch(() => {});
+          .catch(() => {
+            // Fail OPEN, not stuck: a network blip must never leave a stale
+            // atCapacity=true blocking the button indefinitely (up to the
+            // next successful poll, unbounded on a bad connection) — this is
+            // only a courtesy banner, createOrder's own gate re-validates
+            // capacity live at submit time regardless of what this shows.
+            if (!isActive) return;
+            setAtCapacity(false);
+          });
       };
 
       checkCapacity();
@@ -617,8 +625,15 @@ export default function CheckoutScreen() {
         // verdict does not apply to the order being placed. Drop anything
         // that doesn't match the area the poll above actually resolved; the
         // poll (which uses the right pin) remains the source of truth.
+        //
+        // Before the first poll has resolved (capacityAreaIdRef still null),
+        // there's nothing to compare against — an event landing in that
+        // window would previously pass through unfiltered and could apply a
+        // different area's verdict. Drop it too; checkCapacity() runs
+        // synchronously on mount so this window is brief, and the poll's own
+        // result lands moments later regardless.
         const eventAreaId = payload.areaId ?? payload.area_id ?? null;
-        if (capacityAreaIdRef.current != null && eventAreaId !== capacityAreaIdRef.current) return;
+        if (capacityAreaIdRef.current == null || eventAreaId !== capacityAreaIdRef.current) return;
         setAtCapacity(Boolean(payload.atCapacity ?? payload.at_capacity));
         const cooldown = Number(payload.cooldownMinutes ?? payload.cooldown_minutes);
         if (Number.isFinite(cooldown) && cooldown > 0) setCapacityCooldownMin(cooldown);
